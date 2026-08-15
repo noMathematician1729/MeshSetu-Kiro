@@ -5,9 +5,13 @@ import android.os.Build
 
 object BlePermissions {
     fun runtimePermissions(sdk: Int = Build.VERSION.SDK_INT): Array<String> = if (sdk >= 31) {
-        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.RECORD_AUDIO)
+        buildList {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (sdk >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+        }.toTypedArray()
     } else {
-        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.RECORD_AUDIO)
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 }
-

@@ -28,4 +28,10 @@ class FrameTest {
         val buffer = ReassemblyBuffer(1)
         assertEquals(true, buffer.add(frame)); assertEquals(false, buffer.add(frame)); assertEquals(1, buffer.received)
     }
+
+    @Test fun helloRoundTripsAndRejectsUnknownVersion() {
+        val hello = Hello(42L, 7u, capabilities = 9, maxObjectBytes = 1024, nowEpochSec = 10)
+        assertEquals(hello, HelloCodec.decode(HelloCodec.encode(hello)))
+        assertEquals(null, HelloCodec.decode(HelloCodec.encode(hello).also { it[0] = 2 }))
+    }
 }

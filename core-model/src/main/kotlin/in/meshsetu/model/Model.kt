@@ -34,7 +34,13 @@ data class MeshEnvelope(
     }
 }
 
-data class EncryptedObject(val objectId: ULong, val trafficClass: TrafficClass, val bytes: ByteArray, val expiresAtMs: Long)
+data class EncryptedObject(
+    val objectId: ULong,
+    val trafficClass: TrafficClass,
+    val bytes: ByteArray,
+    val expiresAtMs: Long,
+    val createdAtMs: Long = 0,
+)
 
 data class ReceivedObject(val envelope: MeshEnvelope, val peerId: String, val receivedAtMs: Long)
 

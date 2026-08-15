@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothGattService
 import android.os.ParcelUuid
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 import java.util.UUID
 
 object MeshGatt {
@@ -15,6 +16,11 @@ object MeshGatt {
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     val PARCEL_SERVICE = ParcelUuid(SERVICE)
     const val DISCOVERY_VERSION: Byte = 1
+    const val DEVELOPMENT_MANUFACTURER_ID: Int = 0xFFFF
+
+    fun siteFingerprint(siteId: String, namespace: String = "demo"): Long = ByteBuffer.wrap(
+        MessageDigest.getInstance("SHA-256").digest("$siteId|$namespace".toByteArray()).copyOfRange(0, 8)
+    ).order(ByteOrder.BIG_ENDIAN).long
 
     fun service(): BluetoothGattService = BluetoothGattService(SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY).apply {
         addCharacteristic(BluetoothGattCharacteristic(RX, BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE, BluetoothGattCharacteristic.PERMISSION_WRITE))

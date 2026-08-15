@@ -7,5 +7,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "MeshSetu"
-include(":core-model", ":core-protocol", ":core-ble")
-
+include(":app", ":core-model", ":core-protocol", ":core-ble")
