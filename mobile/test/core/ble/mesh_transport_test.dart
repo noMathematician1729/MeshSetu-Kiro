@@ -18,11 +18,15 @@ class _FakeLink implements PeerLink {
     this.closeStreamsOnClose = true,
     this.sendSucceeds = true,
     this.throwOnSend = false,
+    this.sendGate,
+    this.onSend,
   });
 
   final bool closeStreamsOnClose;
   final bool sendSucceeds;
   final bool throwOnSend;
+  final Future<void>? sendGate;
+  final void Function()? onSend;
   @override
   final int mtu = 185;
 
@@ -43,6 +47,8 @@ class _FakeLink implements PeerLink {
   @override
   Future<bool> send(Uint8List bytes, {bool withResponse = true}) async {
     sentFrames.add(bytes);
+    onSend?.call();
+    if (sendGate != null) await sendGate;
     if (throwOnSend) throw StateError('simulated link failure');
     if (!sendSucceeds) return false;
     peer._incomingController.add(bytes);
@@ -84,6 +90,7 @@ MeshEnvelope _envelope({
   required PriorityBand priority,
   required PayloadType payloadType,
   int hopLimit = 0,
+  int payloadSize = 3,
 }) => MeshEnvelope(
   objectId: objectId,
   eventId: 'event-$objectId',
@@ -95,7 +102,7 @@ MeshEnvelope _envelope({
   hopLimit: hopLimit,
   priority: priority,
   payloadType: payloadType,
-  payload: Uint8List.fromList([1, 2, 3]),
+  payload: Uint8List.fromList(List<int>.filled(payloadSize, 1)),
   originEphemeralId: 1,
 );
 
@@ -173,6 +180,46 @@ void main() {
 
     expect(arrivalOrder, [sos.objectId, bulk.objectId]);
   });
+
+  test(
+    'urgent traffic interrupts a fragmented transfer between frames',
+    () async {
+      final gate = Completer<void>();
+      final firstFrameStarted = Completer<void>();
+      final coordinator = _coordinator();
+      final link = _FakeLink(
+        sendGate: gate.future,
+        onSend: () {
+          if (!firstFrameStarted.isCompleted) firstFrameStarted.complete();
+        },
+      )..peer = _FakeLink();
+      coordinator.attach('peer-b', link, siteFingerprint: 1);
+
+      final bulk = _envelope(
+        objectId: 11,
+        priority: PriorityBand.p3Bulk,
+        payloadType: PayloadType.voiceObject,
+        payloadSize: 700,
+      );
+      final sos = _envelope(
+        objectId: 12,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      );
+      await coordinator.relay.submit(bulk);
+      final pump = coordinator.tick();
+      await firstFrameStarted.future;
+      await coordinator.send(sos);
+      gate.complete();
+      await pump;
+
+      final ids = [
+        for (final bytes in link.sentFrames) FrameCodec.decode(bytes).objectId,
+      ];
+      expect(ids.first, bulk.objectId);
+      expect(ids[1], sos.objectId);
+    },
+  );
 
   test('replicates to up to maxReplicationPeers attached peers', () async {
     final coordinatorA = _coordinator();

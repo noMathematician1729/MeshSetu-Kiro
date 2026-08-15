@@ -151,6 +151,7 @@ class MeshTransportCoordinator implements MeshTransport {
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
   bool _stopped = false;
+  bool _pumpActive = false;
 
   @override
   Stream<ReceivedObject> get incoming => _receivedController.stream;
@@ -180,6 +181,18 @@ class MeshTransportCoordinator implements MeshTransport {
             await _ensureServerPeer(frame.deviceId);
             if (_stopped) return;
             if (!_acceptsHello(frame.bytes)) return;
+            _onMetrics([
+              RelayMetric(
+                'frame_received',
+                peerId: frame.deviceId,
+                value: frame.bytes.length,
+              ),
+              RelayMetric(
+                'frame_rx',
+                peerId: frame.deviceId,
+                value: frame.bytes.length,
+              ),
+            ]);
             final result = await relay.receive(frame.deviceId, frame.bytes);
             _rememberInboundPeers(frame.deviceId, result.metrics);
             _markPeerSeen(frame.deviceId);
@@ -293,6 +306,14 @@ class MeshTransportCoordinator implements MeshTransport {
               await link.close();
               return;
             }
+            _onMetrics([
+              RelayMetric(
+                'frame_received',
+                peerId: peerId,
+                value: bytes.length,
+              ),
+              RelayMetric('frame_rx', peerId: peerId, value: bytes.length),
+            ]);
             final result = await relay.receive(peerId, bytes);
             _rememberInboundPeers(peerId, result.metrics);
             _markPeerSeen(peerId);
@@ -309,13 +330,23 @@ class MeshTransportCoordinator implements MeshTransport {
   }
 
   @override
-  Future<SendTicket> send(MeshEnvelope value) =>
-      _relayLock.synchronized(() async {
-        await relay.submit(value);
-        _onMetrics([RelayMetric('outbox_enqueued', objectId: value.objectId)]);
-        await _pump();
-        return SendTicket(value.objectId);
-      });
+  Future<SendTicket> send(MeshEnvelope value) async {
+    // Let an urgent object enter the durable scheduler while a lower-priority
+    // frame is awaiting the radio. The pump notices it between frames.
+    if (_pumpActive) {
+      final encrypted = await relay.crypto.encrypt(value);
+      relay.requeue(encrypted);
+      _onMetrics([RelayMetric('outbox_enqueued', objectId: value.objectId)]);
+      unawaited(_pump());
+      return SendTicket(value.objectId);
+    }
+    return _relayLock.synchronized(() async {
+      await relay.submit(value);
+      _onMetrics([RelayMetric('outbox_enqueued', objectId: value.objectId)]);
+      await _pump();
+      return SendTicket(value.objectId);
+    });
+  }
 
   /// Requests missing chunks from each attached peer, drains any newly
   /// queued outbound objects, and forwards accumulated metrics. Meant to be
@@ -324,7 +355,7 @@ class MeshTransportCoordinator implements MeshTransport {
   Future<void> tick() => _relayLock.synchronized(() async {
     for (final entry in _sessions.entries.toList()) {
       for (final frame in relay.missingForPeer(entry.key)) {
-        await entry.value.send(frame, withResponse: true);
+        await _sendControl(entry.key, entry.value, frame);
       }
     }
     await _pump();
@@ -332,60 +363,100 @@ class MeshTransportCoordinator implements MeshTransport {
   });
 
   Future<void> _pump() => _pumpLock.synchronized(() async {
-    relay.retryExpired();
-    if (_stopped || _sessions.isEmpty) return;
-    while (true) {
-      final objectToSend = relay.nextOutbound();
-      if (objectToSend == null) return;
-      var sentToAny = false;
-      var deferred = false;
-      var successfulPeers = 0;
-      final sourcePeer = _lastInboundPeerByObject[objectToSend.objectId];
-      final peers = _sessions.entries
-          .where((entry) => entry.key != sourcePeer)
-          .toList();
-      if (peers.isEmpty) {
-        relay.requeue(objectToSend);
-        return;
-      }
-      for (final peer in peers) {
-        if (successfulPeers >= maxReplicationPeers) break;
-        try {
-          final frames = fragment(
-            objectId: objectToSend.objectId,
-            priority: objectToSend.trafficClass.rank,
-            encrypted: objectToSend.bytes,
-            mtu: peer.value.mtu,
-          );
-          var allOk = true;
-          for (final frame in frames) {
-            final encoded = FrameCodec.encode(frame);
-            final intercepted = frameInterceptor == null
-                ? encoded
-                : frameInterceptor!.apply(encoded);
-            if (intercepted == null) {
-              allOk = false;
-              break;
+    _pumpActive = true;
+    try {
+      relay.retryExpired();
+      if (_stopped || _sessions.isEmpty) return;
+      while (true) {
+        final objectToSend = relay.nextOutbound();
+        if (objectToSend == null) return;
+        var sentToAny = false;
+        var deferred = false;
+        var preempted = false;
+        var successfulPeers = 0;
+        final sourcePeer = _lastInboundPeerByObject[objectToSend.objectId];
+        final peers = _sessions.entries
+            .where((entry) => entry.key != sourcePeer)
+            .toList();
+        if (peers.isEmpty) {
+          relay.requeue(objectToSend);
+          return;
+        }
+        for (final peer in peers) {
+          if (successfulPeers >= maxReplicationPeers) break;
+          try {
+            final frames = fragment(
+              objectId: objectToSend.objectId,
+              priority: objectToSend.trafficClass.rank,
+              encrypted: objectToSend.bytes,
+              mtu: peer.value.mtu,
+            );
+            var allOk = true;
+            for (final frame in frames) {
+              final encoded = FrameCodec.encode(frame);
+              final intercepted = frameInterceptor == null
+                  ? encoded
+                  : frameInterceptor!.apply(encoded);
+              if (intercepted == null) {
+                allOk = false;
+                break;
+              }
+              final ok = await peer.value.send(intercepted, withResponse: true);
+              if (!ok) {
+                allOk = false;
+                break;
+              }
+              if (relay.scheduler.hasHigherPriorityThan(
+                objectToSend.trafficClass,
+              )) {
+                preempted = true;
+                break;
+              }
             }
-            final ok = await peer.value.send(intercepted, withResponse: true);
-            if (!ok) {
-              allOk = false;
-              break;
+            if (preempted) break;
+            if (allOk) {
+              relay.markSent(objectToSend, peer.key);
+              sentToAny = true;
+              successfulPeers++;
+              _onMetrics([
+                RelayMetric(
+                  'frames_sent',
+                  objectId: objectToSend.objectId,
+                  peerId: peer.key,
+                  value: frames.length,
+                ),
+                RelayMetric(
+                  'frame_tx',
+                  objectId: objectToSend.objectId,
+                  peerId: peer.key,
+                  value: frames.length,
+                ),
+              ]);
+            } else {
+              _onMetrics([
+                RelayMetric(
+                  'send_failed',
+                  objectId: objectToSend.objectId,
+                  peerId: peer.key,
+                ),
+              ]);
             }
-          }
-          if (allOk) {
-            relay.markSent(objectToSend, peer.key);
-            sentToAny = true;
-            successfulPeers++;
-            _onMetrics([
-              RelayMetric(
-                'frames_sent',
-                objectId: objectToSend.objectId,
-                peerId: peer.key,
-                value: frames.length,
-              ),
-            ]);
-          } else {
+          } on ArgumentError catch (_) {
+            // fragment() rejects an object that can't fit this peer's MTU
+            // budget; defer voice evidence (graceful degradation) instead of
+            // blocking the queue on it.
+            if (objectToSend.trafficClass == TrafficClass.voiceEvidence) {
+              relay.defer(objectToSend);
+              deferred = true;
+              _onMetrics([
+                RelayMetric(
+                  'deferred_mtu',
+                  objectId: objectToSend.objectId,
+                  peerId: peer.key,
+                ),
+              ]);
+            }
+          } catch (_) {
             _onMetrics([
               RelayMetric(
                 'send_failed',
@@ -394,35 +465,18 @@ class MeshTransportCoordinator implements MeshTransport {
               ),
             ]);
           }
-        } on ArgumentError catch (_) {
-          // fragment() rejects an object that can't fit this peer's MTU
-          // budget; defer voice evidence (graceful degradation) instead of
-          // blocking the queue on it.
-          if (objectToSend.trafficClass == TrafficClass.voiceEvidence) {
-            relay.defer(objectToSend);
-            deferred = true;
-            _onMetrics([
-              RelayMetric(
-                'deferred_mtu',
-                objectId: objectToSend.objectId,
-                peerId: peer.key,
-              ),
-            ]);
-          }
-        } catch (_) {
-          _onMetrics([
-            RelayMetric(
-              'send_failed',
-              objectId: objectToSend.objectId,
-              peerId: peer.key,
-            ),
-          ]);
+        }
+        if (preempted) {
+          relay.requeue(objectToSend);
+          continue;
+        }
+        if (!sentToAny) {
+          if (!deferred) relay.requeue(objectToSend);
+          return;
         }
       }
-      if (!sentToAny) {
-        if (!deferred) relay.requeue(objectToSend);
-        return;
-      }
+    } finally {
+      _pumpActive = false;
     }
   });
 

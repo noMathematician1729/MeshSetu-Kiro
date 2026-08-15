@@ -263,6 +263,14 @@ class MeshRelayEngine {
         value: envelope.hopCount,
       ),
     );
+    _metrics.add(
+      RelayMetric(
+        'object_latency_ms',
+        objectId: envelope.objectId,
+        peerId: peerId,
+        value: (now - envelope.createdAtMs).clamp(0, 0x7FFFFFFF),
+      ),
+    );
     if (envelope.hopCount < envelope.hopLimit) {
       final relayed = await crypto.encrypt(
         envelope.copyWith(hopCount: envelope.hopCount + 1),

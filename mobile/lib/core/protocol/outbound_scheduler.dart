@@ -34,6 +34,13 @@ class OutboundScheduler {
   }
 
   int size() => _queue.length;
+
+  bool hasHigherPriorityThan(TrafficClass trafficClass) {
+    for (final value in _queue.unorderedElements) {
+      if (value.trafficClass.rank < trafficClass.rank) return true;
+    }
+    return false;
+  }
 }
 
 class RecentObjectCache {

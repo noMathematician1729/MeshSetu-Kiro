@@ -17,6 +17,8 @@ abstract final class MeshGatt {
   /// manufacturer-data tag for discovery metadata (see `ble_discovery.dart`)
   /// — swap for an assigned company ID before any real deployment.
   static const int developmentManufacturerId = 0xFFFF;
+  static const int beaconManufacturerId = 0xFFFE;
+  static const int beaconVersion = 1;
 
   static int siteFingerprint(String siteId, {String namespace = 'demo'}) {
     final digest = sha256.convert(utf8.encode('$siteId|$namespace')).bytes;
@@ -46,6 +48,32 @@ abstract final class MeshGatt {
       ),
     ],
   );
+}
+
+class BeaconMetadata {
+  const BeaconMetadata(this.anchorId);
+
+  final String anchorId;
+
+  Uint8List encode() {
+    final bytes = Uint8List.fromList(utf8.encode(anchorId));
+    if (bytes.isEmpty || bytes.length > 24) {
+      throw ArgumentError('anchorId must be 1..24 UTF-8 bytes');
+    }
+    return Uint8List.fromList([MeshGatt.beaconVersion, ...bytes]);
+  }
+
+  static BeaconMetadata? decode(Uint8List bytes) {
+    if (bytes.length < 2 || bytes.first != MeshGatt.beaconVersion) return null;
+    final String anchorId;
+    try {
+      anchorId = utf8.decode(bytes.sublist(1), allowMalformed: false);
+    } on FormatException {
+      return null;
+    }
+    if (anchorId.isEmpty || utf8.encode(anchorId).length > 24) return null;
+    return BeaconMetadata(anchorId);
+  }
 }
 
 class DiscoveryMetadata {

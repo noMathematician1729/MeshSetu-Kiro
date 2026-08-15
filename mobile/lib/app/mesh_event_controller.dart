@@ -28,12 +28,34 @@ class MeshEventController {
   static const int capabilityRelay = 1;
   static const int capabilityVoice = 1 << 3;
 
+  MeshEventController({
+    this.onPeerState,
+    this.onMeshStatus,
+    this.onMetrics,
+    this.onBeaconObservations,
+    this.zoneResolver,
+    this.onZoneEstimate,
+  });
+
+  final void Function(List<PeerState> peers)? onPeerState;
+  final void Function(String status)? onMeshStatus;
+  final void Function(List<RelayMetric> metrics)? onMetrics;
+  final void Function(List<BeaconObservation> observations)?
+  onBeaconObservations;
+  final ZoneResolver? zoneResolver;
+  final void Function(ZoneEstimate estimate)? onZoneEstimate;
+
   MeshTransportCoordinator? _coordinator;
   int _localToken = 0;
   IOSink? _metricSink;
+  JsonLineMetricSink? _jsonMetricSink;
   bool _looping = false;
   bool _starting = false;
   bool _stopRequested = false;
+  Completer<void>? _scanCancel;
+  Future<void>? _scanFuture;
+  final Map<String, int> _retryAfterMs = {};
+  StreamSubscription<List<PeerState>>? _peerStateSubscription;
 
   MeshTransportCoordinator? get coordinator => _coordinator;
 
@@ -62,7 +84,7 @@ class MeshEventController {
       final metricFile = File('${documentsDir.path}/mesh-metrics.ndjson');
       metricSink = metricFile.openWrite(mode: FileMode.append);
       _metricSink = metricSink;
-      final jsonSink = JsonLineMetricSink(metricSink);
+      _jsonMetricSink = JsonLineMetricSink(metricSink);
 
       final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
         siteId,
@@ -85,24 +107,14 @@ class MeshEventController {
         server: server,
         relay: relay,
         localHello: hello,
-        onMetrics: (metrics) {
-          final now = DateTime.now().millisecondsSinceEpoch;
-          for (final metric in metrics) {
-            jsonSink.write(
-              ProtocolMetric(
-                timeMs: now,
-                peer: metric.peerId,
-                kind: metric.kind,
-                value: metric.value,
-                detail: metric.objectId?.toString(),
-              ),
-            );
-          }
-        },
+        onMetrics: _reportMetrics,
       );
       await coordinator.start();
       if (_stopRequested) throw StateError('mesh start cancelled');
       _coordinator = coordinator;
+      _peerStateSubscription = coordinator.peerState.listen((peers) {
+        onPeerState?.call(peers);
+      });
 
       await MeshAdvertiser.start(
         DiscoveryMetadata(
@@ -114,9 +126,18 @@ class MeshEventController {
       if (_stopRequested) throw StateError('mesh start cancelled');
 
       _looping = true;
-      unawaited(_scanLoop(siteFingerprint, coordinator));
+      _scanCancel = Completer<void>();
+      _scanFuture = _scanLoop(siteFingerprint, coordinator);
+      unawaited(_scanFuture!);
+      onMeshStatus?.call('advertising');
     } catch (_) {
       _looping = false;
+      _scanCancel?.complete();
+      _scanCancel = null;
+      await _scanFuture;
+      _scanFuture = null;
+      await _peerStateSubscription?.cancel();
+      _peerStateSubscription = null;
       _coordinator = null;
       await coordinator?.stop();
       try {
@@ -126,6 +147,7 @@ class MeshEventController {
       }
       await metricSink?.close();
       _metricSink = null;
+      _jsonMetricSink = null;
       rethrow;
     } finally {
       _starting = false;
@@ -139,43 +161,116 @@ class MeshEventController {
     while (_looping) {
       List<DiscoveredPeer> peers;
       try {
-        peers = await MeshScanner.scan(expectedFingerprint: siteFingerprint);
+        onMeshStatus?.call('scanning');
+        peers = await MeshScanner.scan(
+          expectedFingerprint: siteFingerprint,
+          cancel: _scanCancel?.future,
+        );
       } catch (_) {
         if (!_looping) return;
-        await Future<void>.delayed(const Duration(seconds: 2));
+        if (!await _waitOrStop(const Duration(seconds: 2))) return;
         continue;
       }
+      _reportMetrics([
+        for (final peer in peers)
+          RelayMetric(
+            'scan_found',
+            peerId: peer.device.deviceId,
+            value: peer.device.rssi,
+          ),
+      ]);
+      final candidates = <DiscoveredPeer>[];
+      final now = DateTime.now().millisecondsSinceEpoch;
       for (final peer in peers) {
-        if (!_looping) return;
-        if (!shouldInitiate(_localToken, peer.metadata.connectionToken)) {
+        if (candidates.length >= MeshTransportCoordinator.maxReplicationPeers) {
+          break;
+        }
+        if (!shouldInitiate(_localToken, peer.metadata.connectionToken) ||
+            coordinator.hasPeer(peer.device.deviceId) ||
+            (_retryAfterMs[peer.device.deviceId] ?? 0) > now) {
           continue;
         }
-        if (coordinator.hasPeer(peer.device.deviceId)) continue;
-        GattPeerSession? session;
-        try {
-          session = GattPeerSession.open(peer.device.deviceId);
-          await session.awaitReady().timeout(const Duration(seconds: 8));
-          if (!_looping) {
-            await session.close();
-            return;
-          }
-          coordinator.attach(
-            peer.device.deviceId,
-            GattPeerSessionLink(session),
-            siteFingerprint: peer.metadata.fingerprint,
-            rssi: peer.device.rssi,
-          );
-        } catch (_) {
-          unawaited(session?.close());
-        }
+        candidates.add(peer);
       }
+      await Future.wait(
+        candidates.map((peer) => _connectPeer(peer, coordinator)),
+      );
       if (!_looping) return;
+      try {
+        final beacons = await MeshBeaconScanner.scan(
+          cancel: _scanCancel?.future,
+        );
+        if (beacons.isNotEmpty) {
+          _reportMetrics([
+            for (final beacon in beacons)
+              RelayMetric(
+                'beacon_found',
+                peerId: beacon.anchorId,
+                value: beacon.rssi,
+              ),
+          ]);
+          onBeaconObservations?.call(beacons);
+          // ponytail: until a site manifest supplies anchor-to-zone names,
+          // use the stable anchor ID as the demo logical zone.
+          final resolver =
+              zoneResolver ??
+              ZoneResolver({
+                for (final beacon in beacons)
+                  beacon.anchorId: ZoneAnchor(
+                    anchorId: beacon.anchorId,
+                    logicalZone: beacon.anchorId,
+                  ),
+              });
+          onZoneEstimate?.call(
+            resolver.estimate(beacons, DateTime.now().millisecondsSinceEpoch),
+          );
+        }
+      } catch (_) {
+        // Peer discovery remains useful if beacon scanning is unavailable.
+      }
       try {
         await coordinator.tick();
       } catch (_) {
         // A transient peer failure must not terminate the long-running scan.
       }
-      await Future<void>.delayed(const Duration(seconds: 2));
+      onMeshStatus?.call('idle');
+      if (!await _waitOrStop(const Duration(seconds: 2))) return;
+    }
+  }
+
+  Future<bool> _waitOrStop(Duration duration) async {
+    final cancel = _scanCancel?.future;
+    if (cancel == null) {
+      await Future<void>.delayed(duration);
+      return _looping;
+    }
+    await Future.any<void>([Future<void>.delayed(duration), cancel]);
+    return _looping;
+  }
+
+  Future<void> _connectPeer(
+    DiscoveredPeer peer,
+    MeshTransportCoordinator coordinator,
+  ) async {
+    GattPeerSession? session;
+    try {
+      session = GattPeerSession.open(peer.device.deviceId);
+      await session.awaitReady().timeout(const Duration(seconds: 8));
+      if (!_looping) {
+        await session.close();
+        return;
+      }
+      coordinator.attach(
+        peer.device.deviceId,
+        GattPeerSessionLink(session),
+        siteFingerprint: peer.metadata.fingerprint,
+        rssi: peer.device.rssi,
+      );
+      _retryAfterMs.remove(peer.device.deviceId);
+    } catch (_) {
+      _retryAfterMs[peer.device.deviceId] =
+          DateTime.now().millisecondsSinceEpoch + 10000;
+      unawaited(session?.close());
     }
   }
 
@@ -210,6 +305,13 @@ class MeshEventController {
   Future<void> stop() async {
     _stopRequested = true;
     _looping = false;
+    if (!(_scanCancel?.isCompleted ?? true)) {
+      _scanCancel!.complete();
+    }
+    final scanFuture = _scanFuture;
+    _scanCancel = null;
+    _scanFuture = null;
+    _retryAfterMs.clear();
     final coordinator = _coordinator;
     _coordinator = null;
     final metricSink = _metricSink;
@@ -220,9 +322,32 @@ class MeshEventController {
       // Advertising may already have stopped or never started.
     }
     try {
+      await scanFuture;
+      await _peerStateSubscription?.cancel();
+      _peerStateSubscription = null;
       await coordinator?.stop();
     } finally {
       await metricSink?.close();
+      _jsonMetricSink = null;
+      onMeshStatus?.call('stopped');
+    }
+  }
+
+  void _reportMetrics(List<RelayMetric> metrics) {
+    onMetrics?.call(metrics);
+    final sink = _jsonMetricSink;
+    if (sink == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final metric in metrics) {
+      sink.write(
+        ProtocolMetric(
+          timeMs: now,
+          peer: metric.peerId,
+          kind: metric.kind,
+          value: metric.value,
+          detail: metric.objectId?.toString(),
+        ),
+      );
     }
   }
 

@@ -28,7 +28,56 @@ class _MeshEventTaskHandler extends TaskHandler {
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     DartPluginRegistrant.ensureInitialized();
     try {
-      final controller = MeshEventController();
+      final controller = MeshEventController(
+        onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_peers',
+          'peers': [
+            for (final peer in peers)
+              {
+                'peerId': peer.peerId,
+                'connected': peer.connected,
+                'mtu': peer.mtu,
+                'rssi': peer.rssi,
+                'queuedObjects': peer.queuedObjects,
+                'lastSeenMs': peer.lastSeenMs,
+              },
+          ],
+        }),
+        onMeshStatus: (status) => FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_status',
+          'value': status,
+        }),
+        onMetrics: (metrics) => FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_metric',
+          'metrics': [
+            for (final metric in metrics)
+              {
+                'kind': metric.kind,
+                'peerId': metric.peerId,
+                'value': metric.value,
+                'objectId': metric.objectId,
+              },
+          ],
+        }),
+        onBeaconObservations: (observations) =>
+            FlutterForegroundTask.sendDataToMain({
+              'status': 'mesh_beacons',
+              'beacons': [
+                for (final beacon in observations)
+                  {
+                    'anchorId': beacon.anchorId,
+                    'rssi': beacon.rssi,
+                    'observedAtMs': beacon.observedAtMs,
+                  },
+              ],
+            }),
+        onZoneEstimate: (estimate) => FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_zone',
+          'zone': estimate.logicalZone,
+          'anchorId': estimate.anchorId,
+          'uncertainty': estimate.uncertainty,
+        }),
+      );
       await controller.start();
       _controller = controller;
       controller.setDebugLossInjection(_debugLossEnabled);
@@ -97,6 +146,11 @@ class _EventModeScreenState extends State<EventModeScreen> {
   bool _eventModeActive = false;
   bool _debugLossEnabled = false;
   String _status = 'MeshSetu\nEvent mode is off';
+  String _meshStatus = 'stopped';
+  String _lastMetric = 'none';
+  String _nearestBeacon = 'none';
+  String _zone = 'unknown';
+  List<Map<String, dynamic>> _peerDebug = const [];
 
   @override
   void initState() {
@@ -154,6 +208,41 @@ class _EventModeScreenState extends State<EventModeScreen> {
           _status =
               'MeshSetu\n${data['message'] ?? 'Test SOS could not queue'}';
         });
+      case 'mesh_status':
+        setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
+      case 'mesh_metric':
+        final metrics = data['metrics'];
+        if (metrics is List && metrics.isNotEmpty && metrics.first is Map) {
+          final metric = Map<String, dynamic>.from(metrics.first as Map);
+          setState(
+            () => _lastMetric =
+                '${metric['kind']}${metric['peerId'] == null ? '' : ' (${metric['peerId']})'}',
+          );
+        }
+      case 'mesh_peers':
+        final peers = data['peers'];
+        if (peers is List) {
+          setState(
+            () => _peerDebug = [
+              for (final peer in peers)
+                if (peer is Map) Map<String, dynamic>.from(peer),
+            ],
+          );
+        }
+      case 'mesh_beacons':
+        final beacons = data['beacons'];
+        if (beacons is List && beacons.isNotEmpty && beacons.first is Map) {
+          final beacon = Map<String, dynamic>.from(beacons.first as Map);
+          setState(
+            () => _nearestBeacon =
+                '${beacon['anchorId']} (${beacon['rssi'] ?? '?'} dBm)',
+          );
+        }
+      case 'mesh_zone':
+        setState(
+          () => _zone =
+              '${data['zone'] ?? 'unknown'} (${data['uncertainty'] ?? 'unknown'})',
+        );
     }
   }
 
@@ -216,6 +305,9 @@ class _EventModeScreenState extends State<EventModeScreen> {
     setState(() {
       _eventModeActive = false;
       _debugLossEnabled = false;
+      _meshStatus = 'stopped';
+      _peerDebug = const [];
+      _zone = 'unknown';
       _status = 'MeshSetu\nEvent mode is off';
     });
   }
@@ -270,6 +362,11 @@ class _EventModeScreenState extends State<EventModeScreen> {
                       }
                     : null,
               ),
+              const SizedBox(height: 12),
+              Text('Mesh: $_meshStatus · peers: ${_peerDebug.length}'),
+              Text('Nearest beacon: $_nearestBeacon'),
+              Text('Zone: $_zone'),
+              Text('Last metric: $_lastMetric'),
             ],
           ),
         ),

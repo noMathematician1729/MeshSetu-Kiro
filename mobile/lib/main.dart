@@ -4,11 +4,8 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'app/event_mode_screen.dart';
 
 /// Port of `in.meshsetu.app.MainActivity` (Kotlin `app/` module) — the
-/// runnable shell. Same scope as the Kotlin source: it shows a single
-/// screen and starts a foreground service with a persistent notification.
-/// It does not itself wire up BLE scanning/advertising/relay — the Kotlin
-/// `MeshEventService` didn't either; both are shells for `core-ble` to be
-/// driven from later.
+/// runnable shell. The foreground task owns BLE discovery, relay transport,
+/// metrics, and the small diagnostic bridge displayed by the event screen.
 void main() {
   FlutterForegroundTask.initCommunicationPort();
   runApp(const MeshSetuApp());

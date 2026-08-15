@@ -37,7 +37,7 @@ class MeshGattServer {
   final Set<String> _subscribers = {};
   int _pendingFrames = 0;
   bool _running = false;
-  final AsyncLock _notifyLock = AsyncLock();
+  final Map<String, AsyncLock> _notifyLocks = {};
   StreamSubscription<BlePeripheralCharacteristicSubscriptionChanged>?
   _subscriptionSubscription;
   StreamSubscription<BlePeripheralMtuChanged>? _mtuSubscription;
@@ -124,14 +124,19 @@ class MeshGattServer {
   /// Serializes notifications and applies conservative pacing because
   /// universal_ble does not expose Android's onNotificationSent callback.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
-    if (!_subscribers.contains(deviceId)) return false;
-    return _notifyLock.synchronized(() async {
+    if (bytes.isEmpty || !_subscribers.contains(deviceId)) return false;
+    final lock = _notifyLocks.putIfAbsent(deviceId, AsyncLock.new);
+    return lock.synchronized(() async {
       if (!_subscribers.contains(deviceId)) return false;
-      await UniversalBlePeripheral.updateCharacteristicValue(
-        characteristicId: MeshGatt.tx,
-        value: bytes,
-        deviceId: deviceId,
-      );
+      try {
+        await UniversalBlePeripheral.updateCharacteristicValue(
+          characteristicId: MeshGatt.tx,
+          value: bytes,
+          deviceId: deviceId,
+        ).timeout(const Duration(seconds: 2));
+      } catch (_) {
+        return false;
+      }
       // ponytail: replace this conservative pacing with onNotificationSent
       // when universal_ble exposes that platform callback.
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -150,6 +155,7 @@ class MeshGattServer {
     _subscribers.clear();
     _mtus.clear();
     _pendingFrames = 0;
+    _notifyLocks.clear();
     await _frames.close();
   }
 }
