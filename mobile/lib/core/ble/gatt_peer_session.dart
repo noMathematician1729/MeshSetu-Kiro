@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:universal_ble/universal_ble.dart';
 
+import 'async_lock.dart';
 import 'mesh_gatt.dart';
 
 /// Port of `in.meshsetu.ble.GattPeerSession` (Kotlin `GattPeerSession.kt`) —
@@ -37,6 +38,8 @@ class GattPeerSession {
       UniversalBle.characteristicValueStream(deviceId, MeshGatt.tx);
 
   final Completer<void> _ready = Completer<void>();
+  final AsyncLock _writeLock = AsyncLock();
+  StreamSubscription<bool>? _connectionSubscription;
 
   static GattPeerSession open(String deviceId) {
     final session = GattPeerSession._(deviceId);
@@ -46,6 +49,11 @@ class GattPeerSession {
 
   Future<void> _connect() async {
     try {
+      _connectionSubscription = UniversalBle.connectionStream(deviceId).listen((
+        connected,
+      ) {
+        if (!connected) _markDisconnected();
+      });
       await UniversalBle.connect(deviceId);
       _setState(PeerSessionState.negotiating);
       try {
@@ -71,25 +79,34 @@ class GattPeerSession {
   Future<void> awaitReady() => _ready.future;
 
   Future<void> send(Uint8List bytes, {bool withResponse = true}) async {
-    await awaitReady();
-    await UniversalBle.write(
-      deviceId,
-      MeshGatt.service,
-      MeshGatt.rx,
-      bytes,
-      withoutResponse: !withResponse,
-    );
+    await _writeLock.synchronized(() async {
+      await awaitReady();
+      await UniversalBle.write(
+        deviceId,
+        MeshGatt.service,
+        MeshGatt.rx,
+        bytes,
+        withoutResponse: !withResponse,
+      );
+    });
   }
 
   Future<void> close() async {
-    _setState(PeerSessionState.disconnected);
-    if (!_ready.isCompleted) {
-      _ready.completeError(StateError('GATT disconnected'));
-    }
+    _markDisconnected();
     try {
       await UniversalBle.disconnect(deviceId);
     } finally {
+      await _connectionSubscription?.cancel();
+      _connectionSubscription = null;
       await _stateController.close();
+    }
+  }
+
+  void _markDisconnected() {
+    if (_state == PeerSessionState.disconnected) return;
+    _setState(PeerSessionState.disconnected);
+    if (!_ready.isCompleted) {
+      _ready.completeError(StateError('GATT disconnected'));
     }
   }
 

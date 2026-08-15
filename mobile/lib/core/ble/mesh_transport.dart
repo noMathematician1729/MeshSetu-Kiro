@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import '../model/model.dart';
 import '../protocol/frame.dart';
 import '../protocol/relay_engine.dart';
+import '../protocol/protocol_metrics.dart';
+import 'async_lock.dart';
 import 'gatt_peer_session.dart';
 import 'gatt_server.dart';
 
@@ -62,26 +64,6 @@ class GattPeerSessionLink implements PeerLink {
   Future<void> close() => _session.close();
 }
 
-/// A minimal async mutex, standing in for Kotlin's `kotlinx.coroutines.sync.Mutex`.
-/// Dart has no stdlib/pub equivalent worth adding a dependency for; this is
-/// the whole implementation — queue continuations behind the previous one.
-class _AsyncLock {
-  Future<void> _tail = Future<void>.value();
-
-  Future<T> synchronized<T>(Future<T> Function() action) {
-    final previous = _tail;
-    final release = Completer<void>();
-    _tail = release.future;
-    return previous.then((_) async {
-      try {
-        return await action();
-      } finally {
-        release.complete();
-      }
-    });
-  }
-}
-
 typedef MetricsListener = void Function(List<RelayMetric> metrics);
 
 /// Port of `in.meshsetu.ble.MeshTransportCoordinator` (Kotlin
@@ -96,6 +78,7 @@ class MeshTransportCoordinator implements MeshTransport {
     required this.server,
     required this.relay,
     this.localHello,
+    this.frameInterceptor,
     MetricsListener? onMetrics,
   }) : _onMetrics = onMetrics ?? ((_) {}) {
     relay.addPersistListener((envelope, peerId) {
@@ -114,6 +97,7 @@ class MeshTransportCoordinator implements MeshTransport {
   final MeshGattServer server;
   final MeshRelayEngine relay;
   final Hello? localHello;
+  final LossyFrameInterceptor? frameInterceptor;
   final MetricsListener _onMetrics;
 
   final StreamController<ReceivedObject> _receivedController =
@@ -126,7 +110,8 @@ class MeshTransportCoordinator implements MeshTransport {
   final Map<String, List<StreamSubscription<Object?>>> _sessionSubscriptions =
       {};
   StreamSubscription<Object?>? _serverSubscription;
-  final _AsyncLock _pumpLock = _AsyncLock();
+  final AsyncLock _pumpLock = AsyncLock();
+  final AsyncLock _relayLock = AsyncLock();
 
   @override
   Stream<ReceivedObject> get incoming => _receivedController.stream;
@@ -136,14 +121,22 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     await server.start();
-    _serverSubscription = server.incoming.listen((frame) async {
-      if (!_acceptsHello(frame.bytes)) return;
-      final result = await relay.receive(frame.deviceId, frame.bytes);
-      _onMetrics(result.metrics);
-      for (final controlFrame in result.controlFrames) {
-        await server.notifyAwait(frame.deviceId, controlFrame);
-      }
-      await _pump();
+    _serverSubscription = server.incoming.listen((frame) {
+      unawaited(
+        _relayLock.synchronized(() async {
+          try {
+            if (!_acceptsHello(frame.bytes)) return;
+            final result = await relay.receive(frame.deviceId, frame.bytes);
+            _onMetrics(result.metrics);
+            for (final controlFrame in result.controlFrames) {
+              await server.notifyAwait(frame.deviceId, controlFrame);
+            }
+            await _pump();
+          } finally {
+            server.acknowledge(frame);
+          }
+        }),
+      );
     });
   }
 
@@ -203,34 +196,39 @@ class MeshTransportCoordinator implements MeshTransport {
       );
     }
     subscriptions.add(
-      link.incoming.listen((bytes) async {
-        if (!_acceptsHello(bytes)) {
-          await link.close();
-          return;
-        }
-        final result = await relay.receive(peerId, bytes);
-        _onMetrics(result.metrics);
-        for (final controlFrame in result.controlFrames) {
-          await link.send(controlFrame, withResponse: true);
-        }
-        await _pump();
+      link.incoming.listen((bytes) {
+        unawaited(
+          _relayLock.synchronized(() async {
+            if (!_acceptsHello(bytes)) {
+              await link.close();
+              return;
+            }
+            final result = await relay.receive(peerId, bytes);
+            _onMetrics(result.metrics);
+            for (final controlFrame in result.controlFrames) {
+              await link.send(controlFrame, withResponse: true);
+            }
+            await _pump();
+          }),
+        );
       }),
     );
     _sessionSubscriptions[peerId] = subscriptions;
   }
 
   @override
-  Future<SendTicket> send(MeshEnvelope value) async {
-    await relay.submit(value);
-    await _pump();
-    return SendTicket(value.objectId);
-  }
+  Future<SendTicket> send(MeshEnvelope value) =>
+      _relayLock.synchronized(() async {
+        await relay.submit(value);
+        await _pump();
+        return SendTicket(value.objectId);
+      });
 
   /// Requests missing chunks from each attached peer, drains any newly
   /// queued outbound objects, and forwards accumulated metrics. Meant to be
   /// called periodically (the Kotlin source's `MeshEventService` calls this
   /// on a 2s loop alongside its scan cycle).
-  Future<void> tick() async {
+  Future<void> tick() => _relayLock.synchronized(() async {
     for (final entry in _sessions.entries.toList()) {
       for (final frame in relay.missingForPeer(entry.key)) {
         await entry.value.send(frame, withResponse: true);
@@ -238,7 +236,7 @@ class MeshTransportCoordinator implements MeshTransport {
     }
     await _pump();
     _onMetrics(relay.drainMetrics());
-  }
+  });
 
   Future<void> _pump() => _pumpLock.synchronized(() async {
     relay.retryExpired();
@@ -260,10 +258,15 @@ class MeshTransportCoordinator implements MeshTransport {
           );
           var allOk = true;
           for (final frame in frames) {
-            final ok = await peer.value.send(
-              FrameCodec.encode(frame),
-              withResponse: true,
-            );
+            final encoded = FrameCodec.encode(frame);
+            final intercepted = frameInterceptor == null
+                ? encoded
+                : frameInterceptor!.apply(encoded);
+            if (intercepted == null) {
+              allOk = false;
+              break;
+            }
+            final ok = await peer.value.send(intercepted, withResponse: true);
             if (!ok) {
               allOk = false;
               break;
@@ -306,13 +309,16 @@ class MeshTransportCoordinator implements MeshTransport {
       }
     }
     _sessionSubscriptions.clear();
-    for (final link in _sessions.values) {
+    await _relayLock.idle;
+    for (final link in _sessions.values.toList()) {
       await link.close();
     }
     _sessions.clear();
     await server.stop();
     _peers = [];
-    _peersController.add(_peers);
+    if (!_peersController.isClosed) _peersController.add(_peers);
+    await _receivedController.close();
+    await _peersController.close();
   }
 
   void _detach(String peerId) {

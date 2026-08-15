@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
 import 'mesh_event_controller.dart';
@@ -64,26 +65,56 @@ class _EventModeScreenState extends State<EventModeScreen> {
   }
 
   Future<void> _startEventMode() async {
-    final androidInfo = await DeviceInfoPlugin().androidInfo;
-    await BlePermissions.request(sdkInt: androidInfo.version.sdkInt);
+    try {
+      final androidInfo = await DeviceInfoPlugin().androidInfo;
+      final permissions = await BlePermissions.request(
+        sdkInt: androidInfo.version.sdkInt,
+      );
+      if (permissions.values.any(
+        (status) => status != PermissionStatus.granted,
+      )) {
+        throw StateError('Bluetooth permissions are required for event mode');
+      }
 
-    if (await FlutterForegroundTask.checkNotificationPermission() !=
-        NotificationPermission.granted) {
-      await FlutterForegroundTask.requestNotificationPermission();
+      if (await FlutterForegroundTask.checkNotificationPermission() !=
+          NotificationPermission.granted) {
+        await FlutterForegroundTask.requestNotificationPermission();
+      }
+      if (await FlutterForegroundTask.checkNotificationPermission() !=
+          NotificationPermission.granted) {
+        throw StateError('Notification permission is required for event mode');
+      }
+
+      final result = await FlutterForegroundTask.startService(
+        serviceId: _notificationServiceId,
+        notificationTitle: 'MeshSetu event mode active',
+        notificationText: 'BLE relay is listening for nearby peers',
+        callback: meshEventTaskCallback,
+      );
+      if (result is! ServiceRequestSuccess) {
+        throw StateError('Unable to start the foreground service');
+      }
+
+      await _controller.start();
+      if (!mounted) return;
+      setState(() {
+        _eventModeActive = true;
+        _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
+      });
+    } catch (error) {
+      await _controller.stop();
+      await FlutterForegroundTask.stopService();
+      if (mounted) setState(() => _status = 'MeshSetu\n$error');
     }
+  }
 
-    await FlutterForegroundTask.startService(
-      serviceId: _notificationServiceId,
-      notificationTitle: 'MeshSetu event mode active',
-      notificationText: 'BLE relay is listening for nearby peers',
-      callback: meshEventTaskCallback,
-    );
-
-    await _controller.start();
-
+  Future<void> _stopEventMode() async {
+    await _controller.stop();
+    await FlutterForegroundTask.stopService();
+    if (!mounted) return;
     setState(() {
-      _eventModeActive = true;
-      _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
+      _eventModeActive = false;
+      _status = 'MeshSetu\nEvent mode is off';
     });
   }
 
@@ -94,7 +125,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
 
   @override
   void dispose() {
-    unawaited(_controller.stop());
+    unawaited(_stopEventMode());
     super.dispose();
   }
 
@@ -113,6 +144,11 @@ class _EventModeScreenState extends State<EventModeScreen> {
               FilledButton(
                 onPressed: _eventModeActive ? null : _startEventMode,
                 child: const Text('Start event mode'),
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                onPressed: _eventModeActive ? _stopEventMode : null,
+                child: const Text('Stop event mode'),
               ),
               const SizedBox(height: 12),
               FilledButton(

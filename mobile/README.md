@@ -1,17 +1,24 @@
-# meshsetu_mobile
+# MeshSetu mobile
 
-A new Flutter project.
+This is the Flutter/Android implementation of the MeshSetu BLE relay. The
+protocol and relay engine can be tested without a radio; the event-mode screen
+also wires the Android peripheral and central BLE roles.
 
-## Getting Started
+## Toolchain
 
-This project is a starting point for a Flutter application.
+- Flutter with Dart 3.12 or newer (Flutter 3.47 is the verified toolchain)
+- Android SDK platform 36
+- Android API 29 minimum device version
 
-A few resources to get you started if this is your first Flutter project:
+From this directory:
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```sh
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --debug
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The app requests Bluetooth and notification permissions before starting event
+mode. The foreground notification can be stopped from the screen; the BLE
+controller and its metrics sink are stopped with it.

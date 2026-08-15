@@ -188,7 +188,9 @@ class ZoneEstimate {
 }
 
 class ZoneResolver {
+  // The public parameter name is intentionally kept stable for callers.
   ZoneResolver(this._anchors, {int freshnessMs = 10000})
+    // ignore: prefer_initializing_formals
     : _freshnessMs = freshnessMs;
 
   final Map<String, ZoneAnchor> _anchors;

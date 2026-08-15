@@ -3,11 +3,14 @@ import 'dart:typed_data';
 
 import 'package:universal_ble/universal_ble.dart';
 
+import 'async_lock.dart';
 import 'mesh_gatt.dart';
 
 /// Android's `BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED`, mirrored here since
 /// `universal_ble` exposes raw status ints rather than the Android constant.
 const int _gattRequestNotSupported = 3;
+const int _gattFailure = 1;
+const int _maxPendingFrames = 64;
 
 class IncomingGattFrame {
   const IncomingGattFrame({required this.deviceId, required this.bytes});
@@ -32,6 +35,8 @@ class MeshGattServer {
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
+  int _pendingFrames = 0;
+  final AsyncLock _notifyLock = AsyncLock();
   StreamSubscription<BlePeripheralCharacteristicSubscriptionChanged>?
   _subscriptionSubscription;
 
@@ -47,6 +52,10 @@ class MeshGattServer {
       if (characteristicId != MeshGatt.rx || offset != 0 || value == null) {
         return PeripheralWriteRequestResult(status: _gattRequestNotSupported);
       }
+      if (_pendingFrames >= _maxPendingFrames) {
+        return PeripheralWriteRequestResult(status: _gattFailure);
+      }
+      _pendingFrames++;
       _frames.add(
         IncomingGattFrame(deviceId: deviceId, bytes: Uint8List.fromList(value)),
       );
@@ -67,18 +76,27 @@ class MeshGattServer {
     await UniversalBlePeripheral.addService(MeshGatt.buildService());
   }
 
+  /// Releases one slot from the bounded receive queue after the coordinator
+  /// has finished processing a frame.
+  void acknowledge(IncomingGattFrame frame) {
+    if (_pendingFrames > 0) _pendingFrames--;
+  }
+
   /// Renamed to match upstream's `notifyAwait` — `universal_ble`'s
   /// `updateCharacteristicValue` is itself an awaited platform call, so this
   /// already waits for the notification to actually go out, not just for
   /// the OS to accept the request.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
     if (!_subscribers.contains(deviceId)) return false;
-    await UniversalBlePeripheral.updateCharacteristicValue(
-      characteristicId: MeshGatt.tx,
-      value: bytes,
-      deviceId: deviceId,
-    );
-    return true;
+    return _notifyLock.synchronized(() async {
+      if (!_subscribers.contains(deviceId)) return false;
+      await UniversalBlePeripheral.updateCharacteristicValue(
+        characteristicId: MeshGatt.tx,
+        value: bytes,
+        deviceId: deviceId,
+      );
+      return true;
+    });
   }
 
   Future<void> stop() async {
@@ -86,5 +104,7 @@ class MeshGattServer {
     _subscriptionSubscription = null;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
+    _pendingFrames = 0;
+    await _frames.close();
   }
 }

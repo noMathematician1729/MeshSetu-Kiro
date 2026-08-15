@@ -40,71 +40,92 @@ class MeshEventController {
   int _localToken = 0;
   IOSink? _metricSink;
   bool _looping = false;
+  bool _starting = false;
 
   MeshTransportCoordinator? get coordinator => _coordinator;
 
   Future<void> start() async {
-    final siteFingerprint = MeshGatt.siteFingerprint(
-      siteId,
-      namespace: siteNamespace,
-    );
-    _localToken = _randomNonZero32();
+    if (_looping || _starting) return;
+    _starting = true;
+    MeshTransportCoordinator? coordinator;
+    IOSink? metricSink;
+    try {
+      final siteFingerprint = MeshGatt.siteFingerprint(
+        siteId,
+        namespace: siteNamespace,
+      );
+      _localToken = _randomNonZero32();
 
-    final documentsDir = await getApplicationDocumentsDirectory();
-    final metricFile = File('${documentsDir.path}/mesh-metrics.ndjson');
-    final metricSink = metricFile.openWrite(mode: FileMode.append);
-    _metricSink = metricSink;
-    final jsonSink = JsonLineMetricSink(metricSink);
+      final documentsDir = await getApplicationDocumentsDirectory();
+      final metricFile = File('${documentsDir.path}/mesh-metrics.ndjson');
+      metricSink = metricFile.openWrite(mode: FileMode.append);
+      _metricSink = metricSink;
+      final jsonSink = JsonLineMetricSink(metricSink);
 
-    final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
-      siteId,
-      SiteKeyProvisioning.demoKey(siteId),
-    );
-    final relay = MeshRelayEngine(
-      siteId: siteId,
-      crypto: AeadEnvelope(siteKeyBytes),
-      store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
-      clockMs: () => DateTime.now().millisecondsSinceEpoch,
-    );
-    final server = MeshGattServer();
-    final hello = Hello(
-      siteFingerprint: siteFingerprint,
-      ephemeralNodeId: _localToken,
-      capabilities: capabilityRelay | capabilityVoice,
-      nowEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    );
-    final coordinator = MeshTransportCoordinator(
-      server: server,
-      relay: relay,
-      localHello: hello,
-      onMetrics: (metrics) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        for (final metric in metrics) {
-          jsonSink.write(
-            ProtocolMetric(
-              timeMs: now,
-              peer: metric.peerId,
-              kind: metric.kind,
-              value: metric.value,
-              detail: metric.objectId?.toString(),
-            ),
-          );
-        }
-      },
-    );
-    await coordinator.start();
-    _coordinator = coordinator;
+      final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
+        siteId,
+        SiteKeyProvisioning.demoKey(siteId),
+      );
+      final relay = MeshRelayEngine(
+        siteId: siteId,
+        crypto: AeadEnvelope(siteKeyBytes),
+        store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
+        clockMs: () => DateTime.now().millisecondsSinceEpoch,
+      );
+      final server = MeshGattServer();
+      final hello = Hello(
+        siteFingerprint: siteFingerprint,
+        ephemeralNodeId: _localToken,
+        capabilities: capabilityRelay | capabilityVoice,
+        nowEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
+      coordinator = MeshTransportCoordinator(
+        server: server,
+        relay: relay,
+        localHello: hello,
+        onMetrics: (metrics) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          for (final metric in metrics) {
+            jsonSink.write(
+              ProtocolMetric(
+                timeMs: now,
+                peer: metric.peerId,
+                kind: metric.kind,
+                value: metric.value,
+                detail: metric.objectId?.toString(),
+              ),
+            );
+          }
+        },
+      );
+      await coordinator.start();
+      _coordinator = coordinator;
 
-    await MeshAdvertiser.start(
-      DiscoveryMetadata(
-        fingerprint: siteFingerprint,
-        connectionToken: _localToken,
-        capabilities: 1,
-      ),
-    );
+      await MeshAdvertiser.start(
+        DiscoveryMetadata(
+          fingerprint: siteFingerprint,
+          connectionToken: _localToken,
+          capabilities: capabilityRelay | capabilityVoice,
+        ),
+      );
 
-    _looping = true;
-    unawaited(_scanLoop(siteFingerprint, coordinator));
+      _looping = true;
+      unawaited(_scanLoop(siteFingerprint, coordinator));
+    } catch (_) {
+      _looping = false;
+      _coordinator = null;
+      await coordinator?.stop();
+      try {
+        await MeshAdvertiser.stop();
+      } catch (_) {
+        // Advertising may not have started yet.
+      }
+      await metricSink?.close();
+      _metricSink = null;
+      rethrow;
+    } finally {
+      _starting = false;
+    }
   }
 
   Future<void> _scanLoop(
@@ -112,9 +133,14 @@ class MeshEventController {
     MeshTransportCoordinator coordinator,
   ) async {
     while (_looping) {
-      final peers = await MeshScanner.scan(
-        expectedFingerprint: siteFingerprint,
-      );
+      List<DiscoveredPeer> peers;
+      try {
+        peers = await MeshScanner.scan(expectedFingerprint: siteFingerprint);
+      } catch (_) {
+        if (!_looping) return;
+        await Future<void>.delayed(const Duration(seconds: 2));
+        continue;
+      }
       for (final peer in peers) {
         if (!shouldInitiate(_localToken, peer.metadata.connectionToken)) {
           continue;
@@ -135,7 +161,11 @@ class MeshEventController {
         }
       }
       if (!_looping) return;
-      await coordinator.tick();
+      try {
+        await coordinator.tick();
+      } catch (_) {
+        // A transient peer failure must not terminate the long-running scan.
+      }
       await Future<void>.delayed(const Duration(seconds: 2));
     }
   }

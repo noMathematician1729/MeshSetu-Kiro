@@ -7,6 +7,7 @@ import 'package:meshsetu_mobile/core/ble/gatt_server.dart';
 import 'package:meshsetu_mobile/core/ble/mesh_transport.dart';
 import 'package:meshsetu_mobile/core/model/model.dart';
 import 'package:meshsetu_mobile/core/protocol/frame.dart';
+import 'package:meshsetu_mobile/core/protocol/protocol_metrics.dart';
 import 'package:meshsetu_mobile/core/protocol/relay_engine.dart';
 import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
 
@@ -83,17 +84,20 @@ MeshEnvelope _envelope({
   originEphemeralId: 1,
 );
 
-MeshTransportCoordinator _coordinator({Hello? localHello}) =>
-    MeshTransportCoordinator(
-      server: MeshGattServer(),
-      relay: MeshRelayEngine(
-        siteId: 'site',
-        crypto: AeadEnvelope(List.filled(32, 5)),
-        store: _RecordingStore(),
-        clockMs: () => 100,
-      ),
-      localHello: localHello,
-    );
+MeshTransportCoordinator _coordinator({
+  Hello? localHello,
+  LossyFrameInterceptor? frameInterceptor,
+}) => MeshTransportCoordinator(
+  server: MeshGattServer(),
+  relay: MeshRelayEngine(
+    siteId: 'site',
+    crypto: AeadEnvelope(List.filled(32, 5)),
+    store: _RecordingStore(),
+    clockMs: () => 100,
+  ),
+  localHello: localHello,
+  frameInterceptor: frameInterceptor,
+);
 
 void main() {
   test('relays an object end-to-end through the pump loop', () async {
@@ -174,6 +178,25 @@ void main() {
 
     expect(linkB.sentFrames, isNotEmpty);
     expect(linkC.sentFrames, isNotEmpty);
+  });
+
+  test('dropped debug frames remain queued for a later retry', () async {
+    final coordinator = _coordinator(
+      frameInterceptor: LossyFrameInterceptor(dropEvery: 1),
+    );
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('peer-b', link, siteFingerprint: 1);
+
+    await coordinator.send(
+      _envelope(
+        objectId: 8,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      ),
+    );
+
+    expect(link.sentFrames, isEmpty);
+    expect(coordinator.relay.nextOutbound(), isNotNull);
   });
 
   test('rejects and closes a peer whose HELLO is for a foreign site', () async {
