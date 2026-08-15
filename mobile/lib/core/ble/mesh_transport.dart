@@ -213,6 +213,7 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> _ensureServerPeer(String peerId) async {
     if (_stopped ||
+        server.isPeerRejected(peerId) ||
         _sessions.containsKey(peerId) ||
         !_serverPeersStarting.add(peerId)) {
       return;
@@ -250,6 +251,7 @@ class MeshTransportCoordinator implements MeshTransport {
     }
     final old = _sessions[peerId];
     if (old == null && _sessions.length >= maxPeerConnections) {
+      if (link is GattServerPeerLink) server.rejectPeer(peerId);
       _onMetrics([RelayMetric('peer_rejected_capacity', peerId: peerId)]);
       unawaited(link.close());
       return;

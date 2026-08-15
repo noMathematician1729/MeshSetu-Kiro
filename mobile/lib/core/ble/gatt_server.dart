@@ -35,6 +35,7 @@ class MeshGattServer {
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
+  final Set<String> _rejectedPeers = {};
   int _pendingFrames = 0;
   bool _running = false;
   // universal_ble mutates one characteristic value before posting the native
@@ -78,6 +79,7 @@ class MeshGattServer {
 
   Future<void> start() async {
     _running = true;
+    _rejectedPeers.clear();
     UniversalBlePeripheral.setWriteRequestHandlers((
       deviceId,
       characteristicId,
@@ -89,6 +91,9 @@ class MeshGattServer {
       }
       if (characteristicId != MeshGatt.rx || offset != 0 || value == null) {
         return PeripheralWriteRequestResult(status: _gattRequestNotSupported);
+      }
+      if (_rejectedPeers.contains(deviceId)) {
+        return PeripheralWriteRequestResult(status: _gattFailure);
       }
       if (_pendingFrames >= _maxPendingFrames) {
         return PeripheralWriteRequestResult(status: _gattFailure);
@@ -105,9 +110,11 @@ class MeshGattServer {
         .listen((event) {
           if (event.characteristicId != MeshGatt.tx) return;
           if (event.isSubscribed) {
+            if (_rejectedPeers.contains(event.deviceId)) return;
             _subscribers.add(event.deviceId);
           } else {
             _subscribers.remove(event.deviceId);
+            _rejectedPeers.remove(event.deviceId);
           }
         });
 
@@ -122,6 +129,15 @@ class MeshGattServer {
   /// has finished processing a frame.
   void acknowledge(IncomingGattFrame frame) {
     if (_pendingFrames > 0) _pendingFrames--;
+  }
+
+  bool isPeerRejected(String deviceId) => _rejectedPeers.contains(deviceId);
+
+  /// The plugin cannot disconnect a peripheral client, so reject it at the
+  /// write/subscription boundary until it unsubscribes or the server restarts.
+  void rejectPeer(String deviceId) {
+    _rejectedPeers.add(deviceId);
+    _subscribers.remove(deviceId);
   }
 
   /// Serializes notifications and applies conservative pacing because
@@ -158,6 +174,7 @@ class MeshGattServer {
     await _notifyLock.idle;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
+    _rejectedPeers.clear();
     _mtus.clear();
     _pendingFrames = 0;
     await _frames.close();
