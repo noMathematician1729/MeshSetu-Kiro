@@ -47,3 +47,17 @@ data class PeerState(
     val queuedObjects: Int,
     val lastSeenMs: Long,
 )
+
+data class BeaconObservation(val anchorId: String, val rssi: Int, val observedAtMs: Long)
+data class ZoneAnchor(val anchorId: String, val logicalZone: String)
+data class ZoneEstimate(val logicalZone: String?, val anchorId: String?, val rssi: Int?, val approximate: Boolean, val uncertainty: String)
+
+class ZoneResolver(private val anchors: Map<String, ZoneAnchor>, private val freshnessMs: Long = 10_000) {
+    fun estimate(observations: List<BeaconObservation>, nowMs: Long): ZoneEstimate {
+        val best = observations.asSequence().filter { nowMs - it.observedAtMs in 0..freshnessMs }.filter { anchors.containsKey(it.anchorId) }.maxByOrNull { it.rssi }
+            ?: return ZoneEstimate(null, null, null, true, "unknown")
+        val second = observations.asSequence().filter { it !== best && anchors.containsKey(it.anchorId) }.maxOfOrNull { it.rssi }
+        val uncertainty = when { second == null || best.rssi - second >= 8 -> "low"; best.rssi - second >= 3 -> "medium"; else -> "high" }
+        return ZoneEstimate(anchors.getValue(best.anchorId).logicalZone, best.anchorId, best.rssi, true, uncertainty)
+    }
+}

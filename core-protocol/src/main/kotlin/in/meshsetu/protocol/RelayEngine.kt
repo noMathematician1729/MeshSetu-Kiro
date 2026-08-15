@@ -36,6 +36,10 @@ class MeshRelayEngine(
             return RelayResult(emptyList(), drainMetrics())
         }
         if (frame.type == FrameType.CUSTODY_ACK) {
+            if (frame.payload.size != 8 || ByteBuffer.wrap(frame.payload).order(ByteOrder.BIG_ENDIAN).long.toULong() != frame.objectId) {
+                metrics += RelayMetric("invalid_ack", frame.objectId, peerId)
+                return RelayResult(emptyList(), drainMetrics())
+            }
             metrics += RelayMetric("ack", frame.objectId, peerId)
             return RelayResult(emptyList(), drainMetrics())
         }
@@ -79,6 +83,13 @@ class MeshRelayEngine(
     }
 
     @Synchronized fun nextOutbound(nowMs: Long = clockMs()): EncryptedObject? = scheduler.next(nowMs)
+
+    @Synchronized fun requeue(value: EncryptedObject, nowMs: Long = clockMs()) = scheduler.enqueue(value, nowMs)
+
+    @Synchronized fun missing(peerId: String, objectId: ULong, priority: UByte): ByteArray? {
+        val buffer = partial[Key(peerId, objectId)] ?: return null
+        return FrameCodec.encode(MeshFrame(FrameType.NACK, priority, 0u, objectId, 0u, 1u, buffer.missingBitmap()))
+    }
 
     @Synchronized fun submit(envelope: MeshEnvelope, nowMs: Long = clockMs()): EncryptedObject {
         val encrypted = crypto.encrypt(envelope)

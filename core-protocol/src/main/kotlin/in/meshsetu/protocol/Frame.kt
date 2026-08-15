@@ -87,5 +87,8 @@ class ReassemblyBuffer(private val expectedCount: Int, private val maxBytes: Int
             parts.forEach { part -> part!!.copyInto(out, offset); offset += part.size }
         }
     }
-}
 
+    fun missingBitmap(): ByteArray = ByteArray((expectedCount + 7) / 8).also { out ->
+        parts.forEachIndexed { index, part -> if (part == null) out[index / 8] = (out[index / 8].toInt() or (1 shl (index % 8))).toByte() }
+    }
+}

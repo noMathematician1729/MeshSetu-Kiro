@@ -73,11 +73,18 @@ class MeshTransportCoordinator(
     }
 
     private suspend fun pump() = pumpLock.withLock {
+        if (sessions.isEmpty()) return
         while (true) {
             val objectToSend = relay.nextOutbound() ?: return
             val peer = sessions.entries.firstOrNull() ?: return
-            fragment(objectToSend.objectId, objectToSend.trafficClass.rank.toUByte(), objectToSend.bytes, peer.value.mtu).forEach { frame ->
-                peer.value.send(FrameCodec.encode(frame), withResponse = objectToSend.trafficClass.rank <= 2)
+            val sent = runCatching {
+                fragment(objectToSend.objectId, objectToSend.trafficClass.rank.toUByte(), objectToSend.bytes, peer.value.mtu).forEach { frame ->
+                    check(peer.value.send(FrameCodec.encode(frame), withResponse = objectToSend.trafficClass.rank <= 2).isSuccess)
+                }
+            }.isSuccess
+            if (!sent) {
+                relay.requeue(objectToSend)
+                return
             }
         }
     }
