@@ -25,7 +25,8 @@ class MeshAdvertiser(private val adapter: BluetoothAdapter) {
     fun start(metadata: DiscoveryMetadata, onFailure: (Int) -> Unit = {}) {
         val advertiser: BluetoothLeAdvertiser = adapter.bluetoothLeAdvertiser ?: error("BLE advertising is unavailable")
         val primary = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(MeshGatt.PARCEL_SERVICE).build()
-        val response = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceData(ParcelUuid(MeshGatt.SERVICE), metadata.encode()).build()
+        // A 128-bit service-data AD cannot fit this metadata in a legacy 31-byte response; use development manufacturer data.
+        val response = AdvertiseData.Builder().setIncludeDeviceName(false).addManufacturerData(MeshGatt.DEVELOPMENT_MANUFACTURER_ID, metadata.encode()).build()
         val settings = AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM).setConnectable(true).build()
         callback = object : AdvertiseCallback() { override fun onStartFailure(errorCode: Int) = onFailure(errorCode) }
         advertiser.startAdvertising(settings, primary, response, callback)
@@ -43,7 +44,7 @@ class MeshScanner(private val scanner: BluetoothLeScanner) {
         val found = linkedMapOf<String, DiscoveredPeer>()
         val callback = object : ScanCallback() {
             override fun onScanResult(type: Int, result: ScanResult) {
-                val metadata = result.scanRecord?.getServiceData(MeshGatt.PARCEL_SERVICE)?.let(DiscoveryMetadata::decode) ?: return
+                val metadata = result.scanRecord?.getManufacturerSpecificData(MeshGatt.DEVELOPMENT_MANUFACTURER_ID)?.let(DiscoveryMetadata::decode) ?: return
                 found[result.device.address] = DiscoveredPeer(result, metadata)
             }
             override fun onScanFailed(errorCode: Int) { if (continuation.isActive) continuation.resumeWithException(IllegalStateException("BLE scan failed: $errorCode")) }

@@ -15,6 +15,7 @@ object MeshGatt {
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     val PARCEL_SERVICE = ParcelUuid(SERVICE)
     const val DISCOVERY_VERSION: Byte = 1
+    const val DEVELOPMENT_MANUFACTURER_ID: Int = 0xFFFF
 
     fun service(): BluetoothGattService = BluetoothGattService(SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY).apply {
         addCharacteristic(BluetoothGattCharacteristic(RX, BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE, BluetoothGattCharacteristic.PERMISSION_WRITE))
