@@ -20,10 +20,14 @@ class MeshRelayEngine(
     private val clockMs: () -> Long,
     private val scheduler: OutboundScheduler = OutboundScheduler(),
     private val dedupe: RecentObjectCache = RecentObjectCache(),
+    private val onPersist: (MeshEnvelope, String) -> Unit = { _, _ -> },
 ) {
     private data class Key(val peerId: String, val objectId: ULong)
     private val partial = mutableMapOf<Key, ReassemblyBuffer>()
     private val metrics = mutableListOf<RelayMetric>()
+    private val listeners = mutableListOf<(MeshEnvelope, String) -> Unit>()
+
+    @Synchronized fun addPersistListener(listener: (MeshEnvelope, String) -> Unit) { listeners += listener }
 
     @Synchronized
     fun receive(peerId: String, encodedFrame: ByteArray): RelayResult {
@@ -64,6 +68,8 @@ class MeshRelayEngine(
             return RelayResult(listOf(ack(frame.objectId, frame.priority)), drainMetrics())
         }
         store.persist(envelope)
+        onPersist(envelope, peerId)
+        listeners.forEach { it(envelope, peerId) }
         metrics += RelayMetric("object_complete", envelope.objectId, peerId, envelope.hopCount.toLong())
         if (envelope.hopCount < envelope.hopLimit) {
             scheduler.enqueue(crypto.encrypt(envelope.copy(hopCount = envelope.hopCount + 1)), now)
@@ -74,8 +80,13 @@ class MeshRelayEngine(
 
     @Synchronized fun nextOutbound(nowMs: Long = clockMs()): EncryptedObject? = scheduler.next(nowMs)
 
+    @Synchronized fun submit(envelope: MeshEnvelope, nowMs: Long = clockMs()): EncryptedObject {
+        val encrypted = crypto.encrypt(envelope)
+        scheduler.enqueue(encrypted, nowMs)
+        return encrypted
+    }
+
     private fun drainMetrics(): List<RelayMetric> = metrics.toList().also { metrics.clear() }
     private fun trafficClass(priority: UByte) = when (priority.toInt()) { 1 -> `in`.meshsetu.model.TrafficClass.SOS_STRUCTURED; 2 -> `in`.meshsetu.model.TrafficClass.AUTHORITY_CONTROL; 3 -> `in`.meshsetu.model.TrafficClass.ROOM_MESSAGE; else -> `in`.meshsetu.model.TrafficClass.TELEMETRY }
     private fun ack(objectId: ULong, priority: UByte): ByteArray = FrameCodec.encode(MeshFrame(FrameType.CUSTODY_ACK, priority, 0u, objectId, 0u, 1u, ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(objectId.toLong()).array()))
 }
-

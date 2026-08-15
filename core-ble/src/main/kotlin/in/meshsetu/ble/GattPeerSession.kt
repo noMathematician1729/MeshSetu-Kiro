@@ -15,6 +15,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -25,7 +27,9 @@ class GattPeerSession private constructor(private val context: Context, val devi
     private val operationLock = Mutex()
     private val ready = CompletableDeferred<Unit>()
     private val stateMutable = MutableStateFlow(PeerSessionState.CONNECTING)
+    private val incomingMutable = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     val state: StateFlow<PeerSessionState> = stateMutable
+    val incoming: SharedFlow<ByteArray> = incomingMutable
     var mtu: Int = 23
         private set
     private var gatt: BluetoothGatt? = null
@@ -105,7 +109,14 @@ class GattPeerSession private constructor(private val context: Context, val devi
         } else if (descriptor.uuid == MeshGatt.CCCD) fail("CCCD write failed: $status")
     }
 
-    override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) { /* consumed by coordinator in a later increment */ }
+    override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        if (characteristic.uuid == MeshGatt.TX) incomingMutable.tryEmit(value.copyOf())
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        if (characteristic.uuid == MeshGatt.TX) incomingMutable.tryEmit(characteristic.value?.copyOf() ?: return)
+    }
 
     private fun fail(message: String) {
         stateMutable.value = PeerSessionState.FAILED
