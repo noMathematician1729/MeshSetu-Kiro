@@ -256,7 +256,7 @@ class MeshTransportCoordinator implements MeshTransport {
       unawaited(link.close());
       return;
     }
-    _detach(peerId, expected: old);
+    _detach(peerId, expected: old, promoteRejected: false);
     if (old != null) unawaited(old.close());
 
     _sessions[peerId] = link;
@@ -518,7 +518,11 @@ class MeshTransportCoordinator implements MeshTransport {
     await _peersController.close();
   }
 
-  void _detach(String peerId, {PeerLink? expected}) {
+  void _detach(
+    String peerId, {
+    PeerLink? expected,
+    bool promoteRejected = true,
+  }) {
     final current = _sessions[peerId];
     if (current == null || (expected != null && current != expected)) return;
     _sessions.remove(peerId);
@@ -535,6 +539,16 @@ class MeshTransportCoordinator implements MeshTransport {
       ];
       _emitPeers();
       _onMetrics([RelayMetric('peer_disconnected', peerId: peerId)]);
+    }
+    if (promoteRejected && !_stopped) _promoteRejectedPeers();
+  }
+
+  void _promoteRejectedPeers() {
+    if (_sessions.length >= maxPeerConnections) return;
+    for (final peerId in server.rejectedPeerIds) {
+      if (_sessions.length >= maxPeerConnections) return;
+      if (!server.admitPeer(peerId)) continue;
+      unawaited(_ensureServerPeer(peerId));
     }
   }
 

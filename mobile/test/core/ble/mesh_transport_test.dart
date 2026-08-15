@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:universal_ble/universal_ble.dart';
+import 'package:universal_ble/src/universal_ble.g.dart' show PeripheralService;
 import 'package:meshsetu_mobile/core/ble/gatt_peer_session.dart';
 import 'package:meshsetu_mobile/core/ble/gatt_server.dart';
+import 'package:meshsetu_mobile/core/ble/mesh_gatt.dart';
 import 'package:meshsetu_mobile/core/ble/mesh_transport.dart';
 import 'package:meshsetu_mobile/core/model/model.dart';
 import 'package:meshsetu_mobile/core/protocol/frame.dart';
@@ -85,6 +88,35 @@ class _RecordingStore extends RelayStore {
   void persist(MeshEnvelope envelope) => stored.add(envelope);
 }
 
+class _FakePeripheral extends UniversalBlePeripheralUnsupported {
+  final List<Uint8List> notifications = [];
+  int notificationStatus = 0;
+
+  @override
+  Future<void> addService(
+    PeripheralService service, {
+    bool primary = true,
+    Duration? timeout,
+  }) async {}
+
+  @override
+  Future<void> clearServices() async {}
+
+  @override
+  Future<void> updateCharacteristicValue({
+    required String characteristicId,
+    required Uint8List value,
+    String? deviceId,
+  }) async {
+    notifications.add(value);
+    if (deviceId != null) {
+      updateNotificationSent(
+        BlePeripheralNotificationSent(deviceId, notificationStatus),
+      );
+    }
+  }
+}
+
 MeshEnvelope _envelope({
   required int objectId,
   required PriorityBand priority,
@@ -109,8 +141,9 @@ MeshEnvelope _envelope({
 MeshTransportCoordinator _coordinator({
   Hello? localHello,
   LossyFrameInterceptor? frameInterceptor,
+  MeshGattServer? server,
 }) => MeshTransportCoordinator(
-  server: MeshGattServer(),
+  server: server ?? MeshGattServer(),
   relay: MeshRelayEngine(
     siteId: 'site',
     crypto: AeadEnvelope(List.filled(32, 5)),
@@ -409,5 +442,82 @@ void main() {
 
     expect((await coordinator.peerState.first).single.peerId, 'peer');
     expect((await coordinator.peerState.first).single.peerId, 'peer');
+  });
+
+  test(
+    'a still-subscribed capacity peer can be admitted after a slot opens',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+
+      final server = MeshGattServer();
+      await server.start();
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      server.rejectPeer('peer');
+      expect(
+        await server.notifyAwait('peer', Uint8List.fromList([1])),
+        isFalse,
+      );
+      expect(server.admitPeer('peer'), isTrue);
+      expect(await server.notifyAwait('peer', Uint8List.fromList([1])), isTrue);
+      expect(peripheral.notifications, hasLength(1));
+      peripheral.notificationStatus = 1;
+      expect(
+        await server.notifyAwait('peer', Uint8List.fromList([2])),
+        isFalse,
+      );
+      await server.stop();
+    },
+  );
+
+  test('transport promotes a rejected server peer when a slot opens', () async {
+    final peripheral = _FakePeripheral();
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+
+    final server = MeshGattServer();
+    final coordinator = _coordinator(server: server);
+    await coordinator.start();
+    final links = [
+      for (var i = 0; i < MeshTransportCoordinator.maxPeerConnections; i++)
+        _FakeLink()..peer = _FakeLink(),
+    ];
+    for (var i = 0; i < links.length; i++) {
+      coordinator.attach('central-$i', links[i], siteFingerprint: 1);
+    }
+
+    peripheral.updateCharacteristicSubscription(
+      BlePeripheralCharacteristicSubscriptionChanged(
+        deviceId: 'server-peer',
+        characteristicId: MeshGatt.tx,
+        isSubscribed: true,
+        name: null,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(coordinator.hasPeer('server-peer'), isFalse);
+
+    links.first.emitState(PeerSessionState.disconnected);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(coordinator.hasPeer('server-peer'), isTrue);
+    await coordinator.stop();
   });
 }

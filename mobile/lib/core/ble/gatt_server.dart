@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 import 'async_lock.dart';
@@ -35,6 +35,9 @@ class MeshGattServer {
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
+  // A rejected client can remain subscribed on the radio. Keep that fact
+  // separate so a freed slot can restore admission without a second CCCD write.
+  final Set<String> _knownSubscribers = {};
   final Set<String> _rejectedPeers = {};
   int _pendingFrames = 0;
   bool _running = false;
@@ -110,10 +113,12 @@ class MeshGattServer {
         .listen((event) {
           if (event.characteristicId != MeshGatt.tx) return;
           if (event.isSubscribed) {
+            _knownSubscribers.add(event.deviceId);
             if (_rejectedPeers.contains(event.deviceId)) return;
             _subscribers.add(event.deviceId);
           } else {
             _subscribers.remove(event.deviceId);
+            _knownSubscribers.remove(event.deviceId);
             _rejectedPeers.remove(event.deviceId);
           }
         });
@@ -133,21 +138,41 @@ class MeshGattServer {
 
   bool isPeerRejected(String deviceId) => _rejectedPeers.contains(deviceId);
 
+  Iterable<String> get rejectedPeerIds =>
+      List<String>.unmodifiable(_rejectedPeers);
+
   /// The plugin cannot disconnect a peripheral client, so reject it at the
-  /// write/subscription boundary until it unsubscribes or the server restarts.
+  /// write/subscription boundary until capacity admission is restored or the
+  /// client unsubscribes.
   void rejectPeer(String deviceId) {
     _rejectedPeers.add(deviceId);
     _subscribers.remove(deviceId);
   }
 
-  /// Serializes notifications and applies conservative pacing because
-  /// universal_ble does not expose Android's onNotificationSent callback.
+  /// Re-admits a client that is still subscribed after a slot opens.
+  bool admitPeer(String deviceId) {
+    if (!_rejectedPeers.remove(deviceId)) return false;
+    if (_running && _knownSubscribers.contains(deviceId)) {
+      _subscribers.add(deviceId);
+    }
+    return true;
+  }
+
+  /// Serializes notifications and waits for Android's native
+  /// BluetoothGattCallback completion status. Other platforms return after
+  /// their plugin operation completes because this app's Android callback is
+  /// not available there.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
     if (!_running || bytes.isEmpty || !_subscribers.contains(deviceId)) {
       return false;
     }
     return _notifyLock.synchronized(() async {
       if (!_running || !_subscribers.contains(deviceId)) return false;
+      final completion = defaultTargetPlatform == TargetPlatform.android
+          ? UniversalBlePeripheral.notificationSentStream
+                .where((event) => event.deviceId == deviceId)
+                .first
+          : null;
       try {
         await UniversalBlePeripheral.updateCharacteristicValue(
           characteristicId: MeshGatt.tx,
@@ -157,10 +182,13 @@ class MeshGattServer {
       } catch (_) {
         return false;
       }
-      // ponytail: replace this conservative pacing with onNotificationSent
-      // when universal_ble exposes that platform callback.
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      return true;
+      if (completion == null) return true;
+      try {
+        return (await completion.timeout(const Duration(seconds: 2))).status ==
+            0;
+      } catch (_) {
+        return false;
+      }
     });
   }
 
@@ -174,6 +202,7 @@ class MeshGattServer {
     await _notifyLock.idle;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
+    _knownSubscribers.clear();
     _rejectedPeers.clear();
     _mtus.clear();
     _pendingFrames = 0;
