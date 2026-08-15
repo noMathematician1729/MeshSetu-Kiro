@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:universal_ble/universal_ble.dart';
 
 import 'mesh_gatt.dart';
@@ -42,30 +44,43 @@ abstract final class MeshScanner {
     int? expectedFingerprint,
   }) async {
     final found = <String, DiscoveredPeer>{};
-    final subscription = UniversalBle.scanStream.listen((device) {
-      for (final data in device.manufacturerDataList) {
-        if (data.companyId != MeshGatt.developmentManufacturerId) continue;
-        final metadata = DiscoveryMetadata.decode(data.payload);
-        if (metadata == null) continue;
-        if (expectedFingerprint != null &&
-            metadata.fingerprint != expectedFingerprint) {
-          continue;
+    StreamSubscription<BleDevice>? subscription;
+    var started = false;
+    try {
+      subscription = UniversalBle.scanStream.listen((device) {
+        for (final data in device.manufacturerDataList) {
+          if (data.companyId != MeshGatt.developmentManufacturerId) continue;
+          final metadata = DiscoveryMetadata.decode(data.payload);
+          if (metadata == null) continue;
+          if (expectedFingerprint != null &&
+              metadata.fingerprint != expectedFingerprint) {
+            continue;
+          }
+          found[device.deviceId] = DiscoveredPeer(
+            device: device,
+            metadata: metadata,
+          );
         }
-        found[device.deviceId] = DiscoveredPeer(
-          device: device,
-          metadata: metadata,
-        );
+      });
+      await UniversalBle.startScan(
+        scanFilter: ScanFilter(withServices: const [MeshGatt.service]),
+        platformConfig: PlatformConfig(
+          android: AndroidOptions(scanMode: AndroidScanMode.lowLatency),
+        ),
+      );
+      started = true;
+      await Future<void>.delayed(window);
+    } finally {
+      if (started) {
+        try {
+          await UniversalBle.stopScan();
+        } catch (_) {
+          // Preserve the original scan failure while still releasing the
+          // subscription below.
+        }
       }
-    });
-    await UniversalBle.startScan(
-      scanFilter: ScanFilter(withServices: const [MeshGatt.service]),
-      platformConfig: PlatformConfig(
-        android: AndroidOptions(scanMode: AndroidScanMode.lowLatency),
-      ),
-    );
-    await Future<void>.delayed(window);
-    await UniversalBle.stopScan();
-    await subscription.cancel();
+      await subscription?.cancel();
+    }
     return found.values.toList(growable: false);
   }
 }

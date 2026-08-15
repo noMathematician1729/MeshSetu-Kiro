@@ -14,6 +14,9 @@ import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
 /// Two in-memory [PeerLink]s wired directly to each other, standing in for
 /// a real BLE connection between two phones. No radio, no platform channel.
 class _FakeLink implements PeerLink {
+  _FakeLink({this.closeStreamsOnClose = true});
+
+  final bool closeStreamsOnClose;
   @override
   final int mtu = 185;
 
@@ -42,9 +45,12 @@ class _FakeLink implements PeerLink {
   /// without going through [peer].
   void deliver(Uint8List bytes) => _incomingController.add(bytes);
 
+  void emitState(PeerSessionState state) => _stateController.add(state);
+
   @override
   Future<void> close() async {
     closed = true;
+    if (!closeStreamsOnClose) return;
     await _incomingController.close();
     await _stateController.close();
   }
@@ -69,6 +75,7 @@ MeshEnvelope _envelope({
   required int objectId,
   required PriorityBand priority,
   required PayloadType payloadType,
+  int hopLimit = 0,
 }) => MeshEnvelope(
   objectId: objectId,
   eventId: 'event-$objectId',
@@ -77,7 +84,7 @@ MeshEnvelope _envelope({
   createdAtMs: 1,
   expiresAtMs: 1000000,
   hopCount: 0,
-  hopLimit: 0,
+  hopLimit: hopLimit,
   priority: priority,
   payloadType: payloadType,
   payload: Uint8List.fromList([1, 2, 3]),
@@ -232,5 +239,55 @@ void main() {
 
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(link.closed, isTrue);
+  });
+
+  test(
+    'a stale replacement state event cannot detach the new session',
+    () async {
+      final coordinator = _coordinator();
+      final old = _FakeLink(closeStreamsOnClose: false)..peer = _FakeLink();
+      final replacement = _FakeLink()..peer = _FakeLink();
+
+      coordinator.attach('peer-b', old, siteFingerprint: 1);
+      coordinator.attach('peer-b', replacement, siteFingerprint: 1);
+      old.emitState(PeerSessionState.disconnected);
+
+      await coordinator.send(
+        _envelope(
+          objectId: 9,
+          priority: PriorityBand.p0Critical,
+          payloadType: PayloadType.structuredSos,
+        ),
+      );
+      expect(replacement.sentFrames, isNotEmpty);
+    },
+  );
+
+  test('forwards an object across a three-node relay path', () async {
+    final coordinatorA = _coordinator();
+    final coordinatorB = _coordinator();
+    final coordinatorC = _coordinator();
+
+    final (aToB, bToA) = _pairedLinks();
+    final (bToC, cToB) = _pairedLinks();
+    coordinatorA.attach('b', aToB, siteFingerprint: 1);
+    coordinatorB.attach('a', bToA, siteFingerprint: 1);
+    coordinatorB.attach('c', bToC, siteFingerprint: 1);
+    coordinatorC.attach('b', cToB, siteFingerprint: 1);
+
+    final received = coordinatorC.incoming.first;
+    await coordinatorA.send(
+      _envelope(
+        objectId: 10,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+        hopLimit: 4,
+      ),
+    );
+
+    expect(
+      (await received.timeout(const Duration(seconds: 2))).envelope.objectId,
+      10,
+    );
   });
 }

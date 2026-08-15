@@ -4,15 +4,17 @@ Android-first, offline emergency communication over a BLE store-and-forward over
 
 ## Build and test
 
-The local build baseline is JDK 17, Android SDK 36, AGP 8.13, Kotlin 2.2, and Gradle 8.13. SDK 37 was not available from the configured SDK repository, so `compileSdk` remains 36 until that platform is installed.
+The Flutter build targets Android SDK 36. Use a Flutter SDK compatible with the Dart constraint in `mobile/pubspec.yaml`.
 
 ```bash
-export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
-./gradlew test
-./gradlew :app:assembleDebug
+cd mobile
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --debug
 ```
 
-Install `app/build/outputs/apk/debug/app-debug.apk` on physical BLE-capable Android phones. Tap **Start event mode** to request permissions and start the visible connected-device foreground service.
+Install `mobile/build/app/outputs/flutter-apk/app-debug.apk` on physical BLE-capable Android phones. Tap **Start event mode** to request permissions and start the visible connected-device foreground service. The foreground task owns scanning and relay processing, so leaving the screen does not stop the mesh; use **Stop event mode** to shut it down.
 
 ## Current transport slice
 
@@ -25,4 +27,3 @@ Install `app/build/outputs/apk/debug/app-debug.apk` on physical BLE-capable Andr
 - Privacy-safe newline-delimited protocol metrics and a deterministic lossy-frame test hook.
 
 The phone implementation is an application-layer BLE overlay. It is not Bluetooth SIG Mesh certification, live voice streaming, or a production enrollment/security ceremony. Room persistence, local dashboard, audio/Opus, STT, triage, and QR UX attach through the frozen interfaces described in `context.md`.
-

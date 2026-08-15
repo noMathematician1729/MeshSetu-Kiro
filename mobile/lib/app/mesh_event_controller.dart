@@ -20,16 +20,8 @@ import '../core/protocol/secure_envelope.dart';
 /// Port of `in.meshsetu.app.MeshEventService`'s mesh-orchestration logic
 /// (Kotlin `MeshEventService.kt` — `startMesh`, `sendTestObject`).
 ///
-/// Deliberate scope decision: this runs in the Flutter UI isolate, started
-/// by [EventModeScreen]'s button, not inside `flutter_foreground_task`'s
-/// background task isolate. The Kotlin source runs inside a real Android
-/// `Service`, which keeps working even if the Activity is destroyed;
-/// replicating that fully would mean re-registering every plugin channel
-/// (`universal_ble`, `flutter_secure_storage`, ...) inside the task
-/// isolate and driving the whole scan/relay loop from there — real work,
-/// and not something verifiable without a physical device anyway (same
-/// constraint as everything else in `core/ble`). This keeps the port
-/// honest about that gap rather than adding untested isolate plumbing.
+/// The foreground task owns one instance of this controller so scanning and
+/// relay processing continue after the Activity is paused or destroyed.
 class MeshEventController {
   static const String siteId = 'demo-site';
   static const String siteNamespace = 'demo';
@@ -41,12 +33,22 @@ class MeshEventController {
   IOSink? _metricSink;
   bool _looping = false;
   bool _starting = false;
+  bool _stopRequested = false;
 
   MeshTransportCoordinator? get coordinator => _coordinator;
+
+  void setDebugLossInjection(bool enabled) {
+    final coordinator = _coordinator;
+    if (coordinator == null) return;
+    coordinator.frameInterceptor = enabled
+        ? LossyFrameInterceptor(dropEvery: 5)
+        : null;
+  }
 
   Future<void> start() async {
     if (_looping || _starting) return;
     _starting = true;
+    _stopRequested = false;
     MeshTransportCoordinator? coordinator;
     IOSink? metricSink;
     try {
@@ -99,6 +101,7 @@ class MeshEventController {
         },
       );
       await coordinator.start();
+      if (_stopRequested) throw StateError('mesh start cancelled');
       _coordinator = coordinator;
 
       await MeshAdvertiser.start(
@@ -108,6 +111,7 @@ class MeshEventController {
           capabilities: capabilityRelay | capabilityVoice,
         ),
       );
+      if (_stopRequested) throw StateError('mesh start cancelled');
 
       _looping = true;
       unawaited(_scanLoop(siteFingerprint, coordinator));
@@ -142,6 +146,7 @@ class MeshEventController {
         continue;
       }
       for (final peer in peers) {
+        if (!_looping) return;
         if (!shouldInitiate(_localToken, peer.metadata.connectionToken)) {
           continue;
         }
@@ -150,6 +155,10 @@ class MeshEventController {
         try {
           session = GattPeerSession.open(peer.device.deviceId);
           await session.awaitReady().timeout(const Duration(seconds: 8));
+          if (!_looping) {
+            await session.close();
+            return;
+          }
           coordinator.attach(
             peer.device.deviceId,
             GattPeerSessionLink(session),
@@ -198,12 +207,22 @@ class MeshEventController {
   }
 
   Future<void> stop() async {
+    _stopRequested = true;
     _looping = false;
-    await MeshAdvertiser.stop();
-    await _coordinator?.stop();
+    final coordinator = _coordinator;
     _coordinator = null;
-    await _metricSink?.close();
+    final metricSink = _metricSink;
     _metricSink = null;
+    try {
+      await MeshAdvertiser.stop();
+    } catch (_) {
+      // Advertising may already have stopped or never started.
+    }
+    try {
+      await coordinator?.stop();
+    } finally {
+      await metricSink?.close();
+    }
   }
 
   static int _randomNonZero32() {

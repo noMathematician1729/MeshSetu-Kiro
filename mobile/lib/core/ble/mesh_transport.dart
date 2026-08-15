@@ -64,6 +64,36 @@ class GattPeerSessionLink implements PeerLink {
   Future<void> close() => _session.close();
 }
 
+/// Server-side peer: receives frames through the shared server stream and
+/// sends relay traffic through notifications.
+class GattServerPeerLink implements PeerLink {
+  GattServerPeerLink(this._server, this.deviceId, this.mtu);
+
+  final MeshGattServer _server;
+  final String deviceId;
+
+  @override
+  final int mtu;
+
+  @override
+  Stream<Uint8List> get incoming => const Stream<Uint8List>.empty();
+
+  @override
+  Stream<PeerSessionState> get state => _server
+      .connectionStateFor(deviceId)
+      .map(
+        (connected) =>
+            connected ? PeerSessionState.ready : PeerSessionState.disconnected,
+      );
+
+  @override
+  Future<bool> send(Uint8List bytes, {bool withResponse = true}) =>
+      _server.notifyAwait(deviceId, bytes);
+
+  @override
+  Future<void> close() async {}
+}
+
 typedef MetricsListener = void Function(List<RelayMetric> metrics);
 
 /// Port of `in.meshsetu.ble.MeshTransportCoordinator` (Kotlin
@@ -81,6 +111,13 @@ class MeshTransportCoordinator implements MeshTransport {
     this.frameInterceptor,
     MetricsListener? onMetrics,
   }) : _onMetrics = onMetrics ?? ((_) {}) {
+    _peersController = StreamController<List<PeerState>>.broadcast(
+      onListen: () {
+        if (!_peersController.isClosed) {
+          _peersController.add(List<PeerState>.unmodifiable(_peers));
+        }
+      },
+    );
     relay.addPersistListener((envelope, peerId) {
       _receivedController.add(
         ReceivedObject(
@@ -97,19 +134,20 @@ class MeshTransportCoordinator implements MeshTransport {
   final MeshGattServer server;
   final MeshRelayEngine relay;
   final Hello? localHello;
-  final LossyFrameInterceptor? frameInterceptor;
+  LossyFrameInterceptor? frameInterceptor;
   final MetricsListener _onMetrics;
 
   final StreamController<ReceivedObject> _receivedController =
       StreamController<ReceivedObject>.broadcast();
-  final StreamController<List<PeerState>> _peersController =
-      StreamController<List<PeerState>>.broadcast();
+  late final StreamController<List<PeerState>> _peersController;
   List<PeerState> _peers = [];
 
   final Map<String, PeerLink> _sessions = {};
   final Map<String, List<StreamSubscription<Object?>>> _sessionSubscriptions =
       {};
   StreamSubscription<Object?>? _serverSubscription;
+  StreamSubscription<String>? _serverPeerSubscription;
+  final Set<String> _serverPeersStarting = {};
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
 
@@ -121,12 +159,17 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     await server.start();
+    _serverPeerSubscription = server.subscribedPeerIds.listen((peerId) {
+      unawaited(_ensureServerPeer(peerId));
+    });
     _serverSubscription = server.incoming.listen((frame) {
       unawaited(
         _relayLock.synchronized(() async {
           try {
+            await _ensureServerPeer(frame.deviceId);
             if (!_acceptsHello(frame.bytes)) return;
             final result = await relay.receive(frame.deviceId, frame.bytes);
+            _markPeerSeen(frame.deviceId);
             _onMetrics(result.metrics);
             for (final controlFrame in result.controlFrames) {
               await server.notifyAwait(frame.deviceId, controlFrame);
@@ -140,6 +183,23 @@ class MeshTransportCoordinator implements MeshTransport {
     });
   }
 
+  Future<void> _ensureServerPeer(String peerId) async {
+    if (_sessions.containsKey(peerId) || !_serverPeersStarting.add(peerId)) {
+      return;
+    }
+    try {
+      final mtu = await server.mtuFor(peerId);
+      if (_sessions.containsKey(peerId)) return;
+      attach(
+        peerId,
+        GattServerPeerLink(server, peerId, mtu),
+        siteFingerprint: localHello?.siteFingerprint ?? 0,
+      );
+    } finally {
+      _serverPeersStarting.remove(peerId);
+    }
+  }
+
   bool hasPeer(String peerId) => _sessions.containsKey(peerId);
 
   void attach(
@@ -149,7 +209,7 @@ class MeshTransportCoordinator implements MeshTransport {
     int? rssi,
   }) {
     final old = _sessions[peerId];
-    _detach(peerId);
+    _detach(peerId, expected: old);
     if (old != null) unawaited(old.close());
 
     _sessions[peerId] = link;
@@ -162,17 +222,17 @@ class MeshTransportCoordinator implements MeshTransport {
         connected: true,
         mtu: link.mtu,
         rssi: rssi,
-        queuedObjects: 0,
+        queuedObjects: relay.scheduler.size(),
         lastSeenMs: DateTime.now().millisecondsSinceEpoch,
       ),
     ];
-    _peersController.add(_peers);
+    _emitPeers();
 
     final subscriptions = <StreamSubscription<Object?>>[
       link.state.listen((state) {
         if (state == PeerSessionState.disconnected ||
             state == PeerSessionState.failed) {
-          _detach(peerId);
+          _detach(peerId, expected: link);
         }
       }),
     ];
@@ -199,11 +259,13 @@ class MeshTransportCoordinator implements MeshTransport {
       link.incoming.listen((bytes) {
         unawaited(
           _relayLock.synchronized(() async {
+            if (_sessions[peerId] != link) return;
             if (!_acceptsHello(bytes)) {
               await link.close();
               return;
             }
             final result = await relay.receive(peerId, bytes);
+            _markPeerSeen(peerId);
             _onMetrics(result.metrics);
             for (final controlFrame in result.controlFrames) {
               await link.send(controlFrame, withResponse: true);
@@ -301,6 +363,8 @@ class MeshTransportCoordinator implements MeshTransport {
   });
 
   Future<void> stop() async {
+    await _serverPeerSubscription?.cancel();
+    _serverPeerSubscription = null;
     await _serverSubscription?.cancel();
     _serverSubscription = null;
     for (final subs in _sessionSubscriptions.values) {
@@ -314,14 +378,17 @@ class MeshTransportCoordinator implements MeshTransport {
       await link.close();
     }
     _sessions.clear();
+    _serverPeersStarting.clear();
     await server.stop();
     _peers = [];
-    if (!_peersController.isClosed) _peersController.add(_peers);
+    _emitPeers();
     await _receivedController.close();
     await _peersController.close();
   }
 
-  void _detach(String peerId) {
+  void _detach(String peerId, {PeerLink? expected}) {
+    final current = _sessions[peerId];
+    if (current == null || (expected != null && current != expected)) return;
     _sessions.remove(peerId);
     final subs = _sessionSubscriptions.remove(peerId);
     if (subs != null) {
@@ -334,8 +401,30 @@ class MeshTransportCoordinator implements MeshTransport {
         for (final p in _peers)
           if (p.peerId != peerId) p,
       ];
-      _peersController.add(_peers);
+      _emitPeers();
     }
+  }
+
+  void _emitPeers() {
+    if (!_peersController.isClosed) {
+      _peersController.add(List<PeerState>.unmodifiable(_peers));
+    }
+  }
+
+  void _markPeerSeen(String peerId) {
+    final index = _peers.indexWhere((peer) => peer.peerId == peerId);
+    if (index == -1) return;
+    final peer = _peers[index];
+    _peers[index] = PeerState(
+      peerId: peer.peerId,
+      siteFingerprint: peer.siteFingerprint,
+      connected: peer.connected,
+      mtu: peer.mtu,
+      rssi: peer.rssi,
+      queuedObjects: relay.scheduler.size(),
+      lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _emitPeers();
   }
 
   bool _acceptsHello(Uint8List bytes) {

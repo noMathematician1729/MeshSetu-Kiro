@@ -36,19 +36,54 @@ class MeshGattServer {
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
   int _pendingFrames = 0;
+  bool _running = false;
   final AsyncLock _notifyLock = AsyncLock();
   StreamSubscription<BlePeripheralCharacteristicSubscriptionChanged>?
   _subscriptionSubscription;
+  StreamSubscription<BlePeripheralMtuChanged>? _mtuSubscription;
+  final Map<String, int> _mtus = {};
 
   Stream<IncomingGattFrame> get incoming => _frames.stream;
 
+  Stream<String> get subscribedPeerIds => UniversalBlePeripheral
+      .characteristicSubscriptionStream
+      .where(
+        (event) => event.characteristicId == MeshGatt.tx && event.isSubscribed,
+      )
+      .map((event) => event.deviceId);
+
+  Stream<Uint8List> incomingFrom(String deviceId) => _frames.stream
+      .where((frame) => frame.deviceId == deviceId)
+      .map((frame) => frame.bytes);
+
+  Stream<bool> connectionStateFor(String deviceId) => UniversalBlePeripheral
+      .connectionStateStream
+      .where((event) => event.deviceId == deviceId)
+      .map((event) => event.connected);
+
+  Future<int> mtuFor(String deviceId) async {
+    final known = _mtus[deviceId];
+    if (known != null) return known;
+    final maximumNotifyLength =
+        await UniversalBlePeripheral.getMaximumNotifyLength(deviceId);
+    // universal_ble reports the ATT payload budget, while fragment() expects
+    // the negotiated MTU including the three-byte notification header.
+    return maximumNotifyLength == null || maximumNotifyLength < 20
+        ? 23
+        : maximumNotifyLength + 3;
+  }
+
   Future<void> start() async {
+    _running = true;
     UniversalBlePeripheral.setWriteRequestHandlers((
       deviceId,
       characteristicId,
       offset,
       value,
     ) {
+      if (!_running) {
+        return PeripheralWriteRequestResult(status: _gattFailure);
+      }
       if (characteristicId != MeshGatt.rx || offset != 0 || value == null) {
         return PeripheralWriteRequestResult(status: _gattRequestNotSupported);
       }
@@ -73,6 +108,10 @@ class MeshGattServer {
           }
         });
 
+    _mtuSubscription = UniversalBlePeripheral.mtuChangedStream.listen((event) {
+      _mtus[event.deviceId] = event.mtu;
+    });
+
     await UniversalBlePeripheral.addService(MeshGatt.buildService());
   }
 
@@ -82,10 +121,8 @@ class MeshGattServer {
     if (_pendingFrames > 0) _pendingFrames--;
   }
 
-  /// Renamed to match upstream's `notifyAwait` — `universal_ble`'s
-  /// `updateCharacteristicValue` is itself an awaited platform call, so this
-  /// already waits for the notification to actually go out, not just for
-  /// the OS to accept the request.
+  /// Serializes notifications and applies conservative pacing because
+  /// universal_ble does not expose Android's onNotificationSent callback.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
     if (!_subscribers.contains(deviceId)) return false;
     return _notifyLock.synchronized(() async {
@@ -95,15 +132,23 @@ class MeshGattServer {
         value: bytes,
         deviceId: deviceId,
       );
+      // ponytail: replace this conservative pacing with onNotificationSent
+      // when universal_ble exposes that platform callback.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
       return true;
     });
   }
 
   Future<void> stop() async {
+    _running = false;
+    UniversalBlePeripheral.setWriteRequestHandlers(null);
     await _subscriptionSubscription?.cancel();
     _subscriptionSubscription = null;
+    await _mtuSubscription?.cancel();
+    _mtuSubscription = null;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
+    _mtus.clear();
     _pendingFrames = 0;
     await _frames.close();
   }
