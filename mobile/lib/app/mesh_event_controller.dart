@@ -41,7 +41,7 @@ class MeshEventController {
     final coordinator = _coordinator;
     if (coordinator == null) return;
     coordinator.frameInterceptor = enabled
-        ? LossyFrameInterceptor(dropEvery: 5)
+        ? LossyFrameInterceptor(dropEvery: 5, corruptEvery: 7)
         : null;
   }
 
@@ -179,7 +179,7 @@ class MeshEventController {
     }
   }
 
-  Future<void> sendTestObject() async {
+  Future<bool> sendTestObject() async {
     for (var attempt = 0; attempt < 100; attempt++) {
       final coordinator = _coordinator;
       if (coordinator != null) {
@@ -200,10 +200,11 @@ class MeshEventController {
             originEphemeralId: _localToken,
           ),
         );
-        return;
+        return true;
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
+    return false;
   }
 
   Future<void> stop() async {
@@ -232,7 +233,9 @@ class MeshEventController {
 
   static int _randomNonZero64() {
     final random = Random.secure();
-    final high = random.nextInt(1 << 32);
+    // FrameCodec and protobuf currently use signed int64 accessors. Keep the
+    // high bit clear so an object ID has one stable Dart value end to end.
+    final high = random.nextInt(1 << 31);
     final low = random.nextInt(1 << 32);
     final value = (high << 32) | low;
     return value == 0 ? 1 : value;

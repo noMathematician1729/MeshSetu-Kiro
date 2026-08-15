@@ -491,8 +491,14 @@ class FileRelayStore extends RelayStore {
           expiresAtMs: expiresAtMs,
           createdAtMs: createdAtMs,
         );
-        if (value.expiresAtMs > nowMs) results.add(value);
+        if (value.expiresAtMs > nowMs) {
+          results.add(value);
+        } else {
+          entry.deleteSync();
+        }
       } catch (_) {
+        // Preserve unreadable entries for recovery rather than risking data
+        // loss on a transient filesystem failure.
         continue;
       }
     }

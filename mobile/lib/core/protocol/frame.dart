@@ -126,6 +126,9 @@ class MeshFrame {
 abstract final class FrameCodec {
   static Uint8List encode(MeshFrame frame) {
     if (frame.priority > 5) throw ArgumentError('priority out of range');
+    if (frame.objectId <= 0) {
+      throw ArgumentError('objectId must be a positive int64');
+    }
     if (frame.count < 1 || frame.count > maxChunks) {
       throw ArgumentError('count out of range');
     }
@@ -162,7 +165,7 @@ abstract final class FrameCodec {
     if (priority > 5) throw ArgumentError('priority out of range');
     final flags = input.getUint8(3);
     final objectId = input.getInt64(4, Endian.big);
-    if (objectId == 0) throw ArgumentError('objectId must not be 0');
+    if (objectId <= 0) throw ArgumentError('objectId must be a positive int64');
     final sequence = input.getUint16(12, Endian.big);
     final count = input.getUint16(14, Endian.big);
     if (count < 1 || count > maxChunks) {
@@ -194,7 +197,7 @@ List<MeshFrame> fragment({
   required Uint8List encrypted,
   required int mtu,
 }) {
-  if (objectId == 0) throw ArgumentError('objectId must not be 0');
+  if (objectId <= 0) throw ArgumentError('objectId must be a positive int64');
   if (encrypted.isEmpty || encrypted.length > maxObjectBytes) {
     throw ArgumentError('encrypted object size out of range');
   }

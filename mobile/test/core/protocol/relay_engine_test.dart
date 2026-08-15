@@ -191,4 +191,21 @@ void main() {
     first.markAck(value.objectId, 'peer');
     expect(FileRelayStore(directory).pending(100), isEmpty);
   });
+
+  test('file store removes expired pending entries', () {
+    final directory = Directory.systemTemp.createTempSync('meshsetu-expired');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final store = FileRelayStore(directory);
+    store.enqueue(
+      EncryptedObject(
+        objectId: 15,
+        trafficClass: TrafficClass.roomMessage,
+        bytes: Uint8List.fromList([1]),
+        expiresAtMs: 10,
+      ),
+    );
+
+    expect(store.pending(10), isEmpty);
+    expect(File('${directory.path}/outbox/15.bin').existsSync(), isFalse);
+  });
 }

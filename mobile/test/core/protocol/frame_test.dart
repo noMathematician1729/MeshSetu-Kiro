@@ -32,6 +32,34 @@ void main() {
     );
   });
 
+  test('largest supported signed object ID round trips unchanged', () {
+    const objectId = 0x7FFFFFFFFFFFFFFF;
+    final encoded = FrameCodec.encode(
+      MeshFrame(
+        type: FrameType.data,
+        priority: 1,
+        flags: 0,
+        objectId: objectId,
+        sequence: 0,
+        count: 1,
+        payload: Uint8List.fromList([1]),
+      ),
+    );
+    expect(FrameCodec.decode(encoded).objectId, objectId);
+  });
+
+  test('rejects noncanonical signed object IDs', () {
+    expect(
+      () => fragment(
+        objectId: -1,
+        priority: 1,
+        encrypted: Uint8List.fromList([1]),
+        mtu: 23,
+      ),
+      throwsArgumentError,
+    );
+  });
+
   test('duplicate chunks are ignored', () {
     final frame = fragment(
       objectId: 42,
@@ -43,6 +71,18 @@ void main() {
     expect(buffer.add(frame), isTrue);
     expect(buffer.add(frame), isFalse);
     expect(buffer.received, 1);
+  });
+
+  test('low MTU rejects objects that exceed the voice chunk budget', () {
+    expect(
+      () => fragment(
+        objectId: 42,
+        priority: 3,
+        encrypted: Uint8List(2049),
+        mtu: 23,
+      ),
+      throwsArgumentError,
+    );
   });
 
   test('hello round trips and rejects unknown version', () {

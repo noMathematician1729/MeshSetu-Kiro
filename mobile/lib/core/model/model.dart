@@ -60,7 +60,7 @@ class MeshEnvelope {
     required this.originEphemeralId,
     Uint8List? traceId,
   }) : traceId = traceId ?? Uint8List(16) {
-    if (objectId == 0) throw ArgumentError('objectId must not be 0');
+    if (objectId <= 0) throw ArgumentError('objectId must be a positive int64');
     if (eventId.trim().isEmpty || siteId.trim().isEmpty) {
       throw ArgumentError('eventId and siteId must not be blank');
     }

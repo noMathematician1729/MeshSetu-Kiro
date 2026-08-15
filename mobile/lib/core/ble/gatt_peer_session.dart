@@ -40,6 +40,8 @@ class GattPeerSession {
   final Completer<void> _ready = Completer<void>();
   final AsyncLock _writeLock = AsyncLock();
   StreamSubscription<bool>? _connectionSubscription;
+  bool _closed = false;
+  Future<void>? _closeFuture;
 
   static GattPeerSession open(String deviceId) {
     final session = GattPeerSession._(deviceId);
@@ -52,9 +54,13 @@ class GattPeerSession {
       _connectionSubscription = UniversalBle.connectionStream(deviceId).listen((
         connected,
       ) {
-        if (!connected) _markDisconnected();
+        if (!connected) {
+          _closed = true;
+          _markDisconnected();
+        }
       });
       await UniversalBle.connect(deviceId);
+      _throwIfClosed();
       _setState(PeerSessionState.negotiating);
       try {
         mtu = await UniversalBle.requestMtu(deviceId, 517);
@@ -62,16 +68,19 @@ class GattPeerSession {
         // MTU requests are best-effort; fall back to the default ATT MTU.
         mtu = 23;
       }
+      _throwIfClosed();
       await UniversalBle.discoverServices(deviceId);
+      _throwIfClosed();
       await UniversalBle.subscribeNotifications(
         deviceId,
         MeshGatt.service,
         MeshGatt.tx,
       );
+      _throwIfClosed();
       _setState(PeerSessionState.ready);
       _ready.complete();
     } catch (error) {
-      _setState(PeerSessionState.failed);
+      if (!_closed) _setState(PeerSessionState.failed);
       if (!_ready.isCompleted) _ready.completeError(error);
     }
   }
@@ -91,7 +100,10 @@ class GattPeerSession {
     });
   }
 
-  Future<void> close() async {
+  Future<void> close() => _closeFuture ??= _dispose();
+
+  Future<void> _dispose() async {
+    _closed = true;
     _markDisconnected();
     try {
       await UniversalBle.disconnect(deviceId);
@@ -108,6 +120,10 @@ class GattPeerSession {
     if (!_ready.isCompleted) {
       _ready.completeError(StateError('GATT disconnected'));
     }
+  }
+
+  void _throwIfClosed() {
+    if (_closed) throw StateError('GATT session closed');
   }
 
   void _setState(PeerSessionState value) {

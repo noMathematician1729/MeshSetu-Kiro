@@ -35,7 +35,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       FlutterForegroundTask.sendDataToMain(const {'status': 'started'});
       if (_sosPending) {
         _sosPending = false;
-        unawaited(controller.sendTestObject());
+        unawaited(_sendTestSos(controller));
       }
     } catch (error) {
       FlutterForegroundTask.sendDataToMain({
@@ -67,7 +67,20 @@ class _MeshEventTaskHandler extends TaskHandler {
     if (controller == null) {
       _sosPending = true;
     } else {
-      unawaited(controller.sendTestObject());
+      unawaited(_sendTestSos(controller));
+    }
+  }
+
+  Future<void> _sendTestSos(MeshEventController controller) async {
+    try {
+      if (!await controller.sendTestObject()) {
+        FlutterForegroundTask.sendDataToMain(const {'status': 'sos_failed'});
+      }
+    } catch (error) {
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'sos_failed',
+        'message': error.toString(),
+      });
     }
   }
 }
@@ -104,6 +117,15 @@ class _EventModeScreenState extends State<EventModeScreen> {
         eventAction: ForegroundTaskEventAction.nothing(),
       ),
     );
+    unawaited(_restoreServiceState());
+  }
+
+  Future<void> _restoreServiceState() async {
+    if (!await FlutterForegroundTask.isRunningService || !mounted) return;
+    setState(() {
+      _eventModeActive = true;
+      _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
+    });
   }
 
   void _onTaskData(Object data) {
@@ -127,10 +149,25 @@ class _EventModeScreenState extends State<EventModeScreen> {
           _status = 'MeshSetu\n${data['message']}';
         });
         unawaited(FlutterForegroundTask.stopService());
+      case 'sos_failed':
+        setState(() {
+          _status =
+              'MeshSetu\n${data['message'] ?? 'Test SOS could not queue'}';
+        });
     }
   }
 
   Future<void> _startEventMode() async {
+    if (await FlutterForegroundTask.isRunningService) {
+      if (mounted) {
+        setState(() {
+          _eventModeActive = true;
+          _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
+        });
+      }
+      return;
+    }
+    var startedHere = false;
     try {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
       final permissions = await BlePermissions.request(
@@ -160,6 +197,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
       if (result is! ServiceRequestSuccess) {
         throw StateError('Unable to start the foreground service');
       }
+      startedHere = true;
 
       if (!mounted) return;
       setState(() {
@@ -167,7 +205,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
         _status = 'MeshSetu\nStarting BLE relay service';
       });
     } catch (error) {
-      await FlutterForegroundTask.stopService();
+      if (startedHere) await FlutterForegroundTask.stopService();
       if (mounted) setState(() => _status = 'MeshSetu\n$error');
     }
   }
@@ -221,7 +259,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Debug: drop every 5th frame'),
+                title: const Text('Debug: drop/corrupt test frames'),
                 value: _debugLossEnabled,
                 onChanged: _eventModeActive
                     ? (enabled) {

@@ -14,9 +14,15 @@ import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
 /// Two in-memory [PeerLink]s wired directly to each other, standing in for
 /// a real BLE connection between two phones. No radio, no platform channel.
 class _FakeLink implements PeerLink {
-  _FakeLink({this.closeStreamsOnClose = true});
+  _FakeLink({
+    this.closeStreamsOnClose = true,
+    this.sendSucceeds = true,
+    this.throwOnSend = false,
+  });
 
   final bool closeStreamsOnClose;
+  final bool sendSucceeds;
+  final bool throwOnSend;
   @override
   final int mtu = 185;
 
@@ -37,6 +43,8 @@ class _FakeLink implements PeerLink {
   @override
   Future<bool> send(Uint8List bytes, {bool withResponse = true}) async {
     sentFrames.add(bytes);
+    if (throwOnSend) throw StateError('simulated link failure');
+    if (!sendSucceeds) return false;
     peer._incomingController.add(bytes);
     return true;
   }
@@ -289,5 +297,56 @@ void main() {
       (await received.timeout(const Duration(seconds: 2))).envelope.objectId,
       10,
     );
+    expect(
+      bToA.sentFrames
+          .map(FrameCodec.decode)
+          .every((frame) => frame.type == FrameType.custodyAck),
+      isTrue,
+    );
+  });
+
+  test('tries later peers when earlier peers are unhealthy', () async {
+    final coordinator = _coordinator();
+    final failedA = _FakeLink(sendSucceeds: false)..peer = _FakeLink();
+    final failedB = _FakeLink(sendSucceeds: false)..peer = _FakeLink();
+    final healthy = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('a', failedA, siteFingerprint: 1);
+    coordinator.attach('b', failedB, siteFingerprint: 1);
+    coordinator.attach('c', healthy, siteFingerprint: 1);
+
+    await coordinator.send(
+      _envelope(
+        objectId: 11,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      ),
+    );
+
+    expect(healthy.sentFrames, isNotEmpty);
+  });
+
+  test('send exceptions leave the object queued for retry', () async {
+    final coordinator = _coordinator();
+    final broken = _FakeLink(throwOnSend: true)..peer = _FakeLink();
+    coordinator.attach('broken', broken, siteFingerprint: 1);
+
+    await coordinator.send(
+      _envelope(
+        objectId: 12,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      ),
+    );
+
+    expect(coordinator.relay.nextOutbound(), isNotNull);
+  });
+
+  test('each peer-state listener receives the current snapshot', () async {
+    final coordinator = _coordinator();
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinator.attach('peer', link, siteFingerprint: 1);
+
+    expect((await coordinator.peerState.first).single.peerId, 'peer');
+    expect((await coordinator.peerState.first).single.peerId, 'peer');
   });
 }
