@@ -43,6 +43,9 @@ class GattPeerSession private constructor(private val context: Context, val devi
     suspend fun awaitReady() { ready.await() }
 
     @SuppressLint("MissingPermission")
+    fun close() { gatt?.close(); stateMutable.value = PeerSessionState.DISCONNECTED }
+
+    @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     suspend fun send(bytes: ByteArray, withResponse: Boolean = true): Result<Unit> = operationLock.withLock {
         runCatching {

@@ -15,5 +15,5 @@ dependencies {
     implementation(project(":core-model"))
     implementation(project(":core-protocol"))
     implementation(project(":core-ble"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
-
