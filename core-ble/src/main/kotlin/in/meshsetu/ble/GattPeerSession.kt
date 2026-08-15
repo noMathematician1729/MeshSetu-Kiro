@@ -17,9 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.withTimeout
 
 enum class PeerSessionState { CONNECTING, NEGOTIATING, READY, DISCONNECTED, FAILED }
 
@@ -34,6 +32,7 @@ class GattPeerSession private constructor(private val context: Context, val devi
         private set
     private var gatt: BluetoothGatt? = null
     private var rx: BluetoothGattCharacteristic? = null
+    private var writeCompletion: CompletableDeferred<Int>? = null
 
     @SuppressLint("MissingPermission")
     fun connect() {
@@ -43,7 +42,12 @@ class GattPeerSession private constructor(private val context: Context, val devi
     suspend fun awaitReady() { ready.await() }
 
     @SuppressLint("MissingPermission")
-    fun close() { gatt?.close(); stateMutable.value = PeerSessionState.DISCONNECTED }
+    fun close() {
+        writeCompletion?.completeExceptionally(IllegalStateException("GATT session closed"))
+        writeCompletion = null
+        gatt?.close()
+        stateMutable.value = PeerSessionState.DISCONNECTED
+    }
 
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
@@ -51,13 +55,21 @@ class GattPeerSession private constructor(private val context: Context, val devi
         runCatching {
             awaitReady()
             val characteristic = checkNotNull(rx)
-            if (Build.VERSION.SDK_INT >= 33) {
-                val status = gatt!!.writeCharacteristic(characteristic, bytes, if (withResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-                check(status == BluetoothStatusCodes.SUCCESS) { "GATT write failed: $status" }
-            } else {
-                characteristic.writeType = if (withResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                characteristic.value = bytes
-                check(gatt!!.writeCharacteristic(characteristic)) { "GATT write failed" }
+            val completion = if (withResponse) CompletableDeferred<Int>().also { writeCompletion = it } else null
+            try {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    val status = gatt!!.writeCharacteristic(characteristic, bytes, if (withResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                    check(status == BluetoothStatusCodes.SUCCESS) { "GATT write failed: $status" }
+                } else {
+                    characteristic.writeType = if (withResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    characteristic.value = bytes
+                    check(gatt!!.writeCharacteristic(characteristic)) { "GATT write failed" }
+                }
+                if (completion != null) {
+                    check(withTimeout(5_000) { completion.await() } == BluetoothGatt.GATT_SUCCESS) { "GATT write callback failed" }
+                }
+            } finally {
+                if (writeCompletion === completion) writeCompletion = null
             }
         }
     }
@@ -121,8 +133,13 @@ class GattPeerSession private constructor(private val context: Context, val devi
         if (characteristic.uuid == MeshGatt.TX) incomingMutable.tryEmit(characteristic.value?.copyOf() ?: return)
     }
 
+    override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+        writeCompletion?.complete(status)
+    }
+
     private fun fail(message: String) {
         stateMutable.value = PeerSessionState.FAILED
+        writeCompletion?.completeExceptionally(IllegalStateException(message))
         if (!ready.isCompleted) ready.completeExceptionally(IllegalStateException(message))
     }
 

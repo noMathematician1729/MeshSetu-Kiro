@@ -40,11 +40,12 @@ data class DiscoveredPeer(val result: ScanResult, val metadata: DiscoveryMetadat
 
 class MeshScanner(private val scanner: BluetoothLeScanner) {
     @SuppressLint("MissingPermission")
-    suspend fun scan(windowMs: Long = 4_000): Result<List<DiscoveredPeer>> = suspendCancellableCoroutine { continuation ->
+    suspend fun scan(windowMs: Long = 4_000, expectedFingerprint: Long? = null): Result<List<DiscoveredPeer>> = suspendCancellableCoroutine { continuation ->
         val found = linkedMapOf<String, DiscoveredPeer>()
         val callback = object : ScanCallback() {
             override fun onScanResult(type: Int, result: ScanResult) {
                 val metadata = result.scanRecord?.getManufacturerSpecificData(MeshGatt.DEVELOPMENT_MANUFACTURER_ID)?.let(DiscoveryMetadata::decode) ?: return
+                if (expectedFingerprint != null && metadata.fingerprint != expectedFingerprint) return
                 found[result.device.address] = DiscoveredPeer(result, metadata)
             }
             override fun onScanFailed(errorCode: Int) { if (continuation.isActive) continuation.resumeWithException(IllegalStateException("BLE scan failed: $errorCode")) }

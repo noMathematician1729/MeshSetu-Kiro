@@ -11,6 +11,36 @@ const val MAX_OBJECT_BYTES = 64 * 1024
 
 enum class FrameType(val wire: UByte) { DATA(1u), HELLO(2u), CUSTODY_ACK(3u), NACK(4u), ERROR(5u) }
 
+data class Hello(
+    val siteFingerprint: Long,
+    val ephemeralNodeId: ULong,
+    val capabilities: Int,
+    val maxObjectBytes: Int = MAX_OBJECT_BYTES,
+    val nowEpochSec: Long,
+    val protocolVersion: Int = 1,
+)
+
+object HelloCodec {
+    private const val BYTES = 1 + 8 + 8 + 4 + 4 + 8
+
+    fun encode(value: Hello): ByteArray = ByteBuffer.allocate(BYTES).order(ByteOrder.BIG_ENDIAN)
+        .put(value.protocolVersion.toByte())
+        .putLong(value.siteFingerprint)
+        .putLong(value.ephemeralNodeId.toLong())
+        .putInt(value.capabilities)
+        .putInt(value.maxObjectBytes)
+        .putLong(value.nowEpochSec)
+        .array()
+
+    fun decode(bytes: ByteArray): Hello? {
+        if (bytes.size != BYTES) return null
+        val input = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+        val version = input.get().toInt()
+        if (version != 1) return null
+        return Hello(input.long, input.long.toULong(), input.int, input.int, input.long, version)
+    }
+}
+
 data class MeshFrame(
     val type: FrameType,
     val priority: UByte,
@@ -37,7 +67,8 @@ object FrameCodec {
         require(bytes.size >= FRAME_HEADER_BYTES) { "frame is shorter than header" }
         val input = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
         require(input.get().toUByte() == FRAME_VERSION) { "unsupported frame version" }
-        val type = FrameType.entries.firstOrNull { it.wire == input.get().toUByte() } ?: error("unknown frame type")
+        val wireType = input.get().toUByte()
+        val type = FrameType.entries.firstOrNull { it.wire == wireType } ?: error("unknown frame type")
         val priority = input.get().toUByte().also { require(it <= 5u) }
         val flags = input.get().toUByte()
         val objectId = input.long.toULong().also { require(it != 0uL) }

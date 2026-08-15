@@ -5,7 +5,7 @@ import `in`.meshsetu.model.TrafficClass
 import java.util.PriorityQueue
 
 class OutboundScheduler {
-    private val queue = PriorityQueue<EncryptedObject>(compareBy<EncryptedObject> { it.trafficClass.rank }.thenBy { it.expiresAtMs }.thenBy { it.objectId })
+    private val queue = PriorityQueue<EncryptedObject>(compareBy<EncryptedObject> { it.trafficClass.rank }.thenBy { it.createdAtMs }.thenBy { it.objectId })
 
     @Synchronized fun enqueue(value: EncryptedObject, nowMs: Long) {
         require(value.bytes.isNotEmpty())
@@ -32,4 +32,3 @@ class RecentObjectCache(private val maxEntries: Int = 4096) {
         return true
     }
 }
-

@@ -23,4 +23,11 @@ class SecureEnvelopeTest {
         val tampered = encrypted.copy(bytes = encrypted.bytes.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() })
         assertTrue(crypto.decrypt(tampered).isFailure)
     }
+
+    @Test fun siteMetadataIsAuthenticated() {
+        val source = MeshEnvelope(9u, "event", "site", "room", 1, 2, 0, 5, PriorityBand.P0_CRITICAL, PayloadType.STRUCTURED_SOS, byteArrayOf(1), 9u)
+        val encrypted = crypto.encrypt(source)
+        val tampered = encrypted.copy(bytes = encrypted.bytes.copyOf().also { it[3] = 'x'.code.toByte() })
+        assertTrue(crypto.decrypt(tampered).isFailure)
+    }
 }

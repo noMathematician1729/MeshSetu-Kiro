@@ -20,7 +20,14 @@ class MainActivity : Activity() {
                 else startEventService(status)
             }
         }
-        setContentView(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(status); addView(start) })
+        val sendTest = Button(this).apply {
+            text = "Send 100-byte test SOS"
+            setOnClickListener {
+                startForegroundService(Intent(this@MainActivity, MeshEventService::class.java).setAction(MeshEventService.ACTION_SEND_TEST))
+                status.text = "MeshSetu\nTest SOS queued"
+            }
+        }
+        setContentView(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(status); addView(start); addView(sendTest) })
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
