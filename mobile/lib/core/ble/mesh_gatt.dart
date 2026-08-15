@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 /// Port of `in.meshsetu.ble.MeshGatt` (Kotlin `MeshGatt.kt`).
@@ -10,6 +12,18 @@ abstract final class MeshGatt {
   static const String rx = '2a6f5f11-4f7b-4c46-8cc8-cf282e4f4c01';
   static const String tx = '2a6f5f12-4f7b-4c46-8cc8-cf282e4f4c01';
   static const int discoveryVersion = 1;
+
+  /// Bluetooth SIG's reserved "for testing" company identifier. Used as the
+  /// manufacturer-data tag for discovery metadata (see `ble_discovery.dart`)
+  /// — swap for an assigned company ID before any real deployment.
+  static const int developmentManufacturerId = 0xFFFF;
+
+  static int siteFingerprint(String siteId, {String namespace = 'demo'}) {
+    final digest = sha256.convert(utf8.encode('$siteId|$namespace')).bytes;
+    return ByteData.sublistView(
+      Uint8List.fromList(digest.sublist(0, 8)),
+    ).getInt64(0, Endian.big);
+  }
 
   /// The Kotlin source manually declares a CCCD descriptor on [tx] so raw
   /// Android `BluetoothGattServer` APIs can react to subscription writes.

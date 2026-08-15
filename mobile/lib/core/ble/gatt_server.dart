@@ -67,7 +67,11 @@ class MeshGattServer {
     await UniversalBlePeripheral.addService(MeshGatt.buildService());
   }
 
-  Future<bool> notify(String deviceId, Uint8List bytes) async {
+  /// Renamed to match upstream's `notifyAwait` — `universal_ble`'s
+  /// `updateCharacteristicValue` is itself an awaited platform call, so this
+  /// already waits for the notification to actually go out, not just for
+  /// the OS to accept the request.
+  Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
     if (!_subscribers.contains(deviceId)) return false;
     await UniversalBlePeripheral.updateCharacteristicValue(
       characteristicId: MeshGatt.tx,

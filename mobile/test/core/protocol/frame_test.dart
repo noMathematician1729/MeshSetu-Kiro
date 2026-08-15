@@ -44,4 +44,17 @@ void main() {
     expect(buffer.add(frame), isFalse);
     expect(buffer.received, 1);
   });
+
+  test('hello round trips and rejects unknown version', () {
+    const hello = Hello(
+      siteFingerprint: 42,
+      ephemeralNodeId: 7,
+      capabilities: 9,
+      maxObjectBytes: 1024,
+      nowEpochSec: 10,
+    );
+    expect(HelloCodec.decode(HelloCodec.encode(hello)), hello);
+    final corrupted = HelloCodec.encode(hello)..[0] = 2;
+    expect(HelloCodec.decode(corrupted), isNull);
+  });
 }

@@ -1,17 +1,19 @@
+import 'dart:async';
+
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import '../core/ble/ble_permissions.dart';
+import 'mesh_event_controller.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event';
 
-/// Port of `in.meshsetu.app.MeshEventService` (Kotlin `MeshEventService.kt`)
-/// — the foreground-task handler backing the persistent notification.
-/// Same scope as the Kotlin service: it keeps the process alive and visible
-/// while active-event mode is on. It does not itself drive BLE scanning,
-/// advertising, or relay — the Kotlin service didn't either.
+/// Port of `in.meshsetu.app.MeshEventService`'s foreground-service shell
+/// (notification/lifecycle only — the actual mesh orchestration lives in
+/// [MeshEventController], see its doc comment for why it isn't hosted here
+/// in the background task isolate).
 @pragma('vm:entry-point')
 void meshEventTaskCallback() {
   FlutterForegroundTask.setTaskHandler(_MeshEventTaskHandler());
@@ -37,7 +39,9 @@ class EventModeScreen extends StatefulWidget {
 }
 
 class _EventModeScreenState extends State<EventModeScreen> {
+  final MeshEventController _controller = MeshEventController();
   bool _eventModeActive = false;
+  String _status = 'MeshSetu\nEvent mode is off';
 
   @override
   void initState() {
@@ -75,7 +79,23 @@ class _EventModeScreenState extends State<EventModeScreen> {
       callback: meshEventTaskCallback,
     );
 
-    setState(() => _eventModeActive = true);
+    await _controller.start();
+
+    setState(() {
+      _eventModeActive = true;
+      _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
+    });
+  }
+
+  Future<void> _sendTestSos() async {
+    setState(() => _status = 'MeshSetu\nTest SOS queued');
+    await _controller.sendTestObject();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_controller.stop());
+    super.dispose();
   }
 
   @override
@@ -88,16 +108,16 @@ class _EventModeScreenState extends State<EventModeScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                _eventModeActive
-                    ? 'MeshSetu\nEvent mode active\nBLE relay service running'
-                    : 'MeshSetu\nEvent mode is off',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
+              Text(_status, style: Theme.of(context).textTheme.headlineSmall),
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _eventModeActive ? null : _startEventMode,
                 child: const Text('Start event mode'),
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                onPressed: _eventModeActive ? _sendTestSos : null,
+                child: const Text('Send 100-byte test SOS'),
               ),
             ],
           ),

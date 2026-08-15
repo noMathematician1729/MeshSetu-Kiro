@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshsetu_mobile/core/ble/gatt_peer_session.dart';
 import 'package:meshsetu_mobile/core/ble/gatt_server.dart';
 import 'package:meshsetu_mobile/core/ble/mesh_transport.dart';
 import 'package:meshsetu_mobile/core/model/model.dart';
+import 'package:meshsetu_mobile/core/protocol/frame.dart';
 import 'package:meshsetu_mobile/core/protocol/relay_engine.dart';
 import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
 
@@ -16,19 +18,38 @@ class _FakeLink implements PeerLink {
 
   final StreamController<Uint8List> _incomingController =
       StreamController<Uint8List>.broadcast();
+  final StreamController<PeerSessionState> _stateController =
+      StreamController<PeerSessionState>.broadcast();
   late final _FakeLink peer;
+  final List<Uint8List> sentFrames = [];
+  bool closed = false;
 
   @override
   Stream<Uint8List> get incoming => _incomingController.stream;
 
   @override
+  Stream<PeerSessionState> get state => _stateController.stream;
+
+  @override
   Future<bool> send(Uint8List bytes, {bool withResponse = true}) async {
+    sentFrames.add(bytes);
     peer._incomingController.add(bytes);
     return true;
   }
+
+  /// Feed bytes into this link's `incoming` as if the remote peer sent them,
+  /// without going through [peer].
+  void deliver(Uint8List bytes) => _incomingController.add(bytes);
+
+  @override
+  Future<void> close() async {
+    closed = true;
+    await _incomingController.close();
+    await _stateController.close();
+  }
 }
 
-(PeerLink, PeerLink) _pairedLinks() {
+(_FakeLink, _FakeLink) _pairedLinks() {
   final a = _FakeLink();
   final b = _FakeLink();
   a.peer = b;
@@ -36,7 +57,7 @@ class _FakeLink implements PeerLink {
   return (a, b);
 }
 
-class _RecordingStore implements RelayStore {
+class _RecordingStore extends RelayStore {
   final List<MeshEnvelope> stored = [];
 
   @override
@@ -62,27 +83,22 @@ MeshEnvelope _envelope({
   originEphemeralId: 1,
 );
 
+MeshTransportCoordinator _coordinator({Hello? localHello}) =>
+    MeshTransportCoordinator(
+      server: MeshGattServer(),
+      relay: MeshRelayEngine(
+        siteId: 'site',
+        crypto: AeadEnvelope(List.filled(32, 5)),
+        store: _RecordingStore(),
+        clockMs: () => 100,
+      ),
+      localHello: localHello,
+    );
+
 void main() {
   test('relays an object end-to-end through the pump loop', () async {
-    final key = List.filled(32, 5);
-    final coordinatorA = MeshTransportCoordinator(
-      server: MeshGattServer(),
-      relay: MeshRelayEngine(
-        siteId: 'site',
-        crypto: AeadEnvelope(key),
-        store: _RecordingStore(),
-        clockMs: () => 100,
-      ),
-    );
-    final coordinatorB = MeshTransportCoordinator(
-      server: MeshGattServer(),
-      relay: MeshRelayEngine(
-        siteId: 'site',
-        crypto: AeadEnvelope(key),
-        store: _RecordingStore(),
-        clockMs: () => 100,
-      ),
-    );
+    final coordinatorA = _coordinator();
+    final coordinatorB = _coordinator();
 
     final (linkAtoB, linkBtoA) = _pairedLinks();
     coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
@@ -103,25 +119,8 @@ void main() {
   });
 
   test('SOS priority preempts bulk traffic through the coordinator', () async {
-    final key = List.filled(32, 6);
-    final coordinatorA = MeshTransportCoordinator(
-      server: MeshGattServer(),
-      relay: MeshRelayEngine(
-        siteId: 'site',
-        crypto: AeadEnvelope(key),
-        store: _RecordingStore(),
-        clockMs: () => 100,
-      ),
-    );
-    final coordinatorB = MeshTransportCoordinator(
-      server: MeshGattServer(),
-      relay: MeshRelayEngine(
-        siteId: 'site',
-        crypto: AeadEnvelope(key),
-        store: _RecordingStore(),
-        clockMs: () => 100,
-      ),
-    );
+    final coordinatorA = _coordinator();
+    final coordinatorB = _coordinator();
 
     final (linkAtoB, linkBtoA) = _pairedLinks();
     coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
@@ -154,5 +153,61 @@ void main() {
     await subscription.cancel();
 
     expect(arrivalOrder, [sos.objectId, bulk.objectId]);
+  });
+
+  test('replicates to up to maxReplicationPeers attached peers', () async {
+    final coordinatorA = _coordinator();
+    final linkB = _FakeLink()..peer = _FakeLink();
+    final linkC = _FakeLink()..peer = _FakeLink();
+    coordinatorA.attach('peer-b', linkB, siteFingerprint: 1);
+    coordinatorA.attach('peer-c', linkC, siteFingerprint: 2);
+
+    await coordinatorA.send(
+      _envelope(
+        objectId: 7,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      ),
+    );
+    // Let the pump's async sends settle.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(linkB.sentFrames, isNotEmpty);
+    expect(linkC.sentFrames, isNotEmpty);
+  });
+
+  test('rejects and closes a peer whose HELLO is for a foreign site', () async {
+    final localHello = const Hello(
+      siteFingerprint: 111,
+      ephemeralNodeId: 1,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    final coordinatorA = _coordinator(localHello: localHello);
+    final link = _FakeLink()..peer = _FakeLink();
+    coordinatorA.attach('peer-b', link, siteFingerprint: 1);
+
+    final foreignHello = const Hello(
+      siteFingerprint: 999,
+      ephemeralNodeId: 2,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    link.deliver(
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.hello,
+          priority: 0,
+          flags: 0,
+          objectId: foreignHello.ephemeralNodeId,
+          sequence: 0,
+          count: 1,
+          payload: HelloCodec.encode(foreignHello),
+        ),
+      ),
+    );
+
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(link.closed, isTrue);
   });
 }

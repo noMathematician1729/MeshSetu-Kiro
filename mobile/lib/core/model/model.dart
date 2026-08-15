@@ -110,12 +110,14 @@ class EncryptedObject {
     required this.trafficClass,
     required this.bytes,
     required this.expiresAtMs,
+    this.createdAtMs = 0,
   });
 
   final int objectId;
   final TrafficClass trafficClass;
   final Uint8List bytes;
   final int expiresAtMs;
+  final int createdAtMs;
 }
 
 class ReceivedObject {

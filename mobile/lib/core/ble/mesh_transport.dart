@@ -26,7 +26,9 @@ abstract interface class MeshTransport {
 abstract interface class PeerLink {
   int get mtu;
   Stream<Uint8List> get incoming;
+  Stream<PeerSessionState> get state;
   Future<bool> send(Uint8List bytes, {bool withResponse = true});
+  Future<void> close();
 }
 
 /// Adapts a real [GattPeerSession] to [PeerLink], turning Kotlin's
@@ -44,6 +46,9 @@ class GattPeerSessionLink implements PeerLink {
   Stream<Uint8List> get incoming => _session.incoming;
 
   @override
+  Stream<PeerSessionState> get state => _session.stateStream;
+
+  @override
   Future<bool> send(Uint8List bytes, {bool withResponse = true}) async {
     try {
       await _session.send(bytes, withResponse: withResponse);
@@ -52,6 +57,9 @@ class GattPeerSessionLink implements PeerLink {
       return false;
     }
   }
+
+  @override
+  Future<void> close() => _session.close();
 }
 
 /// A minimal async mutex, standing in for Kotlin's `kotlinx.coroutines.sync.Mutex`.
@@ -74,6 +82,8 @@ class _AsyncLock {
   }
 }
 
+typedef MetricsListener = void Function(List<RelayMetric> metrics);
+
 /// Port of `in.meshsetu.ble.MeshTransportCoordinator` (Kotlin
 /// `MeshTransport.kt`).
 ///
@@ -81,12 +91,13 @@ class _AsyncLock {
 /// - No `CoroutineScope` parameter — Dart `Stream.listen` callbacks already
 ///   run on the event loop; there's no separate dispatcher to launch onto.
 /// - Depends on [PeerLink] instead of [GattPeerSession] directly (see above).
-/// - The pump loop's "send to `sessions.entries.first`" behavior — i.e. it
-///   only ever targets the first attached peer, not a real multi-peer
-///   fan-out — is preserved exactly as-is from the Kotlin source. This is
-///   existing behavior being ported, not a new design decision.
 class MeshTransportCoordinator implements MeshTransport {
-  MeshTransportCoordinator({required this.server, required this.relay}) {
+  MeshTransportCoordinator({
+    required this.server,
+    required this.relay,
+    this.localHello,
+    MetricsListener? onMetrics,
+  }) : _onMetrics = onMetrics ?? ((_) {}) {
     relay.addPersistListener((envelope, peerId) {
       _receivedController.add(
         ReceivedObject(
@@ -98,8 +109,12 @@ class MeshTransportCoordinator implements MeshTransport {
     });
   }
 
+  static const int maxReplicationPeers = 2;
+
   final MeshGattServer server;
   final MeshRelayEngine relay;
+  final Hello? localHello;
+  final MetricsListener _onMetrics;
 
   final StreamController<ReceivedObject> _receivedController =
       StreamController<ReceivedObject>.broadcast();
@@ -108,7 +123,9 @@ class MeshTransportCoordinator implements MeshTransport {
   List<PeerState> _peers = [];
 
   final Map<String, PeerLink> _sessions = {};
-  final List<StreamSubscription<Object?>> _subscriptions = [];
+  final Map<String, List<StreamSubscription<Object?>>> _sessionSubscriptions =
+      {};
+  StreamSubscription<Object?>? _serverSubscription;
   final _AsyncLock _pumpLock = _AsyncLock();
 
   @override
@@ -119,16 +136,18 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     await server.start();
-    _subscriptions.add(
-      server.incoming.listen((frame) async {
-        final result = await relay.receive(frame.deviceId, frame.bytes);
-        for (final controlFrame in result.controlFrames) {
-          await server.notify(frame.deviceId, controlFrame);
-        }
-        await _pump();
-      }),
-    );
+    _serverSubscription = server.incoming.listen((frame) async {
+      if (!_acceptsHello(frame.bytes)) return;
+      final result = await relay.receive(frame.deviceId, frame.bytes);
+      _onMetrics(result.metrics);
+      for (final controlFrame in result.controlFrames) {
+        await server.notifyAwait(frame.deviceId, controlFrame);
+      }
+      await _pump();
+    });
   }
+
+  bool hasPeer(String peerId) => _sessions.containsKey(peerId);
 
   void attach(
     String peerId,
@@ -136,6 +155,10 @@ class MeshTransportCoordinator implements MeshTransport {
     required int siteFingerprint,
     int? rssi,
   }) {
+    final old = _sessions[peerId];
+    _detach(peerId);
+    if (old != null) unawaited(old.close());
+
     _sessions[peerId] = link;
     _peers = [
       for (final p in _peers)
@@ -151,15 +174,49 @@ class MeshTransportCoordinator implements MeshTransport {
       ),
     ];
     _peersController.add(_peers);
-    _subscriptions.add(
+
+    final subscriptions = <StreamSubscription<Object?>>[
+      link.state.listen((state) {
+        if (state == PeerSessionState.disconnected ||
+            state == PeerSessionState.failed) {
+          _detach(peerId);
+        }
+      }),
+    ];
+
+    final hello = localHello;
+    if (hello != null) {
+      unawaited(
+        link.send(
+          FrameCodec.encode(
+            MeshFrame(
+              type: FrameType.hello,
+              priority: 0,
+              flags: 0,
+              objectId: hello.ephemeralNodeId,
+              sequence: 0,
+              count: 1,
+              payload: HelloCodec.encode(hello),
+            ),
+          ),
+        ),
+      );
+    }
+    subscriptions.add(
       link.incoming.listen((bytes) async {
+        if (!_acceptsHello(bytes)) {
+          await link.close();
+          return;
+        }
         final result = await relay.receive(peerId, bytes);
+        _onMetrics(result.metrics);
         for (final controlFrame in result.controlFrames) {
           await link.send(controlFrame, withResponse: true);
         }
         await _pump();
       }),
     );
+    _sessionSubscriptions[peerId] = subscriptions;
   }
 
   @override
@@ -169,49 +226,123 @@ class MeshTransportCoordinator implements MeshTransport {
     return SendTicket(value.objectId);
   }
 
+  /// Requests missing chunks from each attached peer, drains any newly
+  /// queued outbound objects, and forwards accumulated metrics. Meant to be
+  /// called periodically (the Kotlin source's `MeshEventService` calls this
+  /// on a 2s loop alongside its scan cycle).
+  Future<void> tick() async {
+    for (final entry in _sessions.entries.toList()) {
+      for (final frame in relay.missingForPeer(entry.key)) {
+        await entry.value.send(frame, withResponse: true);
+      }
+    }
+    await _pump();
+    _onMetrics(relay.drainMetrics());
+  }
+
   Future<void> _pump() => _pumpLock.synchronized(() async {
+    relay.retryExpired();
     if (_sessions.isEmpty) return;
+    final peers = _sessions.entries.take(maxReplicationPeers).toList();
+    if (peers.isEmpty) return;
     while (true) {
       final objectToSend = relay.nextOutbound();
       if (objectToSend == null) return;
-      if (_sessions.isEmpty) return;
-      final link = _sessions.values.first;
-      var sent = true;
-      try {
-        final frames = fragment(
-          objectId: objectToSend.objectId,
-          priority: objectToSend.trafficClass.rank,
-          encrypted: objectToSend.bytes,
-          mtu: link.mtu,
-        );
-        for (final frame in frames) {
-          final ok = await link.send(
-            FrameCodec.encode(frame),
-            withResponse: objectToSend.trafficClass.rank <= 2,
+      var sentToAny = false;
+      var deferred = false;
+      for (final peer in peers) {
+        try {
+          final frames = fragment(
+            objectId: objectToSend.objectId,
+            priority: objectToSend.trafficClass.rank,
+            encrypted: objectToSend.bytes,
+            mtu: peer.value.mtu,
           );
-          if (!ok) {
-            sent = false;
-            break;
+          var allOk = true;
+          for (final frame in frames) {
+            final ok = await peer.value.send(
+              FrameCodec.encode(frame),
+              withResponse: true,
+            );
+            if (!ok) {
+              allOk = false;
+              break;
+            }
+          }
+          if (allOk) {
+            relay.markSent(objectToSend, peer.key);
+            sentToAny = true;
+          }
+        } on ArgumentError catch (_) {
+          // fragment() rejects an object that can't fit this peer's MTU
+          // budget; defer voice evidence (graceful degradation) instead of
+          // blocking the queue on it.
+          if (objectToSend.trafficClass == TrafficClass.voiceEvidence) {
+            relay.defer(objectToSend);
+            deferred = true;
+            _onMetrics([
+              RelayMetric(
+                'deferred_mtu',
+                objectId: objectToSend.objectId,
+                peerId: peer.key,
+              ),
+            ]);
           }
         }
-      } catch (_) {
-        sent = false;
       }
-      if (!sent) {
-        relay.requeue(objectToSend);
+      if (!sentToAny) {
+        if (!deferred) relay.requeue(objectToSend);
         return;
       }
     }
   });
 
   Future<void> stop() async {
-    for (final subscription in _subscriptions) {
-      await subscription.cancel();
+    await _serverSubscription?.cancel();
+    _serverSubscription = null;
+    for (final subs in _sessionSubscriptions.values) {
+      for (final s in subs) {
+        await s.cancel();
+      }
     }
-    _subscriptions.clear();
+    _sessionSubscriptions.clear();
+    for (final link in _sessions.values) {
+      await link.close();
+    }
     _sessions.clear();
     await server.stop();
     _peers = [];
     _peersController.add(_peers);
+  }
+
+  void _detach(String peerId) {
+    _sessions.remove(peerId);
+    final subs = _sessionSubscriptions.remove(peerId);
+    if (subs != null) {
+      for (final s in subs) {
+        s.cancel();
+      }
+    }
+    if (_peers.any((p) => p.peerId == peerId)) {
+      _peers = [
+        for (final p in _peers)
+          if (p.peerId != peerId) p,
+      ];
+      _peersController.add(_peers);
+    }
+  }
+
+  bool _acceptsHello(Uint8List bytes) {
+    final MeshFrame frame;
+    try {
+      frame = FrameCodec.decode(bytes);
+    } catch (_) {
+      return true;
+    }
+    if (frame.type != FrameType.hello) return true;
+    final remote = HelloCodec.decode(frame.payload);
+    if (remote == null) return false;
+    final hello = localHello;
+    return hello == null || remote.siteFingerprint == hello.siteFingerprint;
   }
 }

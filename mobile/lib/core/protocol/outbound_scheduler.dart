@@ -12,8 +12,8 @@ class OutboundScheduler {
   static int _compare(EncryptedObject a, EncryptedObject b) {
     final rank = a.trafficClass.rank.compareTo(b.trafficClass.rank);
     if (rank != 0) return rank;
-    final expiry = a.expiresAtMs.compareTo(b.expiresAtMs);
-    if (expiry != 0) return expiry;
+    final created = a.createdAtMs.compareTo(b.createdAtMs);
+    if (created != 0) return created;
     // objectId is an unsigned 64-bit tie-break in the Kotlin source; compare
     // by unsigned magnitude, matching model.dart's ULong-as-int convention.
     return a.objectId.toUnsigned(64).compareTo(b.objectId.toUnsigned(64));

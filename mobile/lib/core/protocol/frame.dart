@@ -30,6 +30,79 @@ enum FrameType {
   }
 }
 
+/// Handshake payload carried in a [FrameType.hello] frame. Fixed 33-byte
+/// big-endian layout: `[protocolVersion:1][siteFingerprint:8][ephemeralNodeId:8]
+/// [capabilities:4][maxObjectBytes:4][nowEpochSec:8]`.
+class Hello {
+  const Hello({
+    required this.siteFingerprint,
+    required this.ephemeralNodeId,
+    required this.capabilities,
+    // Must match the top-level `maxObjectBytes` const above; can't reference
+    // it directly as a default value for a same-named field parameter.
+    this.maxObjectBytes = 64 * 1024,
+    required this.nowEpochSec,
+    this.protocolVersion = 1,
+  });
+
+  final int siteFingerprint;
+  final int ephemeralNodeId;
+  final int capabilities;
+  final int maxObjectBytes;
+  final int nowEpochSec;
+  final int protocolVersion;
+
+  @override
+  bool operator ==(Object other) =>
+      other is Hello &&
+      other.siteFingerprint == siteFingerprint &&
+      other.ephemeralNodeId == ephemeralNodeId &&
+      other.capabilities == capabilities &&
+      other.maxObjectBytes == maxObjectBytes &&
+      other.nowEpochSec == nowEpochSec &&
+      other.protocolVersion == protocolVersion;
+
+  @override
+  int get hashCode => Object.hash(
+    siteFingerprint,
+    ephemeralNodeId,
+    capabilities,
+    maxObjectBytes,
+    nowEpochSec,
+    protocolVersion,
+  );
+}
+
+abstract final class HelloCodec {
+  static const int _byteLength = 1 + 8 + 8 + 4 + 4 + 8;
+
+  static Uint8List encode(Hello value) {
+    final out = ByteData(_byteLength);
+    out.setUint8(0, value.protocolVersion);
+    out.setInt64(1, value.siteFingerprint, Endian.big);
+    out.setInt64(9, value.ephemeralNodeId, Endian.big);
+    out.setInt32(17, value.capabilities, Endian.big);
+    out.setInt32(21, value.maxObjectBytes, Endian.big);
+    out.setInt64(25, value.nowEpochSec, Endian.big);
+    return out.buffer.asUint8List();
+  }
+
+  static Hello? decode(Uint8List bytes) {
+    if (bytes.length != _byteLength) return null;
+    final input = ByteData.sublistView(bytes);
+    final version = input.getUint8(0);
+    if (version != 1) return null;
+    return Hello(
+      siteFingerprint: input.getInt64(1, Endian.big),
+      ephemeralNodeId: input.getInt64(9, Endian.big),
+      capabilities: input.getInt32(17, Endian.big),
+      maxObjectBytes: input.getInt32(21, Endian.big),
+      nowEpochSec: input.getInt64(25, Endian.big),
+      protocolVersion: version,
+    );
+  }
+}
+
 class MeshFrame {
   const MeshFrame({
     required this.type,

@@ -9,14 +9,14 @@ import 'package:permission_handler/permission_handler.dart';
 abstract final class BlePermissions {
   static List<Permission> runtimePermissions({required int sdkInt}) {
     if (sdkInt >= 31) {
-      return const [
+      return [
         Permission.bluetoothScan,
         Permission.bluetoothAdvertise,
         Permission.bluetoothConnect,
-        Permission.microphone,
+        if (sdkInt >= 33) Permission.notification,
       ];
     }
-    return const [Permission.locationWhenInUse, Permission.microphone];
+    return const [Permission.locationWhenInUse];
   }
 
   static Future<Map<Permission, PermissionStatus>> request({
