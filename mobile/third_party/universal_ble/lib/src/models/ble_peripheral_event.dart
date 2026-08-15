@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:universal_ble/universal_ble.dart';
 
 sealed class BlePeripheralEvent {}
@@ -44,5 +46,7 @@ class BlePeripheralMtuChanged extends BlePeripheralEvent {
 class BlePeripheralNotificationSent extends BlePeripheralEvent {
   final String deviceId;
   final int status;
-  BlePeripheralNotificationSent(this.deviceId, this.status);
+  final Uint8List? value;
+
+  BlePeripheralNotificationSent(this.deviceId, this.status, this.value);
 }

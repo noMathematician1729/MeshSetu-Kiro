@@ -2509,6 +2509,25 @@ class UniversalBleAndroidChannel {
     );
     return pigeonVar_replyValue! as bool;
   }
+
+  Future<void> disconnectPeripheral(String deviceId) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.universal_ble.UniversalBleAndroidChannel.disconnectPeripheral$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[deviceId],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+  }
 }
 
 /// Native -> Flutter (peripheral)
@@ -2563,7 +2582,7 @@ abstract class UniversalBlePeripheralCallback {
 
   void onConnectionStateChange(String deviceId, bool connected);
 
-  void onNotificationSent(String deviceId, int status);
+  void onNotificationSent(String deviceId, int status, Uint8List? value);
 
   static void setUp(
     UniversalBlePeripheralCallback? api, {
@@ -2862,8 +2881,9 @@ abstract class UniversalBlePeripheralCallback {
           final List<Object?> args = message! as List<Object?>;
           final String arg_deviceId = args[0]! as String;
           final int arg_status = args[1]! as int;
+          final Uint8List? arg_value = args[2] as Uint8List?;
           try {
-            api.onNotificationSent(arg_deviceId, arg_status);
+            api.onNotificationSent(arg_deviceId, arg_status, arg_value);
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {
             return wrapResponse(error: e);

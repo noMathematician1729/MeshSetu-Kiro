@@ -91,6 +91,8 @@ class _RecordingStore extends RelayStore {
 class _FakePeripheral extends UniversalBlePeripheralUnsupported {
   final List<Uint8List> notifications = [];
   int notificationStatus = 0;
+  bool emitPreviousNotificationFirst = false;
+  int previousNotificationStatus = 1;
 
   @override
   Future<void> addService(
@@ -108,10 +110,21 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
     required Uint8List value,
     String? deviceId,
   }) async {
+    if (deviceId != null &&
+        emitPreviousNotificationFirst &&
+        notifications.isNotEmpty) {
+      updateNotificationSent(
+        BlePeripheralNotificationSent(
+          deviceId,
+          previousNotificationStatus,
+          notifications.last,
+        ),
+      );
+    }
     notifications.add(value);
     if (deviceId != null) {
       updateNotificationSent(
-        BlePeripheralNotificationSent(deviceId, notificationStatus),
+        BlePeripheralNotificationSent(deviceId, notificationStatus, value),
       );
     }
   }
@@ -475,9 +488,11 @@ void main() {
       expect(server.admitPeer('peer'), isTrue);
       expect(await server.notifyAwait('peer', Uint8List.fromList([1])), isTrue);
       expect(peripheral.notifications, hasLength(1));
+      peripheral.emitPreviousNotificationFirst = true;
+      expect(await server.notifyAwait('peer', Uint8List.fromList([2])), isTrue);
       peripheral.notificationStatus = 1;
       expect(
-        await server.notifyAwait('peer', Uint8List.fromList([2])),
+        await server.notifyAwait('peer', Uint8List.fromList([3])),
         isFalse,
       );
       await server.stop();
@@ -504,20 +519,29 @@ void main() {
       coordinator.attach('central-$i', links[i], siteFingerprint: 1);
     }
 
-    peripheral.updateCharacteristicSubscription(
-      BlePeripheralCharacteristicSubscriptionChanged(
-        deviceId: 'server-peer',
-        characteristicId: MeshGatt.tx,
-        isSubscribed: true,
-        name: null,
-      ),
-    );
+    for (final peerId in ['server-peer-a', 'server-peer-b']) {
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: peerId,
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+    }
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(coordinator.hasPeer('server-peer'), isFalse);
+    expect(coordinator.hasPeer('server-peer-a'), isFalse);
+    expect(coordinator.hasPeer('server-peer-b'), isFalse);
 
     links.first.emitState(PeerSessionState.disconnected);
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(coordinator.hasPeer('server-peer'), isTrue);
+    expect(
+      [
+        coordinator.hasPeer('server-peer-a'),
+        coordinator.hasPeer('server-peer-b'),
+      ].where((connected) => connected),
+      hasLength(1),
+    );
     await coordinator.stop();
   });
 }

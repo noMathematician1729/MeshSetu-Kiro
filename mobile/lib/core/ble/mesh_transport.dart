@@ -96,7 +96,7 @@ class GattServerPeerLink implements PeerLink {
   }
 
   @override
-  Future<void> close() async {}
+  Future<void> close() => _server.disconnectPeer(deviceId);
 }
 
 typedef MetricsListener = void Function(List<RelayMetric> metrics);
@@ -544,9 +544,14 @@ class MeshTransportCoordinator implements MeshTransport {
   }
 
   void _promoteRejectedPeers() {
-    if (_sessions.length >= maxPeerConnections) return;
+    if (_sessions.length + _serverPeersStarting.length >= maxPeerConnections) {
+      return;
+    }
     for (final peerId in server.rejectedPeerIds) {
-      if (_sessions.length >= maxPeerConnections) return;
+      if (_sessions.length + _serverPeersStarting.length >=
+          maxPeerConnections) {
+        return;
+      }
       if (!server.admitPeer(peerId)) continue;
       unawaited(_ensureServerPeer(peerId));
     }

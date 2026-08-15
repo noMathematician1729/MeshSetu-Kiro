@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.ParcelUuid
 import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
+import java.util.ArrayDeque
 
 private const val TAG = "UniversalBlePeripheral"
 
@@ -37,6 +38,7 @@ class UniversalBlePeripheralPlugin(
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
     private val bluetoothDevicesMap: MutableMap<String, BluetoothDevice> = HashMap()
+    private val pendingNotificationValues: MutableMap<String, ArrayDeque<ByteArray>> = HashMap()
     private val mtuByDeviceId: MutableMap<String, Int> = HashMap()
     private val emptyBytes = byteArrayOf()
     private var advertisingState: PeripheralAdvertisingState = PeripheralAdvertisingState.IDLE
@@ -56,6 +58,9 @@ class UniversalBlePeripheralPlugin(
         bluetoothLeAdvertiser = null
         synchronized(bluetoothDevicesMap) {
             bluetoothDevicesMap.clear()
+        }
+        synchronized(pendingNotificationValues) {
+            pendingNotificationValues.clear()
         }
         synchronized(mtuByDeviceId) { mtuByDeviceId.clear() }
         clearPeripheralCaches()
@@ -211,10 +216,37 @@ class UniversalBlePeripheralPlugin(
         val indicate =
             (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
         targetDevices.forEach { device ->
+            synchronized(pendingNotificationValues) {
+                pendingNotificationValues
+                    .getOrPut(device.address) { ArrayDeque() }
+                    .addLast(value.copyOf())
+            }
             handler.post {
-                gattServer?.notifyCharacteristicChanged(device, characteristic, indicate)
+                val accepted = gattServer?.notifyCharacteristicChanged(
+                    device,
+                    characteristic,
+                    indicate,
+                ) ?: false
+                if (!accepted) {
+                    val failedValue = synchronized(pendingNotificationValues) {
+                        pendingNotificationValues[device.address]?.let { queue ->
+                            if (queue.isEmpty()) null else queue.removeLast()
+                        }
+                    }
+                    callback.onNotificationSent(
+                        device.address,
+                        BluetoothGatt.GATT_FAILURE.toLong(),
+                        failedValue,
+                    ) {}
+                }
             }
         }
+    }
+
+    fun disconnectPeripheral(deviceId: String) {
+        val device = synchronized(bluetoothDevicesMap) { bluetoothDevicesMap[deviceId] }
+            ?: return
+        gattServer?.cancelConnection(device)
     }
 
     override fun getSubscribedClients(characteristicId: String): List<String> {
@@ -245,6 +277,9 @@ class UniversalBlePeripheralPlugin(
 
     private fun cleanConnection(device: BluetoothDevice) {
         val deviceAddress = device.address
+        synchronized(pendingNotificationValues) {
+            pendingNotificationValues.remove(deviceAddress)
+        }
         val subscribedCharUUID = synchronized(subscribedCharDevicesMap) {
             val current = subscribedCharDevicesMap[deviceAddress]?.toList() ?: emptyList()
             subscribedCharDevicesMap.remove(deviceAddress)
@@ -320,8 +355,13 @@ class UniversalBlePeripheralPlugin(
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             super.onNotificationSent(device, status)
+            val value = synchronized(pendingNotificationValues) {
+                pendingNotificationValues[device.address]?.let { queue ->
+                    if (queue.isEmpty()) null else queue.removeFirst()
+                }
+            }
             handler.post {
-                callback.onNotificationSent(device.address, status.toLong()) {}
+                callback.onNotificationSent(device.address, status.toLong(), value) {}
             }
         }
 

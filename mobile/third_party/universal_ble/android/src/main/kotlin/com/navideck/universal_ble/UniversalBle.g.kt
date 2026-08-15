@@ -2524,6 +2524,7 @@ interface UniversalBlePeripheralChannel {
 interface UniversalBleAndroidChannel {
   fun hasBluetoothAdvertisePermission(): Boolean
   fun requestBluetoothAdvertisePermission(callback: (Result<Boolean>) -> Unit)
+  fun disconnectPeripheral(deviceId: String)
 
   companion object {
     /** The codec used by UniversalBleAndroidChannel. */
@@ -2562,6 +2563,24 @@ interface UniversalBleAndroidChannel {
                 reply.reply(UniversalBlePigeonUtils.wrapResult(data))
               }
             }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBleAndroidChannel.disconnectPeripheral$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val deviceIdArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              api.disconnectPeripheral(deviceIdArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              UniversalBlePigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
           }
         } else {
           channel.setMessageHandler(null)
@@ -2739,12 +2758,12 @@ class UniversalBlePeripheralCallback(private val binaryMessenger: BinaryMessenge
       } 
     }
   }
-  fun onNotificationSent(deviceIdArg: String, statusArg: Long, callback: (Result<Unit>) -> Unit)
+  fun onNotificationSent(deviceIdArg: String, statusArg: Long, valueArg: ByteArray?, callback: (Result<Unit>) -> Unit)
 {
     val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
     val channelName = "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralCallback.onNotificationSent$separatedMessageChannelSuffix"
     val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
-    channel.send(listOf(deviceIdArg, statusArg)) {
+    channel.send(listOf(deviceIdArg, statusArg, valueArg)) {
       if (it is List<*>) {
         if (it.size > 1) {
           callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))

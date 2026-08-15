@@ -69,6 +69,8 @@ abstract class UniversalBlePeripheralPlatform {
     String? deviceId,
   });
 
+  Future<void> disconnectPeripheral(String deviceId);
+
   /// Returns GATT client device ids currently subscribed to [characteristicId].
   Future<List<String>> getSubscribedClients(String characteristicId);
 
@@ -187,6 +189,9 @@ class UniversalBlePeripheralUnsupported extends UniversalBlePeripheralPlatform {
   }) async {
     throw _notSupported();
   }
+
+  @override
+  Future<void> disconnectPeripheral(String deviceId) async {}
 
   @override
   Future<List<String>> getSubscribedClients(String characteristicId) async {

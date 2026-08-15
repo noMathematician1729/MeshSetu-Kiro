@@ -98,6 +98,9 @@ class UniversalBlePeripheral {
     deviceId: deviceId,
   );
 
+  static Future<void> disconnectPeripheral(String deviceId) =>
+      _platform.disconnectPeripheral(deviceId);
+
   /// Returns client device ids currently subscribed to [characteristicId]
   /// (e.g. HID report characteristic). Used to restore in-app state after restart.
   static Future<List<String>> getSubscribedClients(String characteristicId) =>

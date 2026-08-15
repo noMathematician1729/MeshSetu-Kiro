@@ -149,6 +149,15 @@ class MeshGattServer {
     _subscribers.remove(deviceId);
   }
 
+  Future<void> disconnectPeer(String deviceId) async {
+    try {
+      await UniversalBlePeripheral.disconnectPeripheral(deviceId);
+    } catch (_) {
+      // Logical rejection remains in force when the platform cannot cancel
+      // the peripheral connection.
+    }
+  }
+
   /// Re-admits a client that is still subscribed after a slot opens.
   bool admitPeer(String deviceId) {
     if (!_rejectedPeers.remove(deviceId)) return false;
@@ -168,9 +177,15 @@ class MeshGattServer {
     }
     return _notifyLock.synchronized(() async {
       if (!_running || !_subscribers.contains(deviceId)) return false;
+      final expected = Uint8List.fromList(bytes);
       final completion = defaultTargetPlatform == TargetPlatform.android
           ? UniversalBlePeripheral.notificationSentStream
-                .where((event) => event.deviceId == deviceId)
+                .where(
+                  (event) =>
+                      event.deviceId == deviceId &&
+                      event.value != null &&
+                      listEquals(event.value, expected),
+                )
                 .first
           : null;
       try {

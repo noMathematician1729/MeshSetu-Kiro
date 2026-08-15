@@ -355,6 +355,10 @@ class UniversalBlePlugin : UniversalBlePlatformChannel, BluetoothGattCallback(),
         handler.requestBluetoothAdvertisePermission(callback)
     }
 
+    override fun disconnectPeripheral(deviceId: String) {
+        peripheralPlugin.disconnectPeripheral(deviceId)
+    }
+
     override fun readRssi(deviceId: String, callback: (Result<Long>) -> Unit) {
         try {
             val gatt = deviceId.toBluetoothGatt()

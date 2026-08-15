@@ -130,6 +130,11 @@ class UniversalBlePeripheralPigeon extends UniversalBlePeripheralPlatform
   }
 
   @override
+  Future<void> disconnectPeripheral(String deviceId) async {
+    await _androidChannel?.disconnectPeripheral(deviceId);
+  }
+
+  @override
   Future<List<String>> getSubscribedClients(String characteristicId) =>
       _channel.getSubscribedClients(characteristicId);
 
@@ -193,8 +198,10 @@ class UniversalBlePeripheralPigeon extends UniversalBlePeripheralPlatform
   }
 
   @override
-  void onNotificationSent(String deviceId, int status) {
-    updateNotificationSent(BlePeripheralNotificationSent(deviceId, status));
+  void onNotificationSent(String deviceId, int status, Uint8List? value) {
+    updateNotificationSent(
+      BlePeripheralNotificationSent(deviceId, status, value),
+    );
   }
 
   @override
