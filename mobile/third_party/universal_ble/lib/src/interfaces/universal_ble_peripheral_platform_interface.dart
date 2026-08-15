@@ -69,7 +69,25 @@ abstract class UniversalBlePeripheralPlatform {
     String? deviceId,
   });
 
+  /// Sends a targeted notification with an opaque completion id when the
+  /// platform supports one. The default keeps custom platform implementations
+  /// source-compatible and falls back to the existing update operation.
+  Future<void> updateCharacteristicValueWithId({
+    required String characteristicId,
+    required Uint8List value,
+    required int notificationId,
+    String? deviceId,
+  }) => updateCharacteristicValue(
+    characteristicId: characteristicId,
+    value: value,
+    deviceId: deviceId,
+  );
+
   Future<void> disconnectPeripheral(String deviceId);
+
+  /// Requests a reconnect for a device that the Android GATT server
+  /// temporarily disconnected because its application slot was full.
+  Future<void> reconnectPeripheral(String deviceId) async {}
 
   /// Returns GATT client device ids currently subscribed to [characteristicId].
   Future<List<String>> getSubscribedClients(String characteristicId);
@@ -192,6 +210,9 @@ class UniversalBlePeripheralUnsupported extends UniversalBlePeripheralPlatform {
 
   @override
   Future<void> disconnectPeripheral(String deviceId) async {}
+
+  @override
+  Future<void> reconnectPeripheral(String deviceId) async {}
 
   @override
   Future<List<String>> getSubscribedClients(String characteristicId) async {

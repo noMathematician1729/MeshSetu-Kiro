@@ -39,7 +39,11 @@ class MeshGattServer {
   // separate so a freed slot can restore admission without a second CCCD write.
   final Set<String> _knownSubscribers = {};
   final Set<String> _rejectedPeers = {};
+  final Set<String> _connectedPeers = {};
+  final Set<String> _observedConnectionStates = {};
+  final Set<String> _reconnectRequests = {};
   int _pendingFrames = 0;
+  int _notificationSequence = 0;
   bool _running = false;
   // universal_ble mutates one characteristic value before posting the native
   // notify call. Keep this lock global or two devices can receive the later
@@ -48,6 +52,8 @@ class MeshGattServer {
   StreamSubscription<BlePeripheralCharacteristicSubscriptionChanged>?
   _subscriptionSubscription;
   StreamSubscription<BlePeripheralMtuChanged>? _mtuSubscription;
+  StreamSubscription<BlePeripheralConnectionStateChanged>?
+  _connectionSubscription;
   final Map<String, int> _mtus = {};
 
   Stream<IncomingGattFrame> get incoming => _frames.stream;
@@ -114,12 +120,31 @@ class MeshGattServer {
           if (event.characteristicId != MeshGatt.tx) return;
           if (event.isSubscribed) {
             _knownSubscribers.add(event.deviceId);
-            if (_rejectedPeers.contains(event.deviceId)) return;
+            // A fresh subscription is the client's retry after a capacity
+            // disconnect. It is safe to let the coordinator re-run its
+            // capacity check from this event.
+            _rejectedPeers.remove(event.deviceId);
+            _reconnectRequests.remove(event.deviceId);
             _subscribers.add(event.deviceId);
           } else {
             _subscribers.remove(event.deviceId);
             _knownSubscribers.remove(event.deviceId);
-            _rejectedPeers.remove(event.deviceId);
+            // Keep a capacity rejection across the disconnect so a freed
+            // slot can request a reconnect instead of losing the peer.
+            if (!_rejectedPeers.contains(event.deviceId)) {
+              _reconnectRequests.remove(event.deviceId);
+            }
+          }
+        });
+
+    _connectionSubscription = UniversalBlePeripheral.connectionStateStream
+        .listen((event) {
+          _observedConnectionStates.add(event.deviceId);
+          if (event.connected) {
+            _connectedPeers.add(event.deviceId);
+          } else {
+            _connectedPeers.remove(event.deviceId);
+            _mtus.remove(event.deviceId);
           }
         });
 
@@ -137,6 +162,16 @@ class MeshGattServer {
   }
 
   bool isPeerRejected(String deviceId) => _rejectedPeers.contains(deviceId);
+
+  /// Whether the rejected client still has its CCCD subscription. Test and
+  /// non-Android implementations do not always expose connection callbacks,
+  /// so a subscription is treated as live until a platform state says it is
+  /// disconnected.
+  bool hasLiveSubscription(String deviceId) {
+    if (!_knownSubscribers.contains(deviceId)) return false;
+    return !_observedConnectionStates.contains(deviceId) ||
+        _connectedPeers.contains(deviceId);
+  }
 
   Iterable<String> get rejectedPeerIds =>
       List<String>.unmodifiable(_rejectedPeers);
@@ -158,10 +193,26 @@ class MeshGattServer {
     }
   }
 
+  /// Asks Android's GATT server to reconnect a capacity-rejected client. The
+  /// client must still complete its normal CCCD subscription before admission.
+  Future<void> reconnectPeer(String deviceId) async {
+    if (!_rejectedPeers.contains(deviceId) ||
+        _knownSubscribers.contains(deviceId) ||
+        !_reconnectRequests.add(deviceId)) {
+      return;
+    }
+    try {
+      await UniversalBlePeripheral.reconnectPeripheral(deviceId);
+    } catch (_) {
+      _reconnectRequests.remove(deviceId);
+    }
+  }
+
   /// Re-admits a client that is still subscribed after a slot opens.
   bool admitPeer(String deviceId) {
     if (!_rejectedPeers.remove(deviceId)) return false;
-    if (_running && _knownSubscribers.contains(deviceId)) {
+    _reconnectRequests.remove(deviceId);
+    if (_running && hasLiveSubscription(deviceId)) {
       _subscribers.add(deviceId);
     }
     return true;
@@ -177,24 +228,33 @@ class MeshGattServer {
     }
     return _notifyLock.synchronized(() async {
       if (!_running || !_subscribers.contains(deviceId)) return false;
-      final expected = Uint8List.fromList(bytes);
-      final completion = defaultTargetPlatform == TargetPlatform.android
-          ? UniversalBlePeripheral.notificationSentStream
-                .where(
-                  (event) =>
-                      event.deviceId == deviceId &&
-                      event.value != null &&
-                      listEquals(event.value, expected),
-                )
-                .first
-          : null;
+      final notificationId = ++_notificationSequence;
+      Future<BlePeripheralNotificationSent>? completion;
+      StreamSubscription<BlePeripheralNotificationSent>? completionSubscription;
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        final completionFuture = Completer<BlePeripheralNotificationSent>();
+        completionSubscription = UniversalBlePeripheral.notificationSentStream
+            .where(
+              (event) =>
+                  event.deviceId == deviceId &&
+                  event.notificationId == notificationId,
+            )
+            .listen((event) {
+              if (!completionFuture.isCompleted) {
+                completionFuture.complete(event);
+              }
+            });
+        completion = completionFuture.future;
+      }
       try {
-        await UniversalBlePeripheral.updateCharacteristicValue(
+        await UniversalBlePeripheral.updateCharacteristicValueWithId(
           characteristicId: MeshGatt.tx,
           value: bytes,
+          notificationId: notificationId,
           deviceId: deviceId,
         ).timeout(const Duration(seconds: 2));
       } catch (_) {
+        await completionSubscription?.cancel();
         return false;
       }
       if (completion == null) return true;
@@ -203,6 +263,8 @@ class MeshGattServer {
             0;
       } catch (_) {
         return false;
+      } finally {
+        await completionSubscription?.cancel();
       }
     });
   }
@@ -214,11 +276,16 @@ class MeshGattServer {
     _subscriptionSubscription = null;
     await _mtuSubscription?.cancel();
     _mtuSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
     await _notifyLock.idle;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
     _knownSubscribers.clear();
     _rejectedPeers.clear();
+    _connectedPeers.clear();
+    _observedConnectionStates.clear();
+    _reconnectRequests.clear();
     _mtus.clear();
     _pendingFrames = 0;
     await _frames.close();

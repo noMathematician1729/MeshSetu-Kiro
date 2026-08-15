@@ -98,8 +98,23 @@ class UniversalBlePeripheral {
     deviceId: deviceId,
   );
 
+  static Future<void> updateCharacteristicValueWithId({
+    required String characteristicId,
+    required Uint8List value,
+    required int notificationId,
+    String? deviceId,
+  }) => _platform.updateCharacteristicValueWithId(
+    characteristicId: BleUuidParser.string(characteristicId),
+    value: value,
+    notificationId: notificationId,
+    deviceId: deviceId,
+  );
+
   static Future<void> disconnectPeripheral(String deviceId) =>
       _platform.disconnectPeripheral(deviceId);
+
+  static Future<void> reconnectPeripheral(String deviceId) =>
+      _platform.reconnectPeripheral(deviceId);
 
   /// Returns client device ids currently subscribed to [characteristicId]
   /// (e.g. HID report characteristic). Used to restore in-app state after restart.

@@ -130,8 +130,36 @@ class UniversalBlePeripheralPigeon extends UniversalBlePeripheralPlatform
   }
 
   @override
+  Future<void> updateCharacteristicValueWithId({
+    required String characteristicId,
+    required Uint8List value,
+    required int notificationId,
+    String? deviceId,
+  }) {
+    final androidChannel = _androidChannel;
+    if (androidChannel == null) {
+      return updateCharacteristicValue(
+        characteristicId: characteristicId,
+        value: value,
+        deviceId: deviceId,
+      );
+    }
+    return androidChannel.updateCharacteristicWithId(
+      BleUuidParser.string(characteristicId),
+      value,
+      deviceId,
+      notificationId,
+    );
+  }
+
+  @override
   Future<void> disconnectPeripheral(String deviceId) async {
     await _androidChannel?.disconnectPeripheral(deviceId);
+  }
+
+  @override
+  Future<void> reconnectPeripheral(String deviceId) async {
+    await _androidChannel?.reconnectPeripheral(deviceId);
   }
 
   @override
@@ -198,9 +226,14 @@ class UniversalBlePeripheralPigeon extends UniversalBlePeripheralPlatform
   }
 
   @override
-  void onNotificationSent(String deviceId, int status, Uint8List? value) {
+  void onNotificationSent(
+    String deviceId,
+    int status,
+    int? notificationId,
+    Uint8List? value,
+  ) {
     updateNotificationSent(
-      BlePeripheralNotificationSent(deviceId, status, value),
+      BlePeripheralNotificationSent(deviceId, status, notificationId, value),
     );
   }
 

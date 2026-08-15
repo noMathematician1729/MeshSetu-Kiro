@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:universal_ble/universal_ble.dart';
 import 'package:universal_ble/src/universal_ble.g.dart' show PeripheralService;
@@ -93,6 +93,9 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
   int notificationStatus = 0;
   bool emitPreviousNotificationFirst = false;
   int previousNotificationStatus = 1;
+  int? maximumNotifyLength;
+  int? _lastNotificationId;
+  final List<String> reconnectRequests = [];
 
   @override
   Future<void> addService(
@@ -110,6 +113,24 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
     required Uint8List value,
     String? deviceId,
   }) async {
+    await _updateCharacteristic(value, deviceId, null);
+  }
+
+  @override
+  Future<void> updateCharacteristicValueWithId({
+    required String characteristicId,
+    required Uint8List value,
+    required int notificationId,
+    String? deviceId,
+  }) async {
+    await _updateCharacteristic(value, deviceId, notificationId);
+  }
+
+  Future<void> _updateCharacteristic(
+    Uint8List value,
+    String? deviceId,
+    int? notificationId,
+  ) async {
     if (deviceId != null &&
         emitPreviousNotificationFirst &&
         notifications.isNotEmpty) {
@@ -117,17 +138,33 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
         BlePeripheralNotificationSent(
           deviceId,
           previousNotificationStatus,
+          _lastNotificationId,
           notifications.last,
         ),
       );
     }
     notifications.add(value);
+    _lastNotificationId = notificationId;
     if (deviceId != null) {
       updateNotificationSent(
-        BlePeripheralNotificationSent(deviceId, notificationStatus, value),
+        BlePeripheralNotificationSent(
+          deviceId,
+          notificationStatus,
+          notificationId,
+          value,
+        ),
       );
     }
   }
+
+  @override
+  Future<void> reconnectPeripheral(String deviceId) async {
+    reconnectRequests.add(deviceId);
+  }
+
+  @override
+  Future<int?> getMaximumNotifyLength(String deviceId) async =>
+      maximumNotifyLength;
 }
 
 MeshEnvelope _envelope({
@@ -462,14 +499,27 @@ void main() {
     () async {
       final peripheral = _FakePeripheral();
       UniversalBlePeripheral.setInstance(peripheral);
-      addTearDown(
-        () => UniversalBlePeripheral.setInstance(
-          UniversalBlePeripheralUnsupported(),
-        ),
-      );
+      final previousTarget = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = previousTarget;
+        UniversalBlePeripheral.setInstance(UniversalBlePeripheralUnsupported());
+      });
 
       final server = MeshGattServer();
       await server.start();
+      peripheral.updateMtu(BlePeripheralMtuChanged('peer', 185));
+      await Future<void>.delayed(Duration.zero);
+      expect(await server.mtuFor('peer'), 185);
+      peripheral.maximumNotifyLength = 30;
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('peer', false),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(await server.mtuFor('peer'), 33);
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('peer', true),
+      );
       peripheral.updateCharacteristicSubscription(
         BlePeripheralCharacteristicSubscriptionChanged(
           deviceId: 'peer',
@@ -489,12 +539,69 @@ void main() {
       expect(await server.notifyAwait('peer', Uint8List.fromList([1])), isTrue);
       expect(peripheral.notifications, hasLength(1));
       peripheral.emitPreviousNotificationFirst = true;
+      // The stale callback intentionally carries the same payload as the
+      // current send; only its notification id makes it unambiguous.
+      expect(await server.notifyAwait('peer', Uint8List.fromList([2])), isTrue);
       expect(await server.notifyAwait('peer', Uint8List.fromList([2])), isTrue);
       peripheral.notificationStatus = 1;
       expect(
         await server.notifyAwait('peer', Uint8List.fromList([3])),
         isFalse,
       );
+      await server.stop();
+    },
+  );
+
+  test(
+    'a physically disconnected capacity peer stays pending until it resubscribes',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+
+      final server = MeshGattServer();
+      await server.start();
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      server.rejectPeer('peer');
+
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: false,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(server.isPeerRejected('peer'), isTrue);
+      expect(server.hasLiveSubscription('peer'), isFalse);
+
+      await server.reconnectPeer('peer');
+      expect(peripheral.reconnectRequests, ['peer']);
+
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(server.isPeerRejected('peer'), isFalse);
+      expect(server.hasLiveSubscription('peer'), isTrue);
       await server.stop();
     },
   );
@@ -533,15 +640,33 @@ void main() {
     expect(coordinator.hasPeer('server-peer-a'), isFalse);
     expect(coordinator.hasPeer('server-peer-b'), isFalse);
 
+    for (final peerId in ['server-peer-a', 'server-peer-b']) {
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: peerId,
+          characteristicId: MeshGatt.tx,
+          isSubscribed: false,
+          name: null,
+        ),
+      );
+    }
+    await Future<void>.delayed(Duration.zero);
+
     links.first.emitState(PeerSessionState.disconnected);
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(
-      [
-        coordinator.hasPeer('server-peer-a'),
-        coordinator.hasPeer('server-peer-b'),
-      ].where((connected) => connected),
-      hasLength(1),
+    expect(peripheral.reconnectRequests, ['server-peer-a', 'server-peer-b']);
+
+    peripheral.updateCharacteristicSubscription(
+      BlePeripheralCharacteristicSubscriptionChanged(
+        deviceId: 'server-peer-a',
+        characteristicId: MeshGatt.tx,
+        isSubscribed: true,
+        name: null,
+      ),
     );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(coordinator.hasPeer('server-peer-a'), isTrue);
+    expect(coordinator.hasPeer('server-peer-b'), isFalse);
     await coordinator.stop();
   });
 }

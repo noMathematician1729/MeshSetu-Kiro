@@ -2525,6 +2525,8 @@ interface UniversalBleAndroidChannel {
   fun hasBluetoothAdvertisePermission(): Boolean
   fun requestBluetoothAdvertisePermission(callback: (Result<Boolean>) -> Unit)
   fun disconnectPeripheral(deviceId: String)
+  fun reconnectPeripheral(deviceId: String)
+  fun updateCharacteristicWithId(characteristicId: String, value: ByteArray, deviceId: String?, notificationId: Long)
 
   companion object {
     /** The codec used by UniversalBleAndroidChannel. */
@@ -2576,6 +2578,50 @@ interface UniversalBleAndroidChannel {
             val deviceIdArg = args[0] as String
             val wrapped: List<Any?> = try {
               api.disconnectPeripheral(deviceIdArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              UniversalBlePigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBleAndroidChannel.reconnectPeripheral$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val deviceIdArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              api.reconnectPeripheral(deviceIdArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              UniversalBlePigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.universal_ble.UniversalBleAndroidChannel.updateCharacteristicWithId$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val characteristicIdArg = args[0] as String
+            val valueArg = args[1] as ByteArray
+            val deviceIdArg = args[2] as String?
+            val notificationIdArg = args[3] as Long
+            val wrapped: List<Any?> = try {
+              api.updateCharacteristicWithId(
+                characteristicIdArg,
+                valueArg,
+                deviceIdArg,
+                notificationIdArg,
+              )
               listOf(null)
             } catch (exception: Throwable) {
               UniversalBlePigeonUtils.wrapError(exception)
@@ -2758,12 +2804,12 @@ class UniversalBlePeripheralCallback(private val binaryMessenger: BinaryMessenge
       } 
     }
   }
-  fun onNotificationSent(deviceIdArg: String, statusArg: Long, valueArg: ByteArray?, callback: (Result<Unit>) -> Unit)
+  fun onNotificationSent(deviceIdArg: String, statusArg: Long, notificationIdArg: Long?, valueArg: ByteArray?, callback: (Result<Unit>) -> Unit)
 {
     val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
     val channelName = "dev.flutter.pigeon.universal_ble.UniversalBlePeripheralCallback.onNotificationSent$separatedMessageChannelSuffix"
     val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
-    channel.send(listOf(deviceIdArg, statusArg, valueArg)) {
+    channel.send(listOf(deviceIdArg, statusArg, notificationIdArg, valueArg)) {
       if (it is List<*>) {
         if (it.size > 1) {
           callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))

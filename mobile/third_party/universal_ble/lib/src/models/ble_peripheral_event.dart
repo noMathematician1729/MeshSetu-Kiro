@@ -46,7 +46,13 @@ class BlePeripheralMtuChanged extends BlePeripheralEvent {
 class BlePeripheralNotificationSent extends BlePeripheralEvent {
   final String deviceId;
   final int status;
+  final int? notificationId;
   final Uint8List? value;
 
-  BlePeripheralNotificationSent(this.deviceId, this.status, this.value);
+  BlePeripheralNotificationSent(
+    this.deviceId,
+    this.status,
+    this.notificationId,
+    this.value,
+  );
 }

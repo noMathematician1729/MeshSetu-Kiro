@@ -359,6 +359,24 @@ class UniversalBlePlugin : UniversalBlePlatformChannel, BluetoothGattCallback(),
         peripheralPlugin.disconnectPeripheral(deviceId)
     }
 
+    override fun reconnectPeripheral(deviceId: String) {
+        peripheralPlugin.reconnectPeripheral(deviceId)
+    }
+
+    override fun updateCharacteristicWithId(
+        characteristicId: String,
+        value: ByteArray,
+        deviceId: String?,
+        notificationId: Long,
+    ) {
+        peripheralPlugin.updateCharacteristicWithId(
+            characteristicId,
+            value,
+            deviceId,
+            notificationId,
+        )
+    }
+
     override fun readRssi(deviceId: String, callback: (Result<Long>) -> Unit) {
         try {
             val gatt = deviceId.toBluetoothGatt()

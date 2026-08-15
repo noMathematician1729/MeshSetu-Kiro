@@ -552,8 +552,16 @@ class MeshTransportCoordinator implements MeshTransport {
           maxPeerConnections) {
         return;
       }
-      if (!server.admitPeer(peerId)) continue;
-      unawaited(_ensureServerPeer(peerId));
+      if (server.hasLiveSubscription(peerId)) {
+        if (server.admitPeer(peerId)) {
+          unawaited(_ensureServerPeer(peerId));
+        }
+      } else {
+        // A capacity rejection is physically disconnected on Android. Ask
+        // the GATT server to reconnect it; the client's normal CCCD write
+        // will clear the quarantine and re-enter this admission path.
+        unawaited(server.reconnectPeer(peerId));
+      }
     }
   }
 
