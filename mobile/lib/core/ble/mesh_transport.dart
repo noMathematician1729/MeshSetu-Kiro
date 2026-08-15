@@ -129,6 +129,7 @@ class MeshTransportCoordinator implements MeshTransport {
   }
 
   static const int maxReplicationPeers = 2;
+  static const int maxPeerConnections = 4;
 
   final MeshGattServer server;
   final MeshRelayEngine relay;
@@ -234,6 +235,8 @@ class MeshTransportCoordinator implements MeshTransport {
 
   bool hasPeer(String peerId) => _sessions.containsKey(peerId);
 
+  int get peerCount => _sessions.length;
+
   void attach(
     String peerId,
     PeerLink link, {
@@ -245,6 +248,11 @@ class MeshTransportCoordinator implements MeshTransport {
       return;
     }
     final old = _sessions[peerId];
+    if (old == null && _sessions.length >= maxPeerConnections) {
+      _onMetrics([RelayMetric('peer_rejected_capacity', peerId: peerId)]);
+      unawaited(link.close());
+      return;
+    }
     _detach(peerId, expected: old);
     if (old != null) unawaited(old.close());
 

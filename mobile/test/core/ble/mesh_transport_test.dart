@@ -242,6 +242,20 @@ void main() {
     expect(linkC.sentFrames, isNotEmpty);
   });
 
+  test('caps active peer connections independently of replication fan-out', () {
+    final coordinator = _coordinator();
+    final links = [
+      for (var i = 0; i < MeshTransportCoordinator.maxPeerConnections + 1; i++)
+        _FakeLink()..peer = _FakeLink(),
+    ];
+    for (var i = 0; i < links.length; i++) {
+      coordinator.attach('peer-$i', links[i], siteFingerprint: 1);
+    }
+
+    expect(coordinator.peerCount, MeshTransportCoordinator.maxPeerConnections);
+    expect(links.last.closed, isTrue);
+  });
+
   test('dropped debug frames remain queued for a later retry', () async {
     final coordinator = _coordinator(
       frameInterceptor: LossyFrameInterceptor(dropEvery: 1),

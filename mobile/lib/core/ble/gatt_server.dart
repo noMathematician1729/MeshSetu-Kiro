@@ -37,7 +37,10 @@ class MeshGattServer {
   final Set<String> _subscribers = {};
   int _pendingFrames = 0;
   bool _running = false;
-  final Map<String, AsyncLock> _notifyLocks = {};
+  // universal_ble mutates one characteristic value before posting the native
+  // notify call. Keep this lock global or two devices can receive the later
+  // frame's bytes when those posted callbacks run out of order.
+  final AsyncLock _notifyLock = AsyncLock();
   StreamSubscription<BlePeripheralCharacteristicSubscriptionChanged>?
   _subscriptionSubscription;
   StreamSubscription<BlePeripheralMtuChanged>? _mtuSubscription;
@@ -125,8 +128,7 @@ class MeshGattServer {
   /// universal_ble does not expose Android's onNotificationSent callback.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
     if (bytes.isEmpty || !_subscribers.contains(deviceId)) return false;
-    final lock = _notifyLocks.putIfAbsent(deviceId, AsyncLock.new);
-    return lock.synchronized(() async {
+    return _notifyLock.synchronized(() async {
       if (!_subscribers.contains(deviceId)) return false;
       try {
         await UniversalBlePeripheral.updateCharacteristicValue(
@@ -155,7 +157,6 @@ class MeshGattServer {
     _subscribers.clear();
     _mtus.clear();
     _pendingFrames = 0;
-    _notifyLocks.clear();
     await _frames.close();
   }
 }

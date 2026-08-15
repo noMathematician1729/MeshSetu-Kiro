@@ -29,6 +29,7 @@ class _MeshEventTaskHandler extends TaskHandler {
     DartPluginRegistrant.ensureInitialized();
     try {
       final controller = MeshEventController(
+        zoneResolver: MeshEventController.demoZoneResolver,
         onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_peers',
           'peers': [
@@ -194,6 +195,10 @@ class _EventModeScreenState extends State<EventModeScreen> {
         setState(() {
           _eventModeActive = false;
           _debugLossEnabled = false;
+          _meshStatus = 'stopped';
+          _peerDebug = const [];
+          _nearestBeacon = 'none';
+          _zone = 'unknown';
           _status = 'MeshSetu\nEvent mode is off';
         });
       case 'error':
@@ -237,6 +242,8 @@ class _EventModeScreenState extends State<EventModeScreen> {
             () => _nearestBeacon =
                 '${beacon['anchorId']} (${beacon['rssi'] ?? '?'} dBm)',
           );
+        } else if (beacons is List && beacons.isEmpty) {
+          setState(() => _nearestBeacon = 'none');
         }
       case 'mesh_zone':
         setState(
@@ -307,6 +314,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
       _debugLossEnabled = false;
       _meshStatus = 'stopped';
       _peerDebug = const [];
+      _nearestBeacon = 'none';
       _zone = 'unknown';
       _status = 'MeshSetu\nEvent mode is off';
     });
@@ -367,6 +375,17 @@ class _EventModeScreenState extends State<EventModeScreen> {
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
+              if (_peerDebug.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                for (final peer in _peerDebug)
+                  Text(
+                    'Peer ${peer['peerId']}: '
+                    '${peer['connected'] == true ? 'connected' : 'disconnected'}, '
+                    'MTU ${peer['mtu'] ?? '?'}, '
+                    'RSSI ${peer['rssi'] ?? '?'}, '
+                    'queued ${peer['queuedObjects'] ?? '?'}',
+                  ),
+              ],
             ],
           ),
         ),

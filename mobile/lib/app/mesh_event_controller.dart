@@ -28,6 +28,16 @@ class MeshEventController {
   static const int capabilityRelay = 1;
   static const int capabilityVoice = 1 << 3;
 
+  /// Demo manifest used by the foreground task. A real site should replace
+  /// this with its signed anchor map before deployment.
+  static ZoneResolver get demoZoneResolver => ZoneResolver({
+    'gate-b': const ZoneAnchor(anchorId: 'gate-b', logicalZone: 'Gate-B'),
+    'gate-east': const ZoneAnchor(
+      anchorId: 'gate-east',
+      logicalZone: 'Gate-East',
+    ),
+  });
+
   MeshEventController({
     this.onPeerState,
     this.onMeshStatus,
@@ -55,6 +65,8 @@ class MeshEventController {
   Completer<void>? _scanCancel;
   Future<void>? _scanFuture;
   final Map<String, int> _retryAfterMs = {};
+  final Set<Future<void>> _connectionAttempts = {};
+  final Set<String> _connectingPeerIds = {};
   StreamSubscription<List<PeerState>>? _peerStateSubscription;
 
   MeshTransportCoordinator? get coordinator => _coordinator;
@@ -136,6 +148,8 @@ class MeshEventController {
       _scanCancel = null;
       await _scanFuture;
       _scanFuture = null;
+      await Future.wait(_connectionAttempts.toList());
+      _connectingPeerIds.clear();
       await _peerStateSubscription?.cancel();
       _peerStateSubscription = null;
       _coordinator = null;
@@ -181,20 +195,26 @@ class MeshEventController {
       ]);
       final candidates = <DiscoveredPeer>[];
       final now = DateTime.now().millisecondsSinceEpoch;
+      final capacity =
+          MeshTransportCoordinator.maxPeerConnections -
+          coordinator.peerCount -
+          _connectingPeerIds.length;
       for (final peer in peers) {
-        if (candidates.length >= MeshTransportCoordinator.maxReplicationPeers) {
+        if (candidates.length >= capacity) {
           break;
         }
+        if (capacity <= 0) break;
         if (!shouldInitiate(_localToken, peer.metadata.connectionToken) ||
             coordinator.hasPeer(peer.device.deviceId) ||
+            _connectingPeerIds.contains(peer.device.deviceId) ||
             (_retryAfterMs[peer.device.deviceId] ?? 0) > now) {
           continue;
         }
         candidates.add(peer);
       }
-      await Future.wait(
-        candidates.map((peer) => _connectPeer(peer, coordinator)),
-      );
+      for (final peer in candidates) {
+        _startConnection(peer, coordinator);
+      }
       if (!_looping) return;
       try {
         final beacons = await MeshBeaconScanner.scan(
@@ -209,25 +229,16 @@ class MeshEventController {
                 value: beacon.rssi,
               ),
           ]);
-          onBeaconObservations?.call(beacons);
-          // ponytail: until a site manifest supplies anchor-to-zone names,
-          // use the stable anchor ID as the demo logical zone.
-          final resolver =
-              zoneResolver ??
-              ZoneResolver({
-                for (final beacon in beacons)
-                  beacon.anchorId: ZoneAnchor(
-                    anchorId: beacon.anchorId,
-                    logicalZone: beacon.anchorId,
-                  ),
-              });
-          onZoneEstimate?.call(
-            resolver.estimate(beacons, DateTime.now().millisecondsSinceEpoch),
-          );
         }
+        onBeaconObservations?.call(beacons);
+        final resolver = zoneResolver ?? ZoneResolver(const {});
+        onZoneEstimate?.call(
+          resolver.estimate(beacons, DateTime.now().millisecondsSinceEpoch),
+        );
       } catch (_) {
         // Peer discovery remains useful if beacon scanning is unavailable.
       }
+      if (!_looping) return;
       try {
         await coordinator.tick();
       } catch (_) {
@@ -274,6 +285,27 @@ class MeshEventController {
     }
   }
 
+  void _startConnection(
+    DiscoveredPeer peer,
+    MeshTransportCoordinator coordinator,
+  ) {
+    if (!_connectingPeerIds.add(peer.device.deviceId)) return;
+    final future = _connectPeer(peer, coordinator);
+    _connectionAttempts.add(future);
+    unawaited(
+      future.then(
+        (_) {
+          _connectionAttempts.remove(future);
+          _connectingPeerIds.remove(peer.device.deviceId);
+        },
+        onError: (Object _, StackTrace __) {
+          _connectionAttempts.remove(future);
+          _connectingPeerIds.remove(peer.device.deviceId);
+        },
+      ),
+    );
+  }
+
   Future<bool> sendTestObject() async {
     for (var attempt = 0; attempt < 100; attempt++) {
       final coordinator = _coordinator;
@@ -312,6 +344,7 @@ class MeshEventController {
     _scanCancel = null;
     _scanFuture = null;
     _retryAfterMs.clear();
+    final connectionAttempts = _connectionAttempts.toList();
     final coordinator = _coordinator;
     _coordinator = null;
     final metricSink = _metricSink;
@@ -323,6 +356,8 @@ class MeshEventController {
     }
     try {
       await scanFuture;
+      await Future.wait(connectionAttempts);
+      _connectingPeerIds.clear();
       await _peerStateSubscription?.cancel();
       _peerStateSubscription = null;
       await coordinator?.stop();
