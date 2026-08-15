@@ -65,6 +65,13 @@ class MeshGattServer {
       )
       .map((event) => event.deviceId);
 
+  Stream<String> get unsubscribedPeerIds => UniversalBlePeripheral
+      .characteristicSubscriptionStream
+      .where(
+        (event) => event.characteristicId == MeshGatt.tx && !event.isSubscribed,
+      )
+      .map((event) => event.deviceId);
+
   Stream<Uint8List> incomingFrom(String deviceId) => _frames.stream
       .where((frame) => frame.deviceId == deviceId)
       .map((frame) => frame.bytes);
@@ -77,8 +84,15 @@ class MeshGattServer {
   Future<int> mtuFor(String deviceId) async {
     final known = _mtus[deviceId];
     if (known != null) return known;
-    final maximumNotifyLength =
-        await UniversalBlePeripheral.getMaximumNotifyLength(deviceId);
+    int? maximumNotifyLength;
+    try {
+      maximumNotifyLength = await UniversalBlePeripheral.getMaximumNotifyLength(
+        deviceId,
+      );
+    } catch (_) {
+      // A reconnect can race the platform's MTU cache; use the ATT default
+      // and let the next MTU callback refine it.
+    }
     // universal_ble reports the ATT payload budget, while fragment() expects
     // the negotiated MTU including the three-byte notification header.
     return maximumNotifyLength == null || maximumNotifyLength < 20
@@ -101,7 +115,8 @@ class MeshGattServer {
       if (characteristicId != MeshGatt.rx || offset != 0 || value == null) {
         return PeripheralWriteRequestResult(status: _gattRequestNotSupported);
       }
-      if (_rejectedPeers.contains(deviceId)) {
+      if (_rejectedPeers.contains(deviceId) ||
+          !_subscribers.contains(deviceId)) {
         return PeripheralWriteRequestResult(status: _gattFailure);
       }
       if (_pendingFrames >= _maxPendingFrames) {
@@ -197,7 +212,7 @@ class MeshGattServer {
   /// client must still complete its normal CCCD subscription before admission.
   Future<void> reconnectPeer(String deviceId) async {
     if (!_rejectedPeers.contains(deviceId) ||
-        _knownSubscribers.contains(deviceId) ||
+        hasLiveSubscription(deviceId) ||
         !_reconnectRequests.add(deviceId)) {
       return;
     }

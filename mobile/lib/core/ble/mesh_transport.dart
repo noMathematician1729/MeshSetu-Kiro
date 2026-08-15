@@ -147,6 +147,7 @@ class MeshTransportCoordinator implements MeshTransport {
       {};
   StreamSubscription<Object?>? _serverSubscription;
   StreamSubscription<String>? _serverPeerSubscription;
+  StreamSubscription<String>? _serverUnsubscribedPeerSubscription;
   final Set<String> _serverPeersStarting = {};
   final Map<int, String> _lastInboundPeerByObject = {};
   final AsyncLock _pumpLock = AsyncLock();
@@ -170,9 +171,25 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     _stopped = false;
-    await server.start();
     _serverPeerSubscription = server.subscribedPeerIds.listen((peerId) {
-      unawaited(_ensureServerPeer(peerId));
+      // MeshGattServer updates its admission sets from the same broadcast
+      // event. Defer one microtask so that listener runs before capacity is
+      // evaluated, including on a reconnect subscription.
+      scheduleMicrotask(() {
+        if (!_stopped) unawaited(_ensureServerPeer(peerId));
+      });
+    });
+    _serverUnsubscribedPeerSubscription = server.unsubscribedPeerIds.listen((
+      peerId,
+    ) {
+      // Let MeshGattServer update its subscription set before checking
+      // capacity or promoting another rejected peer.
+      scheduleMicrotask(() {
+        if (_stopped) return;
+        final link = _sessions[peerId];
+        _detach(peerId, expected: link);
+        unawaited(link?.close());
+      });
     });
     _serverSubscription = server.incoming.listen((frame) {
       unawaited(
@@ -182,7 +199,17 @@ class MeshTransportCoordinator implements MeshTransport {
             await _ensureServerPeer(frame.deviceId);
             if (_stopped) return;
             if (!_sessions.containsKey(frame.deviceId)) return;
-            if (!_acceptsHello(frame.bytes)) return;
+            if (!_acceptsHello(frame.bytes)) {
+              final link = _sessions[frame.deviceId];
+              server.rejectPeer(frame.deviceId);
+              _detach(
+                frame.deviceId,
+                expected: link,
+                promoteRejected: false,
+              );
+              unawaited(link?.close());
+              return;
+            }
             _onMetrics([
               RelayMetric(
                 'frame_received',
@@ -209,18 +236,37 @@ class MeshTransportCoordinator implements MeshTransport {
         }),
       );
     });
+    try {
+      // Install consumers before exposing the service. A client can subscribe
+      // and write immediately after addService completes; subscribing after
+      // server.start() would leave a narrow frame-loss window.
+      await server.start();
+    } catch (_) {
+      await _serverPeerSubscription?.cancel();
+      _serverPeerSubscription = null;
+      await _serverUnsubscribedPeerSubscription?.cancel();
+      _serverUnsubscribedPeerSubscription = null;
+      await _serverSubscription?.cancel();
+      _serverSubscription = null;
+      rethrow;
+    }
   }
 
   Future<void> _ensureServerPeer(String peerId) async {
     if (_stopped ||
         server.isPeerRejected(peerId) ||
+        !server.hasLiveSubscription(peerId) ||
         _sessions.containsKey(peerId) ||
         !_serverPeersStarting.add(peerId)) {
       return;
     }
     try {
       final mtu = await server.mtuFor(peerId);
-      if (_stopped || _sessions.containsKey(peerId)) return;
+      if (_stopped ||
+          !server.hasLiveSubscription(peerId) ||
+          _sessions.containsKey(peerId)) {
+        return;
+      }
       attach(
         peerId,
         GattServerPeerLink(server, peerId, mtu),
@@ -314,6 +360,7 @@ class MeshTransportCoordinator implements MeshTransport {
           _relayLock.synchronized(() async {
             if (_stopped || _sessions[peerId] != link) return;
             if (!_acceptsHello(bytes)) {
+              _detach(peerId, expected: link);
               await link.close();
               return;
             }
@@ -382,7 +429,8 @@ class MeshTransportCoordinator implements MeshTransport {
         final objectToSend = relay.nextOutbound();
         if (objectToSend == null) return;
         var sentToAny = false;
-        var deferred = false;
+        var mtuRejectedPeers = 0;
+        var attemptedPeers = 0;
         var preempted = false;
         var successfulPeers = 0;
         final sourcePeer = _lastInboundPeerByObject[objectToSend.objectId];
@@ -395,6 +443,7 @@ class MeshTransportCoordinator implements MeshTransport {
         }
         for (final peer in peers) {
           if (successfulPeers >= maxReplicationPeers) break;
+          attemptedPeers++;
           try {
             final frames = fragment(
               objectId: objectToSend.objectId,
@@ -457,8 +506,9 @@ class MeshTransportCoordinator implements MeshTransport {
             // budget; defer voice evidence (graceful degradation) instead of
             // blocking the queue on it.
             if (objectToSend.trafficClass == TrafficClass.voiceEvidence) {
-              relay.defer(objectToSend);
-              deferred = true;
+              // Defer only if every available peer rejects the object. A
+              // mixed-MTU mesh may still have a peer that can carry it.
+              mtuRejectedPeers++;
               _onMetrics([
                 RelayMetric(
                   'deferred_mtu',
@@ -482,7 +532,11 @@ class MeshTransportCoordinator implements MeshTransport {
           continue;
         }
         if (!sentToAny) {
-          if (!deferred) relay.requeue(objectToSend);
+          if (mtuRejectedPeers == attemptedPeers && attemptedPeers > 0) {
+            relay.defer(objectToSend);
+          } else {
+            relay.requeue(objectToSend);
+          }
           return;
         }
       }
@@ -496,6 +550,8 @@ class MeshTransportCoordinator implements MeshTransport {
     _stopped = true;
     await _serverPeerSubscription?.cancel();
     _serverPeerSubscription = null;
+    await _serverUnsubscribedPeerSubscription?.cancel();
+    _serverUnsubscribedPeerSubscription = null;
     await _serverSubscription?.cancel();
     _serverSubscription = null;
     for (final subs in _sessionSubscriptions.values) {
@@ -505,6 +561,7 @@ class MeshTransportCoordinator implements MeshTransport {
     }
     _sessionSubscriptions.clear();
     await _relayLock.idle;
+    await _pumpLock.idle;
     for (final link in _sessions.values.toList()) {
       await link.close();
     }

@@ -23,6 +23,7 @@ class _FakeLink implements PeerLink {
     this.throwOnSend = false,
     this.sendGate,
     this.onSend,
+    this.mtu = 185,
   });
 
   final bool closeStreamsOnClose;
@@ -31,7 +32,7 @@ class _FakeLink implements PeerLink {
   final Future<void>? sendGate;
   final void Function()? onSend;
   @override
-  final int mtu = 185;
+  final int mtu;
 
   final StreamController<Uint8List> _incomingController =
       StreamController<Uint8List>.broadcast();
@@ -83,9 +84,13 @@ class _FakeLink implements PeerLink {
 
 class _RecordingStore extends RelayStore {
   final List<MeshEnvelope> stored = [];
+  final List<EncryptedObject> deferred = [];
 
   @override
   void persist(MeshEnvelope envelope) => stored.add(envelope);
+
+  @override
+  void markDeferred(EncryptedObject value) => deferred.add(value);
 }
 
 class _FakePeripheral extends UniversalBlePeripheralUnsupported {
@@ -96,6 +101,12 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
   int? maximumNotifyLength;
   int? _lastNotificationId;
   final List<String> reconnectRequests = [];
+  OnPeripheralWriteRequest? writeRequestHandler;
+
+  @override
+  void setWriteRequestHandler(OnPeripheralWriteRequest? handler) {
+    writeRequestHandler = handler;
+  }
 
   @override
   Future<void> addService(
@@ -192,12 +203,13 @@ MeshTransportCoordinator _coordinator({
   Hello? localHello,
   LossyFrameInterceptor? frameInterceptor,
   MeshGattServer? server,
+  RelayStore? store,
 }) => MeshTransportCoordinator(
   server: server ?? MeshGattServer(),
   relay: MeshRelayEngine(
     siteId: 'site',
     crypto: AeadEnvelope(List.filled(32, 5)),
-    store: _RecordingStore(),
+    store: store ?? _RecordingStore(),
     clockMs: () => 100,
   ),
   localHello: localHello,
@@ -391,6 +403,7 @@ void main() {
 
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(link.closed, isTrue);
+    expect(coordinatorA.peerCount, 0);
   });
 
   test(
@@ -484,6 +497,73 @@ void main() {
 
     expect(coordinator.relay.nextOutbound(), isNotNull);
   });
+
+  test('voice deferral waits until every peer rejects its MTU', () async {
+    final peripheral = _FakePeripheral();
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+    final store = _RecordingStore();
+    final coordinator = _coordinator(store: store);
+    final lowMtu = _FakeLink(mtu: 23)..peer = _FakeLink();
+    final usableMtu = _FakeLink(mtu: 185)..peer = _FakeLink();
+    coordinator.attach('low-mtu', lowMtu, siteFingerprint: 1);
+    coordinator.attach('usable-mtu', usableMtu, siteFingerprint: 1);
+
+    await coordinator.send(
+      _envelope(
+        objectId: 90,
+        priority: PriorityBand.p3Bulk,
+        payloadType: PayloadType.voiceObject,
+        payloadSize: 3000,
+      ),
+    );
+
+    expect(lowMtu.sentFrames, isEmpty);
+    expect(usableMtu.sentFrames, isNotEmpty);
+    expect(store.deferred, isEmpty);
+    await coordinator.stop();
+  });
+
+  test(
+    'voice remains queued when a usable-MTU peer has a send failure',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      final store = _RecordingStore();
+      final coordinator = _coordinator(store: store);
+      final lowMtu = _FakeLink(mtu: 23)..peer = _FakeLink();
+      final failedUsableMtu = _FakeLink(mtu: 185, sendSucceeds: false)
+        ..peer = _FakeLink();
+      coordinator.attach('low-mtu', lowMtu, siteFingerprint: 1);
+      coordinator.attach(
+        'failed-usable-mtu',
+        failedUsableMtu,
+        siteFingerprint: 1,
+      );
+
+      await coordinator.send(
+        _envelope(
+          objectId: 91,
+          priority: PriorityBand.p3Bulk,
+          payloadType: PayloadType.voiceObject,
+          payloadSize: 3000,
+        ),
+      );
+
+      expect(store.deferred, isEmpty);
+      expect(coordinator.relay.nextOutbound(), isNotNull);
+      await coordinator.stop();
+    },
+  );
 
   test('each peer-state listener receives the current snapshot', () async {
     final coordinator = _coordinator();
@@ -606,6 +686,55 @@ void main() {
     },
   );
 
+  test(
+    'reconnects a rejected peer when its subscription survives disconnect',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+
+      final server = MeshGattServer();
+      await server.start();
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('peer', true),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      server.rejectPeer('peer');
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('peer', false),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(server.hasLiveSubscription('peer'), isFalse);
+
+      await server.reconnectPeer('peer');
+      expect(peripheral.reconnectRequests, ['peer']);
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(server.isPeerRejected('peer'), isFalse);
+      await server.stop();
+    },
+  );
+
   test('transport promotes a rejected server peer when a slot opens', () async {
     final peripheral = _FakePeripheral();
     UniversalBlePeripheral.setInstance(peripheral);
@@ -667,6 +796,100 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(coordinator.hasPeer('server-peer-a'), isTrue);
     expect(coordinator.hasPeer('server-peer-b'), isFalse);
+    await coordinator.stop();
+  });
+
+  test('server unsubscribe detaches its transport session', () async {
+    final peripheral = _FakePeripheral();
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+
+    final server = MeshGattServer();
+    final coordinator = _coordinator(server: server);
+    await coordinator.start();
+    peripheral.updateCharacteristicSubscription(
+      BlePeripheralCharacteristicSubscriptionChanged(
+        deviceId: 'server-peer',
+        characteristicId: MeshGatt.tx,
+        isSubscribed: true,
+        name: null,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(coordinator.hasPeer('server-peer'), isTrue);
+
+    peripheral.updateCharacteristicSubscription(
+      BlePeripheralCharacteristicSubscriptionChanged(
+        deviceId: 'server-peer',
+        characteristicId: MeshGatt.tx,
+        isSubscribed: false,
+        name: null,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(coordinator.hasPeer('server-peer'), isFalse);
+    await coordinator.stop();
+  });
+
+  test('foreign server HELLO remains quarantined after detaching', () async {
+    final peripheral = _FakePeripheral();
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+    final server = MeshGattServer();
+    final coordinator = _coordinator(
+      server: server,
+      localHello: const Hello(
+        siteFingerprint: 111,
+        ephemeralNodeId: 1,
+        capabilities: 1,
+        nowEpochSec: 0,
+      ),
+    );
+    await coordinator.start();
+    peripheral.updateCharacteristicSubscription(
+      BlePeripheralCharacteristicSubscriptionChanged(
+        deviceId: 'foreign-peer',
+        characteristicId: MeshGatt.tx,
+        isSubscribed: true,
+        name: null,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    final foreignHello = const Hello(
+      siteFingerprint: 999,
+      ephemeralNodeId: 2,
+      capabilities: 1,
+      nowEpochSec: 0,
+    );
+    final result = peripheral.writeRequestHandler?.call(
+      'foreign-peer',
+      MeshGatt.rx,
+      0,
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.hello,
+          priority: 0,
+          flags: 0,
+          objectId: foreignHello.ephemeralNodeId,
+          sequence: 0,
+          count: 1,
+          payload: HelloCodec.encode(foreignHello),
+        ),
+      ),
+    );
+    expect(result, isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(coordinator.peerCount, 0);
+    expect(server.isPeerRejected('foreign-peer'), isTrue);
     await coordinator.stop();
   });
 }

@@ -26,6 +26,14 @@ abstract final class MeshAdvertiser {
           MeshGatt.developmentManufacturerId,
           metadata.encode(),
         ),
+        // Keep the 128-bit service UUID in the primary advertisement for the
+        // scan filter and move the 14-byte discovery record to the scan
+        // response so both packets stay within Android's 31-byte limit.
+        platformConfig: PeripheralPlatformConfig(
+          android: PeripheralAndroidOptions(
+            addManufacturerDataInScanResponse: true,
+          ),
+        ),
       );
 
   static Future<void> stop() => UniversalBlePeripheral.stopAdvertising();

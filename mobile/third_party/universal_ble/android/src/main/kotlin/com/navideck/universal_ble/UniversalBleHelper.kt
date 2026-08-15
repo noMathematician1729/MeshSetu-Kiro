@@ -167,10 +167,19 @@ val ScanResult.manufacturerDataList: List<UniversalManufacturerData>
                 }
                 i += fieldLen + 1
             }
-            if (byCompany.isNotEmpty()) {
-                return byCompany.map { (companyId, buffer) ->
-                    UniversalManufacturerData(companyId.toLong(), buffer.toByteArray())
+            // Android may expose primary-advertisement bytes and scan-response
+            // manufacturer data through different accessors. Merge both so an
+            // unrelated primary manufacturer field cannot hide MeshSetu's
+            // discovery record in the scan response.
+            scanRecord?.manufacturerSpecificData?.toList()?.forEach { (key, value) ->
+                if (!byCompany.containsKey(key)) {
+                    byCompany[key] = java.io.ByteArrayOutputStream().apply {
+                        write(value)
+                    }
                 }
+            }
+            return byCompany.map { (companyId, buffer) ->
+                UniversalManufacturerData(companyId.toLong(), buffer.toByteArray())
             }
         }
         return scanRecord?.manufacturerSpecificData?.toList()?.map { (key, value) ->
