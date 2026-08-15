@@ -127,9 +127,11 @@ class MeshGattServer {
   /// Serializes notifications and applies conservative pacing because
   /// universal_ble does not expose Android's onNotificationSent callback.
   Future<bool> notifyAwait(String deviceId, Uint8List bytes) async {
-    if (bytes.isEmpty || !_subscribers.contains(deviceId)) return false;
+    if (!_running || bytes.isEmpty || !_subscribers.contains(deviceId)) {
+      return false;
+    }
     return _notifyLock.synchronized(() async {
-      if (!_subscribers.contains(deviceId)) return false;
+      if (!_running || !_subscribers.contains(deviceId)) return false;
       try {
         await UniversalBlePeripheral.updateCharacteristicValue(
           characteristicId: MeshGatt.tx,
@@ -153,6 +155,7 @@ class MeshGattServer {
     _subscriptionSubscription = null;
     await _mtuSubscription?.cancel();
     _mtuSubscription = null;
+    await _notifyLock.idle;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
     _mtus.clear();

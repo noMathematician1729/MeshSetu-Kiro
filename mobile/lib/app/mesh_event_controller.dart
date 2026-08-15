@@ -185,6 +185,7 @@ class MeshEventController {
         if (!await _waitOrStop(const Duration(seconds: 2))) return;
         continue;
       }
+      if (!_looping) return;
       _reportMetrics([
         for (final peer in peers)
           RelayMetric(
@@ -344,7 +345,6 @@ class MeshEventController {
     _scanCancel = null;
     _scanFuture = null;
     _retryAfterMs.clear();
-    final connectionAttempts = _connectionAttempts.toList();
     final coordinator = _coordinator;
     _coordinator = null;
     final metricSink = _metricSink;
@@ -356,6 +356,7 @@ class MeshEventController {
     }
     try {
       await scanFuture;
+      final connectionAttempts = _connectionAttempts.toList();
       await Future.wait(connectionAttempts);
       _connectingPeerIds.clear();
       await _peerStateSubscription?.cancel();

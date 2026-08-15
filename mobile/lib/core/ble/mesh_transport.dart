@@ -181,6 +181,7 @@ class MeshTransportCoordinator implements MeshTransport {
             if (_stopped) return;
             await _ensureServerPeer(frame.deviceId);
             if (_stopped) return;
+            if (!_sessions.containsKey(frame.deviceId)) return;
             if (!_acceptsHello(frame.bytes)) return;
             _onMetrics([
               RelayMetric(
