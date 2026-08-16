@@ -6,7 +6,9 @@ void main() {
   testWidgets('shows event mode off status and start button', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const ProviderScope(child: MeshSetuApp()));
+    await tester.pumpWidget(
+      const ProviderScope(child: MeshSetuApp(enforcePermissions: false)),
+    );
 
     expect(find.textContaining('Event mode is off'), findsOneWidget);
     expect(find.text('Start event mode'), findsOneWidget);

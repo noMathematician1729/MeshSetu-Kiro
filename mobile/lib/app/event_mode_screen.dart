@@ -339,6 +339,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
         });
       }
+      await _startBridgeForActiveSite();
       return;
     }
     var startedHere = false;
@@ -407,6 +408,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted) return;
     if (site != null) {
+      unawaited(_startBridgeForActiveSite());
       Navigator.of(
         context,
       ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
