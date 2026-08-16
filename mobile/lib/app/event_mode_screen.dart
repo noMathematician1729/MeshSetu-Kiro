@@ -16,6 +16,7 @@ import '../feature/join/manifest.dart';
 import '../feature/join/join_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
 import '../feature/rooms/room_chat_screen.dart';
+import '../feature/rooms/room_message_packet.dart';
 import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
@@ -585,6 +586,49 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   );
                 },
               ),
+              StreamBuilder<List<InboxEvent>>(
+                stream: ref
+                    .read(databaseProvider)
+                    .watchInboxSite(MeshEventController.siteId),
+                builder: (context, snapshot) {
+                  InboxEvent? roomMessage;
+                  String? decodedText;
+                  for (final row in snapshot.data ?? const <InboxEvent>[]) {
+                    if (row.payloadType != PayloadType.roomMessage.name) {
+                      continue;
+                    }
+                    try {
+                      decodedText = RoomMessagePacketCodec.decode(
+                        siteId: row.siteId,
+                        roomId: row.roomId,
+                        eventId: row.eventId,
+                        packet: row.payload,
+                      );
+                      roomMessage = row;
+                    } catch (_) {
+                      // Tampered or incomplete room packets stay hidden.
+                    }
+                  }
+                  if (roomMessage == null || decodedText == null) {
+                    return const SizedBox.shrink();
+                  }
+                  return Card(
+                    color: Colors.blue.shade50,
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.mark_chat_unread,
+                        color: Colors.blue,
+                      ),
+                      title: Text(
+                        'Room message received · ${roomMessage.roomId}',
+                      ),
+                      subtitle: Text(
+                        '$decodedText\nFrom: ${roomMessage.peerId}',
+                      ),
+                    ),
+                  );
+                },
+              ),
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _eventModeActive ? null : _startEventMode,
@@ -614,7 +658,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: _eventModeActive ? _openJoinOrRooms : null,
-                child: const Text('Join event / Rooms / SOS'),
+                child: const Text('Join / Rooms / Create QR / SOS'),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -642,7 +686,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                     '${peer['connected'] == true ? 'connected' : 'disconnected'}, '
                     'MTU ${peer['mtu'] ?? '?'}, '
                     'RSSI ${peer['rssi'] ?? '?'}, '
-                    'queued ${peer['queuedObjects'] ?? '?'}',
+                    'relay backlog ${peer['queuedObjects'] ?? '?'}',
                   ),
               ],
             ],

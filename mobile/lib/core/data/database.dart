@@ -89,6 +89,12 @@ class MeshDatabase extends _$MeshDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.receivedAtMs)]))
           .watch();
 
+  Stream<List<InboxEvent>> watchInboxSite(String siteId) =>
+      (select(inboxEvents)
+            ..where((t) => t.siteId.equals(siteId))
+            ..orderBy([(t) => OrderingTerm.asc(t.receivedAtMs)]))
+          .watch();
+
   Future<void> markState(String eventId, String state, int nowMs) =>
       (update(outboxEvents)..where((t) => t.eventId.equals(eventId))).write(
         OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(nowMs)),
