@@ -12,12 +12,55 @@ import 'package:record/record.dart';
 /// `record` package already ships a platform Opus encoder, so that native
 /// module is unnecessary here).
 class VoiceRecorder {
-  VoiceRecorder({this._cap = const Duration(seconds: 10)});
+  // ignore: prefer_initializing_formals
+  VoiceRecorder({Duration cap = const Duration(seconds: 10)}) : _cap = cap;
 
   final Duration _cap;
   final AudioRecorder _recorder = AudioRecorder();
   Timer? _capTimer;
   Completer<Uint8List>? _finished;
+
+  /// Raw mono PCM stream for STT. This is intentionally a separate path from
+  /// the current Opus file recording: STT needs `pcm16le`, while the mesh clip
+  /// path wants a compressed file payload.
+  Future<Stream<Uint8List>> startPcmStream() async {
+    if (!await _recorder.hasPermission()) {
+      throw StateError('microphone permission denied');
+    }
+    return _recorder.startStream(
+      const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+      ),
+    );
+  }
+
+  static VoiceRecorder withCap(Duration cap) => VoiceRecorder(cap: cap);
+
+  /// Captures a short raw PCM clip for STT experimentation.
+  ///
+  /// This path is intentionally separate from the existing Opus file
+  /// recording used for mesh transport. STT needs raw `pcm16le` samples.
+  Future<Uint8List> recordPcmClip({Duration? duration}) async {
+    final stream = await startPcmStream();
+    final bytes = BytesBuilder(copy: false);
+    final subscription = stream.listen(bytes.add);
+    try {
+      await Future<void>.delayed(duration ?? _cap);
+      await _recorder.stop();
+      await subscription.cancel();
+      final pcm = bytes.takeBytes();
+      if (pcm.isEmpty) {
+        throw StateError('recording produced no PCM audio');
+      }
+      return pcm;
+    } catch (_) {
+      await _recorder.stop();
+      await subscription.cancel();
+      rethrow;
+    }
+  }
 
   /// Starts recording; the returned future completes with the encoded
   /// bytes once [stop] is called or the duration cap is hit, whichever

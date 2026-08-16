@@ -13,6 +13,7 @@ import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/join/join_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
+import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
@@ -179,8 +180,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _lastMetric = 'none';
   String _nearestBeacon = 'none';
   String _zone = 'unknown';
+  String _sttStatus = 'not run';
+  bool _sttTesting = false;
   List<Map<String, dynamic>> _peerDebug = const [];
   MeshBridgeClient? _bridgeClient;
+  final VoiceRecorder _sttRecorder = VoiceRecorder.withCap(
+    const Duration(seconds: 3),
+  );
 
   @override
   void initState() {
@@ -421,8 +427,41 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   void dispose() {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     unawaited(_bridgeClient?.dispose());
+    unawaited(_sttRecorder.dispose());
     _bridgeClientSiteStarted = false;
     super.dispose();
+  }
+
+  Future<void> _runFakeSttSmokeTest() async {
+    if (_sttTesting) return;
+    setState(() {
+      _sttTesting = true;
+      _sttStatus = 'recording 3s of raw PCM...';
+    });
+    try {
+      final engine = ref.read(offlineSttEngineProvider);
+      await engine.warmUp();
+      final pcm = await _sttRecorder.recordPcmClip(
+        duration: const Duration(seconds: 3),
+      );
+      if (!mounted) return;
+      setState(() {
+        _sttStatus = 'transcribing ${pcm.length} bytes of PCM...';
+      });
+      final result = await engine.transcribe(pcm);
+      if (!mounted) return;
+      setState(() {
+        _sttStatus =
+            'STT ok · "${result.text}" · '
+            'conf ${result.confidence.toStringAsFixed(2)} · '
+            '${result.modelId}';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _sttStatus = 'fake STT failed: $error');
+    } finally {
+      if (mounted) setState(() => _sttTesting = false);
+    }
   }
 
   @override
@@ -454,6 +493,19 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 onPressed: _eventModeActive ? _sendTestSos : null,
                 child: const Text('Send 100-byte test SOS'),
               ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: (_eventModeActive && !_sttTesting)
+                    ? _runFakeSttSmokeTest
+                    : null,
+                child: Text(
+                  _sttTesting
+                      ? 'Running STT test...'
+                      : 'Run STT smoke test',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text('STT smoke test: $_sttStatus'),
               const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: _eventModeActive ? _openJoinOrRooms : null,
