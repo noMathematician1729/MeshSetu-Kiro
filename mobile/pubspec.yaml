@@ -43,12 +43,24 @@ dev_dependencies:
   flutter_lints: ^5.0.0
   drift_dev: any
   build_runner: ^2.9.1
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
   assets:
+<<<<<<< HEAD
     - assets/models/
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/encoder-epoch-99-avg-1.int8.onnx
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/decoder-epoch-99-avg-1.onnx
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/joiner-epoch-99-avg-1.int8.onnx
     - assets/models/sherpa-onnx-zipformer-small-en-2023-06-26/tokens.txt
+=======
+    - assets/icon/logo.png
+
+flutter_launcher_icons:
+  android: true
+  image_path: assets/icon/logo.png
+  adaptive_icon_background: "#0b4f4a"
+  adaptive_icon_foreground: assets/icon/logo_foreground.png
+  min_sdk_android: 29
+>>>>>>> 9796fab (feat: add launcher icon)

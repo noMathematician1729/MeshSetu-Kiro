@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Adaptive-icon foreground: content kept inside the ~66% center safe
+       zone (roughly x:172-852, y:172-852) since Android may crop/mask the
+       outer ring on some launchers. -->
+  <path d="M512 230
+           L 700 300
+           L 700 500
+           C 700 660 616 758 512 812
+           C 408 758 324 660 324 500
+           L 324 300
+           Z"
+        fill="url(#shield)" stroke="#e6fffa" stroke-width="10"/>
+
+  <g stroke="#e6fffa" stroke-width="10" stroke-linecap="round" opacity="0.95">
+    <line x1="512" y1="460" x2="412" y2="538"/>
+    <line x1="512" y1="460" x2="612" y2="538"/>
+    <line x1="412" y1="538" x2="462" y2="646"/>
+    <line x1="612" y1="538" x2="562" y2="646"/>
+    <line x1="462" y1="646" x2="562" y2="646"/>
+    <line x1="412" y1="538" x2="612" y2="538"/>
+  </g>
+  <g fill="#f0fdfa" stroke="#0b4f4a" stroke-width="6">
+    <circle cx="412" cy="538" r="24"/>
+    <circle cx="612" cy="538" r="24"/>
+    <circle cx="462" cy="646" r="24"/>
+    <circle cx="562" cy="646" r="24"/>
+  </g>
+
+  <circle cx="512" cy="460" r="42" fill="#ef4444" stroke="#fff1f1" stroke-width="8"/>
+  <g fill="#fff1f1">
+    <rect x="505" y="436" width="14" height="24" rx="7"/>
+    <circle cx="512" cy="474" r="7"/>
+  </g>
+</svg>
