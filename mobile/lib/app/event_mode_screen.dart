@@ -579,7 +579,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       title: const Text('Test packet received'),
                       subtitle: Text(
                         '${TestSosPacket.message}\n'
-                        'From: ${testSos!.peerId}',
+                        'From: ${testSos.peerId}',
                       ),
                     ),
                   );

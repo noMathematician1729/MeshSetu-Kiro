@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +14,7 @@ import 'package:meshsetu_mobile/core/protocol/frame.dart';
 import 'package:meshsetu_mobile/core/protocol/protocol_metrics.dart';
 import 'package:meshsetu_mobile/core/protocol/relay_engine.dart';
 import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
+import 'package:meshsetu_mobile/feature/rooms/room_message_packet.dart';
 
 /// Two in-memory [PeerLink]s wired directly to each other, standing in for
 /// a real BLE connection between two phones. No radio, no platform channel.
@@ -237,6 +239,55 @@ void main() {
     expect(received.envelope.objectId, source.objectId);
     expect(received.envelope.eventId, source.eventId);
     expect(received.peerId, 'peer-a');
+  });
+
+  test('sends, authenticates, and decodes a room message end-to-end', () async {
+    final coordinatorA = _coordinator();
+    final coordinatorB = _coordinator();
+    final (linkAtoB, linkBtoA) = _pairedLinks();
+    coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
+    coordinatorB.attach('peer-a', linkBtoA, siteFingerprint: 1);
+
+    const eventId = 'event-room-43';
+    const message = 'meet at registration desk';
+    final packet = RoomMessagePacketCodec.encode(
+      siteId: 'site',
+      roomId: 'room',
+      eventId: eventId,
+      text: message,
+    );
+    final source = MeshEnvelope(
+      objectId: 43,
+      eventId: eventId,
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000000,
+      hopCount: 0,
+      hopLimit: 4,
+      priority: PriorityBand.p2Normal,
+      payloadType: PayloadType.roomMessage,
+      payload: packet,
+      originEphemeralId: 1,
+    );
+    final receivedFuture = coordinatorB.incoming.first;
+    await coordinatorA.send(source);
+    final received = await receivedFuture.timeout(const Duration(seconds: 2));
+
+    expect(
+      RoomMessagePacketCodec.decode(
+        siteId: received.envelope.siteId,
+        roomId: received.envelope.roomId,
+        eventId: received.envelope.eventId,
+        packet: received.envelope.payload,
+      ),
+      message,
+    );
+    final rawWire = linkAtoB.sentFrames.expand((frame) => frame).toList();
+    expect(
+      utf8.decode(rawWire, allowMalformed: true),
+      isNot(contains(message)),
+    );
   });
 
   test('SOS priority preempts bulk traffic through the coordinator', () async {

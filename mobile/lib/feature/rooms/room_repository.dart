@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/data/database.dart';
 import '../../core/model/model.dart';
+import 'room_message_packet.dart';
 import 'room_policy.dart';
 
 const _uuid = Uuid();
@@ -46,6 +47,12 @@ class RoomRepository {
     if (message.isEmpty) throw StateError('message must not be empty');
     final now = DateTime.now().millisecondsSinceEpoch;
     final eventId = _uuid.v4();
+    final packet = RoomMessagePacketCodec.encode(
+      siteId: siteId,
+      roomId: policy.roomId,
+      eventId: eventId,
+      text: message,
+    );
     await _db
         .into(_db.outboxEvents)
         .insert(
@@ -57,7 +64,7 @@ class RoomRepository {
             payloadType: PayloadType.roomMessage.name,
             rawText: Value(message),
             priority: PriorityBand.p2Normal.name,
-            payload: Value(Uint8List.fromList(utf8.encode(message))),
+            payload: Value(packet),
             state: const Value('ready'),
             createdAtMs: now,
             updatedAtMs: now,
@@ -101,12 +108,7 @@ class RoomRepository {
                 ),
             for (final r in receivedRows)
               if (r.payloadType == PayloadType.roomMessage.name)
-                RoomMessage(
-                  text: utf8.decode(r.payload, allowMalformed: true),
-                  fromPeerId: r.peerId,
-                  atMs: r.receivedAtMs,
-                  mine: false,
-                ),
+                if (_decodeMessage(r) case final message?) message,
           ]..sort((a, b) => a.atMs.compareTo(b.atMs));
           if (!closed) controller.add(messages);
         } finally {
@@ -139,5 +141,27 @@ class RoomRepository {
     final low = random.nextInt(1 << 32);
     final value = (high << 32) | low;
     return value == 0 ? 1 : value;
+  }
+
+  RoomMessage? _decodeMessage(InboxEvent row) {
+    try {
+      final text = RoomMessagePacketCodec.isEncoded(row.payload)
+          ? RoomMessagePacketCodec.decode(
+              siteId: row.siteId,
+              roomId: row.roomId,
+              eventId: row.eventId,
+              packet: row.payload,
+            )
+          : utf8.decode(row.payload, allowMalformed: false);
+      return RoomMessage(
+        text: text,
+        fromPeerId: row.peerId,
+        atMs: row.receivedAtMs,
+        mine: false,
+      );
+    } catch (_) {
+      // Invalid/tampered room packets never reach the UI.
+      return null;
+    }
   }
 }

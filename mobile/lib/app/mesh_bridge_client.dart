@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../core/data/database.dart';
 import '../core/data/outbox_sender.dart';
 import '../core/model/model.dart';
+import '../core/protocol/envelope_codec.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
@@ -30,6 +33,9 @@ class MeshBridgeClient {
   int? _localEphemeralId;
   final Map<int, Completer<void>> _pendingSubmissions = {};
   final Map<int, Timer> _submissionTimers = {};
+  final Set<int> _importedObjectIds = {};
+  Timer? _inboxSyncTimer;
+  bool _syncingInbox = false;
 
   /// Non-null only on the one phone acting as gateway (Bible §15.1);
   /// [feature/gateway/gateway_screen.dart] flips this on/off.
@@ -43,12 +49,18 @@ class MeshBridgeClient {
     _siteId = siteId;
     _localEphemeralId = localEphemeralId;
     unawaited(_restartOutbox());
+    unawaited(_syncRelayInbox());
+    _inboxSyncTimer ??= Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_syncRelayInbox()),
+    );
   }
 
   void setSiteId(String siteId) {
     if (_siteId == siteId || _localEphemeralId == null) return;
     _siteId = siteId;
     unawaited(_restartOutbox());
+    unawaited(_syncRelayInbox());
   }
 
   Future<void> _restartOutbox() async {
@@ -128,26 +140,7 @@ class MeshBridgeClient {
         final received = MeshBridge.receivedFromJson(
           receivedJson.cast<Object?, Object?>(),
         );
-        unawaited(
-          _db.insertInbox(
-            InboxEventsCompanion.insert(
-              objectId: Value(received.envelope.objectId),
-              eventId: received.envelope.eventId,
-              siteId: received.envelope.siteId,
-              roomId: received.envelope.roomId,
-              payloadType: received.envelope.payloadType.name,
-              payload: received.envelope.payload,
-              peerId: received.peerId,
-              receivedAtMs: received.receivedAtMs,
-            ),
-          ),
-        );
-        final bridge = _gatewayBridge;
-        if (bridge != null &&
-            (received.envelope.payloadType == PayloadType.structuredSos ||
-                received.envelope.payloadType == PayloadType.voiceObject)) {
-          unawaited(_forwardToGateway(bridge, received));
-        }
+        unawaited(_storeReceived(received));
       case 'error' || 'stopped':
         _failPendingSubmissions(
           StateError(data['message'] as String? ?? 'foreground mesh stopped'),
@@ -164,6 +157,68 @@ class MeshBridgeClient {
     }
     _pendingSubmissions.clear();
     _submissionTimers.clear();
+  }
+
+  /// Imports the foreground relay's durable inbox. Live task callbacks remain
+  /// the fast path, but Android can suspend the UI isolate and drop those
+  /// callbacks while the foreground BLE isolate keeps receiving. The relay
+  /// writes each decrypted/authenticated envelope atomically before ACKing,
+  /// so replaying these files makes delivery into Drift lossless.
+  Future<void> _syncRelayInbox() async {
+    if (_syncingInbox || _siteId == null) return;
+    _syncingInbox = true;
+    try {
+      final documents = await getApplicationDocumentsDirectory();
+      final directory = Directory('${documents.path}/mesh-relay/inbox');
+      if (!await directory.exists()) return;
+      await for (final entity in directory.list()) {
+        if (entity is! File || !entity.path.endsWith('.bin')) continue;
+        try {
+          final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
+          if (envelope.siteId != _siteId ||
+              envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch ||
+              _importedObjectIds.contains(envelope.objectId)) {
+            continue;
+          }
+          final modifiedAt =
+              (await entity.stat()).modified.millisecondsSinceEpoch;
+          await _storeReceived(
+            ReceivedObject(
+              envelope: envelope,
+              peerId: 'durable-relay',
+              receivedAtMs: modifiedAt,
+            ),
+          );
+        } catch (_) {
+          // Ignore incomplete/foreign files; atomic writes mean valid packets
+          // will be available on the next pass.
+        }
+      }
+    } finally {
+      _syncingInbox = false;
+    }
+  }
+
+  Future<void> _storeReceived(ReceivedObject received) async {
+    await _db.insertInbox(
+      InboxEventsCompanion.insert(
+        objectId: Value(received.envelope.objectId),
+        eventId: received.envelope.eventId,
+        siteId: received.envelope.siteId,
+        roomId: received.envelope.roomId,
+        payloadType: received.envelope.payloadType.name,
+        payload: received.envelope.payload,
+        peerId: received.peerId,
+        receivedAtMs: received.receivedAtMs,
+      ),
+    );
+    _importedObjectIds.add(received.envelope.objectId);
+    final bridge = _gatewayBridge;
+    if (bridge != null &&
+        (received.envelope.payloadType == PayloadType.structuredSos ||
+            received.envelope.payloadType == PayloadType.voiceObject)) {
+      await _forwardToGateway(bridge, received);
+    }
   }
 
   Future<void> _forwardToGateway(
@@ -189,6 +244,8 @@ class MeshBridgeClient {
   }
 
   Future<void> dispose() async {
+    _inboxSyncTimer?.cancel();
+    _inboxSyncTimer = null;
     if (_listening) {
       FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
       _listening = false;
@@ -198,5 +255,6 @@ class MeshBridgeClient {
     _failPendingSubmissions(StateError('mesh bridge disposed'));
     _siteId = null;
     _localEphemeralId = null;
+    _importedObjectIds.clear();
   }
 }
