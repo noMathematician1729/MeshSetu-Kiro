@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 
@@ -293,6 +294,23 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               ? 'mesh accepted object ${data['objectId']}'
               : 'mesh rejected object ${data['objectId']}',
         );
+      case 'mesh_received':
+        final receivedJson = data['received'];
+        if (receivedJson is! Map) return;
+        final received = MeshBridge.receivedFromJson(
+          receivedJson.cast<Object?, Object?>(),
+        );
+        if (received.envelope.payloadType == PayloadType.structuredSos) {
+          final message = utf8
+              .decode(received.envelope.payload, allowMalformed: true)
+              .trim();
+          if (message == MeshEventController.testSosMessage) {
+            setState(() {
+              _status = 'MeshSetu\n$message';
+              _lastMetric = 'test SOS received from ${received.peerId}';
+            });
+          }
+        }
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is List && metrics.isNotEmpty && metrics.first is Map) {

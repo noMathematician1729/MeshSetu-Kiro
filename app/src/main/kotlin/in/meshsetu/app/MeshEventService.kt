@@ -122,7 +122,7 @@ class MeshEventService : Service() {
                     hopLimit = 4,
                     priority = PriorityBand.P0_CRITICAL,
                     payloadType = PayloadType.STRUCTURED_SOS,
-                    payload = ByteArray(100) { it.toByte() },
+                    payload = testSosPayload(),
                     originEphemeralId = localToken.toULong(),
                 ))
                 return
@@ -141,6 +141,7 @@ class MeshEventService : Service() {
 
     companion object {
         const val ACTION_SEND_TEST = "in.meshsetu.app.SEND_TEST"
+        private const val TEST_SOS_MESSAGE = "TEST SOS RECEIVED: MeshSetu emergency link is working."
         private const val CHANNEL = "meshsetu-event"
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "MeshSetu"
@@ -148,5 +149,13 @@ class MeshEventService : Service() {
         private const val SITE_NAMESPACE = "demo"
         private const val CAPABILITY_RELAY = 1
         private const val CAPABILITY_VOICE = 1 shl 3
+
+        private fun testSosPayload(): ByteArray {
+            val message = TEST_SOS_MESSAGE.toByteArray(Charsets.UTF_8)
+            check(message.size <= 100) { "test SOS message exceeds 100-byte payload" }
+            return ByteArray(100) { ' '.code.toByte() }.also {
+                message.copyInto(it)
+            }
+        }
     }
 }

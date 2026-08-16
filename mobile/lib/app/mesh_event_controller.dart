@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -25,6 +26,9 @@ import '../core/protocol/secure_envelope.dart';
 class MeshEventController {
   static const String siteId = 'demo-site';
   static const String siteNamespace = 'demo';
+  static const String testSosMessage =
+      'TEST SOS RECEIVED: MeshSetu emergency link is working.';
+  static const int testSosPayloadBytes = 100;
   static const int capabilityRelay = 1;
   static const int capabilityVoice = 1 << 3;
 
@@ -324,7 +328,7 @@ class MeshEventController {
             hopLimit: 4,
             priority: PriorityBand.p0Critical,
             payloadType: PayloadType.structuredSos,
-            payload: Uint8List.fromList(List.generate(100, (i) => i)),
+            payload: _testSosPayload(),
             originEphemeralId: _localToken,
           ),
         );
@@ -333,6 +337,17 @@ class MeshEventController {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     return false;
+  }
+
+  static Uint8List _testSosPayload() {
+    final message = Uint8List.fromList(utf8.encode(testSosMessage));
+    if (message.length > testSosPayloadBytes) {
+      throw StateError('test SOS message exceeds 100-byte payload');
+    }
+    final payload = Uint8List(testSosPayloadBytes);
+    payload.fillRange(message.length, payload.length, 0x20);
+    payload.setRange(0, message.length, message);
+    return payload;
   }
 
   Future<void> stop() async {
