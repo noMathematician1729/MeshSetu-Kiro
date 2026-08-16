@@ -173,20 +173,34 @@ class MeshEventController {
     MeshTransportCoordinator coordinator,
   ) async {
     while (_looping) {
-      List<DiscoveredPeer> peers;
+      MeshScanReport report;
       try {
         onMeshStatus?.call('scanning');
-        peers = await MeshScanner.scan(
+        report = await MeshScanner.scanReport(
           expectedFingerprint: siteFingerprint,
           cancel: _scanCancel?.future,
         );
-      } catch (_) {
+      } catch (error) {
+        _reportMetrics([RelayMetric('scan_failed', detail: error.toString())]);
         if (!_looping) return;
         if (!await _waitOrStop(const Duration(seconds: 2))) return;
         continue;
       }
       if (!_looping) return;
+      final peers = report.peers;
       _reportMetrics([
+        RelayMetric('scan_devices_seen', value: report.devicesSeen),
+        RelayMetric('scan_service_matches', value: report.serviceMatches),
+        RelayMetric(
+          'scan_manufacturer_matches',
+          value: report.manufacturerMatches,
+        ),
+        RelayMetric('scan_malformed_metadata', value: report.malformedMetadata),
+        RelayMetric(
+          'scan_fingerprint_mismatches',
+          value: report.fingerprintMismatches,
+        ),
+        RelayMetric('scan_peers_accepted', value: peers.length),
         for (final peer in peers)
           RelayMetric(
             'scan_found',
@@ -217,28 +231,22 @@ class MeshEventController {
         _startConnection(peer, coordinator);
       }
       if (!_looping) return;
-      try {
-        final beacons = await MeshBeaconScanner.scan(
-          cancel: _scanCancel?.future,
-        );
-        if (beacons.isNotEmpty) {
-          _reportMetrics([
-            for (final beacon in beacons)
-              RelayMetric(
-                'beacon_found',
-                peerId: beacon.anchorId,
-                value: beacon.rssi,
-              ),
-          ]);
-        }
-        onBeaconObservations?.call(beacons);
-        final resolver = zoneResolver ?? ZoneResolver(const {});
-        onZoneEstimate?.call(
-          resolver.estimate(beacons, DateTime.now().millisecondsSinceEpoch),
-        );
-      } catch (_) {
-        // Peer discovery remains useful if beacon scanning is unavailable.
+      final beacons = report.beacons;
+      if (beacons.isNotEmpty) {
+        _reportMetrics([
+          for (final beacon in beacons)
+            RelayMetric(
+              'beacon_found',
+              peerId: beacon.anchorId,
+              value: beacon.rssi,
+            ),
+        ]);
       }
+      onBeaconObservations?.call(beacons);
+      final resolver = zoneResolver ?? ZoneResolver(const {});
+      onZoneEstimate?.call(
+        resolver.estimate(beacons, DateTime.now().millisecondsSinceEpoch),
+      );
       if (!_looping) return;
       try {
         await coordinator.tick();
@@ -279,9 +287,18 @@ class MeshEventController {
         rssi: peer.device.rssi,
       );
       _retryAfterMs.remove(peer.device.deviceId);
-    } catch (_) {
+    } catch (error) {
       _retryAfterMs[peer.device.deviceId] =
           DateTime.now().millisecondsSinceEpoch + 10000;
+      _reportMetrics([
+        RelayMetric(
+          'peer_connect_failed',
+          peerId: peer.device.deviceId,
+          detail: session == null
+              ? 'open: ${error.toString()}'
+              : '${session.phase}: ${session.failure ?? error}',
+        ),
+      ]);
       unawaited(session?.close());
     }
   }
@@ -380,7 +397,7 @@ class MeshEventController {
           peer: metric.peerId,
           kind: metric.kind,
           value: metric.value,
-          detail: metric.objectId?.toString(),
+          detail: metric.detail ?? metric.objectId?.toString(),
         ),
       );
     }

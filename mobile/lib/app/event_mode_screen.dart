@@ -12,20 +12,19 @@ import '../core/ble/ble_permissions.dart';
 import '../core/data/database.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
-import '../feature/join/manifest.dart';
 import '../feature/join/join_screen.dart';
-import '../feature/rooms/rooms_screen.dart';
-import '../feature/rooms/room_chat_screen.dart';
 import '../feature/rooms/room_message_packet.dart';
+import '../feature/rooms/rooms_screen.dart';
+import '../feature/sos/sos_payload.dart';
+import '../feature/sos/sos_screen.dart';
 import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
 import 'providers.dart';
-import 'test_sos_packet.dart';
 
 const int _notificationServiceId = 1001;
-const String _notificationChannelId = 'meshsetu-event';
+const String _notificationChannelId = 'meshsetu-event-v2';
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
 /// controller is deliberately created in this task isolate, not the UI one.
@@ -39,6 +38,7 @@ class _MeshEventTaskHandler extends TaskHandler {
   bool _sosPending = false;
   bool _debugLossEnabled = false;
   StreamSubscription<ReceivedObject>? _incomingSubscription;
+  int _notificationGeneration = 0;
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -73,6 +73,7 @@ class _MeshEventTaskHandler extends TaskHandler {
                 'peerId': metric.peerId,
                 'value': metric.value,
                 'objectId': metric.objectId,
+                'detail': metric.detail,
               },
           ],
         }),
@@ -101,9 +102,23 @@ class _MeshEventTaskHandler extends TaskHandler {
         received,
       ) {
         FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_metric',
+          'metrics': [
+            {
+              'kind': 'object_received',
+              'peerId': received.peerId,
+              'value': received.envelope.payload.length,
+              'objectId': received.envelope.objectId,
+            },
+          ],
+        });
+        FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_received',
           'received': MeshBridge.receivedToJson(received),
         });
+        if (received.envelope.payloadType == PayloadType.structuredSos) {
+          unawaited(_announceReceivedSos(received));
+        }
       });
       controller.setDebugLossInjection(_debugLossEnabled);
       FlutterForegroundTask.sendDataToMain(const {'status': 'started'});
@@ -142,7 +157,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       final envelope = MeshBridge.envelopeFromJson(
         (data['sendMeshObject'] as Map).cast<Object?, Object?>(),
       );
-      unawaited(_submitMeshObject(envelope, data['objectId']));
+      unawaited(_controller?.coordinator?.send(envelope) ?? Future.value());
       return;
     }
     if (data != 'send_test_sos') return;
@@ -151,36 +166,6 @@ class _MeshEventTaskHandler extends TaskHandler {
       _sosPending = true;
     } else {
       unawaited(_sendTestSos(controller));
-    }
-  }
-
-  Future<void> _submitMeshObject(
-    MeshEnvelope envelope,
-    Object? requestId,
-  ) async {
-    final objectId = requestId is int ? requestId : envelope.objectId;
-    try {
-      final controller = _controller;
-      final coordinator = controller?.coordinator;
-      if (controller == null || coordinator == null) {
-        throw StateError('mesh service is not ready');
-      }
-      if (envelope.siteId != MeshEventController.siteId) {
-        throw StateError('object belongs to a different event site');
-      }
-      await coordinator.send(envelope);
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'mesh_submit_result',
-        'objectId': objectId,
-        'accepted': true,
-      });
-    } catch (error) {
-      FlutterForegroundTask.sendDataToMain({
-        'status': 'mesh_submit_result',
-        'objectId': objectId,
-        'accepted': false,
-        'reason': error.toString(),
-      });
     }
   }
 
@@ -195,6 +180,31 @@ class _MeshEventTaskHandler extends TaskHandler {
         'message': error.toString(),
       });
     }
+  }
+
+  Future<void> _announceReceivedSos(ReceivedObject received) async {
+    final generation = ++_notificationGeneration;
+    late final String detail;
+    try {
+      final sos = StructuredSosPayload.decode(received.envelope.payload);
+      final location = sos.latitude == null || sos.longitude == null
+          ? 'location unavailable'
+          : 'GPS attached';
+      detail = 'Priority ${sos.triagePriority.name} · $location';
+    } catch (_) {
+      // A random/test structured frame is not an SOS notification.
+      return;
+    }
+    await FlutterForegroundTask.updateService(
+      notificationTitle: 'SOS RECEIVED',
+      notificationText: detail,
+    );
+    await Future<void>.delayed(const Duration(seconds: 6));
+    if (generation != _notificationGeneration) return;
+    await FlutterForegroundTask.updateService(
+      notificationTitle: 'MeshSetu event mode active',
+      notificationText: 'BLE relay is listening for nearby peers',
+    );
   }
 }
 
@@ -218,6 +228,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _sttStatus = 'not run';
   bool _sttTesting = false;
   List<Map<String, dynamic>> _peerDebug = const [];
+  final Map<String, int> _scanStats = {};
+  String _lastReceived = 'none';
   MeshBridgeClient? _bridgeClient;
   final VoiceRecorder _sttRecorder = VoiceRecorder.withCap(
     const Duration(seconds: 3),
@@ -231,6 +243,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: _notificationChannelId,
         channelName: 'MeshSetu event mode',
+        channelDescription: 'BLE relay and emergency SOS alerts',
+        channelImportance: NotificationChannelImportance.HIGH,
+        priority: NotificationPriority.HIGH,
+        enableVibration: true,
+        playSound: true,
+        showWhen: true,
+        showBadge: true,
+        onlyAlertOnce: false,
       ),
       // iOS isn't a deployment target for this project (Bible §4.1), but the
       // plugin's init call requires this regardless of platform.
@@ -271,6 +291,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _peerDebug = const [];
           _nearestBeacon = 'none';
           _zone = 'unknown';
+          _scanStats.clear();
+          _lastReceived = 'none';
           _status = 'MeshSetu\nEvent mode is off';
         });
         unawaited(_bridgeClient?.dispose());
@@ -290,32 +312,31 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         });
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
-      case 'mesh_submit_result':
-        setState(
-          () => _lastMetric = data['accepted'] == true
-              ? 'mesh accepted object ${data['objectId']}'
-              : 'mesh rejected object ${data['objectId']}',
-        );
-      case 'mesh_received':
-        final receivedJson = data['received'];
-        if (receivedJson is! Map) return;
-        final received = MeshBridge.receivedFromJson(
-          receivedJson.cast<Object?, Object?>(),
-        );
-        if (TestSosPacket.matches(received.envelope)) {
-          setState(() {
-            _status = 'MeshSetu\n${TestSosPacket.message}';
-            _lastMetric = 'test SOS received from ${received.peerId}';
-          });
-        }
       case 'mesh_metric':
         final metrics = data['metrics'];
-        if (metrics is List && metrics.isNotEmpty && metrics.first is Map) {
-          final metric = Map<String, dynamic>.from(metrics.first as Map);
-          setState(
-            () => _lastMetric =
-                '${metric['kind']}${metric['peerId'] == null ? '' : ' (${metric['peerId']})'}',
-          );
+        if (metrics is List) {
+          setState(() {
+            for (final rawMetric in metrics) {
+              if (rawMetric is! Map) continue;
+              final metric = Map<String, dynamic>.from(rawMetric);
+              final kind = '${metric['kind'] ?? 'unknown'}';
+              final value = metric['value'];
+              if (kind.startsWith('scan_') && value is num) {
+                _scanStats[kind] = value.toInt();
+              }
+              final peer = metric['peerId'];
+              final detail = metric['detail'];
+              _lastMetric =
+                  '$kind'
+                  '${peer == null ? '' : ' ($peer)'}'
+                  '${detail == null ? '' : ': $detail'}';
+              if (kind == 'object_received') {
+                _lastReceived =
+                    '${metric['objectId'] ?? '?'} · ${value ?? '?'} bytes'
+                    '${peer == null ? '' : ' from $peer'}';
+              }
+            }
+          });
         }
       case 'mesh_peers':
         final peers = data['peers'];
@@ -354,11 +375,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
         });
       }
-      await _startBridgeForActiveSite();
       return;
     }
     var startedHere = false;
     try {
+      final bluetoothMessage = await BlePermissions.availabilityMessage();
+      if (bluetoothMessage != null) {
+        if (mounted) setState(() => _status = 'MeshSetu\n$bluetoothMessage');
+        return;
+      }
       final androidInfo = await DeviceInfoPlugin().androidInfo;
       final permissions = await BlePermissions.request(
         sdkInt: androidInfo.version.sdkInt,
@@ -366,7 +391,14 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       if (permissions.values.any(
         (status) => status != PermissionStatus.granted,
       )) {
-        throw StateError('Bluetooth permissions are required for event mode');
+        if (mounted) {
+          setState(
+            () => _status =
+                'MeshSetu\nNearby devices permission is required. '
+                'Allow Bluetooth access in Settings, then try again.',
+          );
+        }
+        return;
       }
 
       if (await FlutterForegroundTask.checkNotificationPermission() !=
@@ -410,6 +442,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _peerDebug = const [];
       _nearestBeacon = 'none';
       _zone = 'unknown';
+      _scanStats.clear();
+      _lastReceived = 'none';
       _status = 'MeshSetu\nEvent mode is off';
     });
   }
@@ -419,11 +453,25 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     FlutterForegroundTask.sendDataToTask('send_test_sos');
   }
 
+  Future<void> _openSos() async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SosScreen(
+          siteId: site?.siteId ?? MeshEventController.siteId,
+          roomId: site?.rooms.isNotEmpty == true
+              ? site!.rooms.first.roomId
+              : 'public',
+        ),
+      ),
+    );
+  }
+
   Future<void> _openJoinOrRooms() async {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted) return;
     if (site != null) {
-      unawaited(_startBridgeForActiveSite());
       Navigator.of(
         context,
       ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
@@ -432,32 +480,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: (roomId) async {
+          onJoined: (_) {
             unawaited(_startBridgeForActiveSite());
-            final joinedSite = await ref
-                .read(joinRepositoryProvider)
-                .activeManifest();
-            if (!mounted || !context.mounted || joinedSite == null) return;
-            RoomManifest? room;
-            if (roomId != null) {
-              for (final candidate in joinedSite.rooms) {
-                if (candidate.roomId == roomId) {
-                  room = candidate;
-                  break;
-                }
-              }
-            }
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => room == null
-                    ? const RoomsScreen()
-                    : RoomChatScreen(
-                        siteId: joinedSite.siteId,
-                        roomId: room.roomId,
-                        roomName: room.name,
-                        role: room.role,
-                      ),
-              ),
+              MaterialPageRoute(builder: (_) => const RoomsScreen()),
             );
           },
         ),
@@ -509,7 +535,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     super.dispose();
   }
 
-  Future<void> _runFakeSttSmokeTest() async {
+  Future<void> _runSttSmokeTest() async {
     if (_sttTesting) return;
     setState(() {
       _sttTesting = true;
@@ -535,7 +561,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      setState(() => _sttStatus = 'fake STT failed: $error');
+      setState(() => _sttStatus = 'STT failed: $error');
     } finally {
       if (mounted) setState(() => _sttTesting = false);
     }
@@ -555,37 +581,6 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(_status, style: Theme.of(context).textTheme.headlineSmall),
-              StreamBuilder<List<InboxEvent>>(
-                stream: ref
-                    .read(databaseProvider)
-                    .watchInboxRoom(MeshEventController.siteId, 'public'),
-                builder: (context, snapshot) {
-                  InboxEvent? testSos;
-                  for (final row in snapshot.data ?? const <InboxEvent>[]) {
-                    if (TestSosPacket.matchesPayload(
-                      PayloadType.values.byName(row.payloadType),
-                      row.payload,
-                    )) {
-                      testSos = row;
-                    }
-                  }
-                  if (testSos == null) return const SizedBox.shrink();
-                  return Card(
-                    color: Colors.green.shade50,
-                    child: ListTile(
-                      leading: const Icon(
-                        Icons.check_circle,
-                        color: Colors.green,
-                      ),
-                      title: const Text('Test packet received'),
-                      subtitle: Text(
-                        '${TestSosPacket.message}\n'
-                        'From: ${testSos.peerId}',
-                      ),
-                    ),
-                  );
-                },
-              ),
               StreamBuilder<List<InboxEvent>>(
                 stream: ref
                     .read(databaseProvider)
@@ -645,9 +640,16 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 child: const Text('Send 100-byte test SOS'),
               ),
               const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _eventModeActive ? _openSos : null,
+                icon: const Icon(Icons.sos),
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                label: const Text('Send real voice + GPS SOS'),
+              ),
+              const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: (_eventModeActive && !_sttTesting)
-                    ? _runFakeSttSmokeTest
+                    ? _runSttSmokeTest
                     : null,
                 child: Text(
                   _sttTesting ? 'Running STT test...' : 'Run STT smoke test',
@@ -675,9 +677,19 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               ),
               const SizedBox(height: 12),
               Text('Mesh: $_meshStatus · peers: ${_peerDebug.length}'),
+              Text(
+                'Scan: devices ${_scanStats['scan_devices_seen'] ?? 0} · '
+                'service ${_scanStats['scan_service_matches'] ?? 0} · '
+                'metadata ${_scanStats['scan_manufacturer_matches'] ?? 0} · '
+                'accepted ${_scanStats['scan_peers_accepted'] ?? 0} · '
+                'malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
+                'fingerprint rejected '
+                '${_scanStats['scan_fingerprint_mismatches'] ?? 0}',
+              ),
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
+              Text('Last object: $_lastReceived'),
               if (_peerDebug.isNotEmpty) ...[
                 const SizedBox(height: 4),
                 for (final peer in _peerDebug)

@@ -1,83 +1,432 @@
-# MeshSetu — codebase overview
+# MeshSetu — Complete Codebase Overview
 
 Offline BLE mesh for disaster response: SOS + Room chat relay phone-to-phone
 with no internet, an optional gateway phone bridges to a laptop dashboard.
 Full spec: `MeshSetu_Technical_Development_Bible_Flutter.pdf`.
 
-## Two trees in this repo
+---
 
-- **`core-model/`, `core-protocol/`, `core-ble/`, `app/`** — original Kotlin/JVM
-  implementation. Frozen as reference; not being extended further.
-- **`mobile/`** — the active Flutter/Dart port, kept in sync with the Kotlin
-  transport/protocol logic. This is where all new work happens.
+## Repository Structure
 
-## `mobile/lib` layout (current)
+### Frozen Reference (Kotlin/JVM)
+
+- **`core-model/`, `core-protocol/`, `core-ble/`, `app/`** — Original Kotlin implementation, kept in sync for protocol wire format verification. Not actively developed; used only as test oracle for Dart port correctness.
+
+### Active Development (Flutter/Dart + Python)
+
+- **`mobile/`** — Flutter Android app (Dart) with complete BLE mesh, durable outbox, UI, and integrations.
+- **`dashboard/`** — FastAPI Python backend (local control room, receives incidents via HTTP from gateway phone).
+- **`docs/`, `.github/`** — Documentation and CI/CD workflows.
+
+---
+
+## Service Architecture
+
+### Layer 1: BLE Transport (Dev A — `mobile/lib/core/ble/`)
+
+**Responsibilities:** Bluetooth discovery, connection management, frame codec, GATT server/client.
+
+| Module | Purpose |
+|--------|---------|
+| `ble_discovery.dart` | BLE scan (find peers) + advertise (listen for peers) via universal_ble |
+| `ble_permissions.dart` | Android permission requests (BT, location, notifications) |
+| `mesh_gatt.dart` | MeshSetu-specific GATT service/characteristic UUIDs, site fingerprinting |
+| `gatt_server.dart` | GATT server exposing MeshSetu characteristics for peer writes |
+| `gatt_peer_session.dart` | Per-peer GATT session: characteristic subscriptions, write listeners |
+| `mesh_transport.dart` | **Core coordinator:** manages peer sessions, frame I/O, send/receive dispatch, 2-peer replication fan-out, tick loop (2s) |
+| `device_key_store.dart` | Secure storage + site-key derivation (AES-GCM wrapped by device keystore) |
+| `async_lock.dart` | Mutex for concurrent read/write safety |
+
+**Key Classes:**
+- `MeshTransportCoordinator` — main event loop, peer state machine, send/receive channel
+- `PeerLink` / `GattPeerSessionLink` — per-peer transport connection
+- `DeviceKeyStore.getOrCreateSiteKey()` — deterministic site-key provisioning
+
+---
+
+### Layer 2: Protocol & Relay (Dev A — `mobile/lib/core/protocol/`)
+
+**Responsibilities:** Frame codec, fragmentation/reassembly, relay persistence, retry/ACK logic, encryption envelope.
+
+| Module | Purpose |
+|--------|---------|
+| `model.dart` | Domain objects: `MeshEnvelope`, `EncryptedObject`, `ReceivedObject`, priority/traffic-class enums |
+| `frame.dart` | Wire format: `Frame` (fragment/HELLO/ACK/NACK), codec for variable-length protobuf frames |
+| `envelope_codec.dart` | Protobuf serialization for MeshEnvelope (protobuf defined in `generated/meshsetu.proto`) |
+| `secure_envelope.dart` | AEAD encryption (AES-256-GCM): site-ID authenticated, version-checked, tamper-detection |
+| `outbound_scheduler.dart` | Priority queue (sort by priority, then creation time) for frames ready to send |
+| `relay_engine.dart` | **Durable relay:** `MeshRelayEngine` (in-flight tracking, ACK/NACK retry, dedupe, metrics), `FileRelayStore` (SQLite via Drift for outbox persistence across restarts) |
+| `protocol_metrics.dart` | Metrics sink: latency, hops, error counters → JSON-line file or stream |
+
+**Key Classes:**
+- `MeshEnvelope` — wire object carrying payload, priority, site/room context
+- `Frame` — variable-length protobuf message (fragment/HELLO/ACK/NACK)
+- `MeshRelayEngine` — custody tracking, retry on NACK, expiry sweep
+- `FileRelayStore` — atomic file write-then-rename persistence
+
+**Wire Format:**
+- Outer: `[Frame(protobuf)]` via `universal_ble` write
+- Inner: `[version][siteLen:2][site-utf8-bytes][iv][aes256-gcm(envelope)][auth-tag]`
+- Replay protection: AEAD tag covers `[version][objectId:8][siteLen:2][site]`
+
+---
+
+### Layer 3: App Shell & Isolate Bridge (Dev A+B — `mobile/lib/app/`)
+
+**Responsibilities:** BLE lifecycle, cross-isolate messaging, foreground service, app entry point.
+
+| Module | Purpose |
+|--------|---------|
+| `main.dart` | Entry point: `ProviderScope` (Riverpod DI), Material app with teal theme |
+| `event_mode_screen.dart` | UI for starting/stopping BLE mesh, displays peer state + metrics, "Send test SOS" button, navigates to Join/Rooms/SOS flows |
+| `mesh_event_controller.dart` | Foreground task handler: owns `MeshTransportCoordinator`, starts/stops mesh, wires incoming envelopes to UI-isolate listener |
+| `mesh_bridge.dart` | JSON codec: serializes `MeshEnvelope`, `ReceivedObject`, `RelayMetric` to/from Maps for cross-isolate channel |
+| `mesh_bridge_client.dart` | UI-isolate listener: deserializes `mesh_received` messages, inserts to Drift inbox, sends outbox via `sendDataToTask` |
+| `providers.dart` | Riverpod dependency injection: database, repositories, state providers (gateway URL, enabled toggle) |
+
+**Key Flow:**
+1. UI-isolate: `event_mode_screen.dart` starts foreground task
+2. Background-isolate: `meshEventTaskCallback()` → `_MeshEventTaskHandler` → `MeshEventController` → `MeshTransportCoordinator.start()`
+3. BLE events arrive in background → sent to UI via `FlutterForegroundTask.sendDataToMain()` (JSON)
+4. UI deserializes via `mesh_bridge.dart`, applies to Drift database
+5. Outbound (UI→Mesh): `mesh_bridge_client.dart._sendToMesh()` → `sendDataToTask()` → background receives + `coordinator.send()`
+
+---
+
+### Layer 4: Durable Storage (Dev B — `mobile/lib/core/data/`)
+
+**Responsibilities:** SQLite persistence for outbox/inbox, state machine enforcement, event lifecycle.
+
+| Module | Purpose |
+|--------|---------|
+| `database.dart` | Drift schema: `OutboxEvents`, `InboxEvents`, `SiteManifests` tables; streaming watches + helpers (markState, expireOverdue, insertInbox) |
+| `outbox_sender.dart` | Listener on Drift `watchReady()` stream; drains READY→RELAYING→ACKED|EXPIRED, calls mesh send callback |
+
+**State Machine:**
+```
+Draft (CREATED) → Ready (READY) → Relaying (RELAYING) → Acked (ACKED) or Expired (EXPIRED)
+```
+
+**Database:**
+- `OutboxEvents` — messages this device sends (SOS, rooms, voice manifests); includes transcript, voice path, triage JSON
+- `InboxEvents` — messages received from mesh; includes sender peer ID, received timestamp
+- `SiteManifests` — currently-active site config (rooms, ACL, manifest signature) for multi-site support
+
+---
+
+### Layer 5a: Feature — SOS Composition (Dev B — `mobile/lib/feature/sos/`)
+
+**Responsibilities:** SOS payload assembly, state management, voice/transcript/triage attachment.
+
+| Module | Purpose |
+|--------|---------|
+| `sos_repository.dart` | Frozen interface `SosRepository` + Drift-backed `DriftSosRepository`: createDraft → attachTranscript/Voice/Triage → finalizeAndEnqueue |
+| `sos_payload.dart` | `StructuredSosPayload` class: JSON codec for incident type, transcript, confidence, hazards, priority |
+| `sos_screen.dart` | UI: compose SOS (manual text or voice), attach voice clip, review triage result, enqueue to mesh |
+
+**API Call Pattern:**
+```dart
+final sos = await sosRepo.createDraft(SosInput(...));
+await sosRepo.attachTranscript(sos, sttResult);
+await sosRepo.attachVoice(sos, pcm16Bytes);
+await sosRepo.attachTriage(sos, triageOutput);
+await sosRepo.finalizeAndEnqueue(sos);  // → Drift OUTBOX_EVENTS, state=READY
+```
+
+---
+
+### Layer 5b: Feature — Voice Capture & STT (Dev B+C — `mobile/lib/feature/voice/`, `mobile/lib/feature/stt/`)
+
+**Responsibilities:** Microphone capture, speech-to-text inference, voice playback.
+
+| Module | Purpose |
+|--------|---------|
+| `voice_recorder.dart` | Captures 16kHz mono PCM16 via `record` package; Opus-encodes; 10s cap via Timer |
+| `voice_repository.dart` | Attach voice bytes to SOS, retrieve/playback from inbox |
+| `voice_inbox_screen.dart` | Browse received voice objects; tap to play via `audioplayers` |
+| **`stt_engine.dart`** | Frozen interface `OfflineSttEngine` (§12.1) + `NullSttEngine` stub (returns error if no model) |
+| **`sherpa_onnx_stt_engine.dart`** | **Model inference:** ONNX Zipformer small model (encoder/decoder/joiner), PCM16→text, ~200–500ms latency on CPU (2 threads), confidence always 0.0 (model doesn't expose it) |
+| `fake_stt_engine.dart` | Test stub returning fixed transcript + confidence |
+
+**Model Details (Sherpa-ONNX):**
+- Model: `sherpa-onnx-zipformer-small-en-2023-06-26` (eng only, 200MB+)
+- Framework: ONNX Runtime via native FFI binding
+- Input: 16kHz mono PCM (float32 normalized, [-1.0, 1.0])
+- Output: `SttResult { text, confidence=0.0, inferenceMs, modelId }`
+- Assets: Must be pre-bundled in `mobile/assets/models/` (download via `mobile/assets/models/README.md`)
+- Fallback: `NullSttEngine` (no model) → gracefully fails; manual/voice SOS continues without transcript
+
+**Dependency:** `sherpa_onnx: ^0.2.x` (Dart FFI binding to C++ ONNX Runtime)
+
+---
+
+### Layer 5c: Feature — Triage (Dev B — `mobile/lib/feature/triage/`)
+
+**Responsibilities:** Priority classification (deterministic rules + optional ML classifier).
+
+| Module | Purpose |
+|--------|---------|
+| `triage_engine.dart` | `SafetyRules` (regex: breathing, fire, crush, etc. → P0 Critical), `TriageEngine` (rules first, fallback conservative P1) |
+
+**Priority Mapping:**
+- **P0 Critical:** breathing/consciousness keywords → hard safety rule
+- **P1 High:** fallback (no classifier, no rule match, or classifier input)
+- **P2 Normal:** triage neutral assessment
+- **P3 Bulk:** background/telemetry
+
+---
+
+### Layer 5d: Feature — Join & Manifests (Dev B — `mobile/lib/feature/join/`)
+
+**Responsibilities:** Site enrollment, QR code parsing, manifest validation.
+
+| Module | Purpose |
+|--------|---------|
+| `manifest.dart` | `EventManifest`, `RoomManifest` classes (site, rooms, ACL); `EventManifestCodec` (HMAC-SHA256 sign/verify, QR payload) |
+| `join_repository.dart` | Parse typed code (`DEMO01` → bundled manifest) or QR → validate signature + expiry → activate in Drift |
+| `join_screen.dart` | UI: scan QR or type Mesh Code → join site → save manifest + rooms → navigate to rooms screen |
+
+**Bundled Demo:**
+- Site: `DEMO01`, mesh code: ASCII alphanumeric
+- Manifest key: `meshsetu-demo-manifest-key-v1` (demo-only, hardcoded)
+- Rooms: Public Alerts, Medical, Responders (ACL per role)
+
+---
+
+### Layer 5e: Feature — Rooms (Dev B — `mobile/lib/feature/rooms/`)
+
+**Responsibilities:** Per-room chat, ACL enforcement, user role management.
+
+| Module | Purpose |
+|--------|---------|
+| `room_policy.dart` | `RoomPolicy` class: traffic class, TTL, send/read role sets; `canSend(policy, userRoles)` enforcement |
+| `room_repository.dart` | Send message → validate ACL → insert to Drift OUTBOX (state=READY); watch inbox/outbox for conversation stream |
+| `rooms_screen.dart` | List rooms; display ACL and user role; navigate to chat |
+| `room_chat_screen.dart` | Message UI: send text, receive + display, sorted by timestamp |
+
+**ACL Model (§10.2):**
+- Public Alerts → send: [public], read: [*]
+- Medical → send: [medical, responder], read: [medical, responder, authority]
+- Responders → send: [responder, authority], read: [responder, authority]
+- Authority implicit: all rooms
+
+---
+
+### Layer 5f: Feature — Gateway Bridge (Dev B — `mobile/lib/feature/gateway/`)
+
+**Responsibilities:** Bridge SOS/voice from mesh to laptop dashboard over HTTP.
+
+| Module | Purpose |
+|--------|---------|
+| `gateway_bridge.dart` | HTTP `POST /api/events` to laptop; body: `Event` (priority, incident type, transcript, zone, hops, audio state); header: `x-meshsetu-demo-key` |
+| `gateway_screen.dart` | UI toggle: enable gateway, set laptop IP:port, watch connection status |
+
+**Integration:**
+- `mesh_bridge_client.dart` deserializes incoming `StructuredSos` objects
+- Calls `GatewayBridge.postToDashboard(envelope, sos)` if gateway enabled
+- HTTP POST with demo-key auth; dashboard broadcasts to all WebSocket clients
+
+---
+
+### Backend: Control Room Dashboard (`dashboard/`)
+
+**Language:** Python 3.10+, FastAPI 0.104+
+
+**Responsibilities:** Receive incidents, real-time incident feed, operator dashboard UI.
+
+| File | Purpose |
+|------|---------|
+| `main.py` | FastAPI app: `POST /api/events` (ingest), `GET /api/events` (list), `WS /ws` (real-time broadcast) |
+| `static/index.html` | Incident list UI (priority sort, incident type, transcript, zone, hops, relay latency, audio state) |
+| `test_main.py` | Unit tests: auth, event ingest, WebSocket broadcast |
+| `requirements.txt` | Dependencies: `fastapi`, `uvicorn`, `pydantic` |
+
+**API:**
+```
+POST /api/events
+  Header: x-meshsetu-demo-key: "<MESHSETU_DEMO_KEY>"
+  Body: { event_id, priority, incident_type, transcript, zone, room, hops, relay_latency_ms, voice_clip_id, audio_state }
+  Response: { ok: true } or 401 Unauthorized
+
+GET /api/events
+  Response: [ { event_id, priority, ... }, ... ]
+
+WS /ws
+  Real-time incident stream; client receives:
+  - { type: "snapshot", data: [...current events...] } on connect
+  - { type: "event", data: {...updated event...} } on any new/updated incident
+```
+
+**Demo Auth:** Shared secret `MESHSETU_DEMO_KEY` (env-override, default: "change-me")
+
+**Deployment:**
+```bash
+cd dashboard
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## Data Flow Diagram
 
 ```
-lib/
-  app/                    # app shell — mesh_event_controller.dart, event_mode_screen.dart, main.dart
-  core/model/             # domain model.dart (MeshEnvelope, EncryptedObject, TrafficClass, PriorityBand...)
-  core/protocol/          # frame.dart (fragment/reassemble + HELLO), outbound_scheduler.dart,
-                           # secure_envelope.dart (AEAD), relay_engine.dart (RelayStore/FileRelayStore/
-                           # MeshRelayEngine — ACK/NACK retry, dedupe, custody), protocol_metrics.dart,
-                           # envelope_codec.dart, generated/ (protobuf)
-  core/ble/                # universal_ble adapter: ble_discovery.dart (scan/advertise),
-                           # ble_permissions.dart, mesh_gatt.dart (service/char UUIDs, fingerprinting),
-                           # gatt_server.dart, gatt_peer_session.dart, mesh_transport.dart
-                           # (MeshTransportCoordinator — peer sessions, replication fan-out, tick loop),
-                           # device_key_store.dart (secure storage + site-key provisioning), async_lock.dart
+┌─── Mobile App (UI Isolate) ───────────────────────────────────────────┐
+│                                                                        │
+│  EventModeScreen ─────┐                                               │
+│  Join/Rooms/SOS ──────┤─→ Riverpod Providers                          │
+│  Voice/Triage ────────┤   ├─ SosRepository                            │
+│                       │   ├─ JoinRepository                           │
+│                       └─→ ├─ RoomRepository                           │
+│                           ├─ VoiceRepository                          │
+│                           └─ OfflineSttEngine                         │
+│                                    ↓                                  │
+│                           Drift Database (SQLite)                     │
+│                           ├─ OutboxEvents                             │
+│                           ├─ InboxEvents                              │
+│                           └─ SiteManifests                            │
+│                                    ↓                                  │
+│                        MeshBridgeClient (listener)                    │
+│                        ├─ Deserializes mesh_received                  │
+│                        ├─ Inserts to Drift inbox                      │
+│                        └─ Calls GatewayBridge.post() if enabled       │
+└─────────────────────────────────────────────────────────────────────┘
+         │
+         │ cross-isolate JSON bridge (FlutterForegroundTask)
+         ↓
+┌─── Mobile App (Background Isolate) ───────────────────────────────────┐
+│                                                                        │
+│  MeshEventTaskHandler                                                 │
+│         ↓                                                              │
+│  MeshEventController                                                  │
+│         ↓                                                              │
+│  MeshTransportCoordinator                                             │
+│  ├─ Manages peer sessions                                             │
+│  ├─ Receives MeshEnvelopes from peers                                 │
+│  ├─ Relays to up to 2 replication peers                               │
+│  ├─ Runs tick loop (2s): scan, connect, frame pump                    │
+│  └─ Forwards received to UI-isolate listener                          │
+│         ↓                                                              │
+│  [BLE Transport]                                                       │
+│  ├─ universal_ble scan/advertise                                      │
+│  ├─ GATT server/client                                                │
+│  └─ Peer frame I/O                                                    │
+└─────────────────────────────────────────────────────────────────────┘
+         │
+         │ BLE radio
+         ↓
+    [Other Peer Devices]
+
+┌─── Gateway HTTP Bridge ───────────────────────────────────────────┐
+│                                                                   │
+│  GatewayBridge.postToDashboard()                                 │
+│         │ HTTP POST /api/events                                  │
+│         ↓ + x-meshsetu-demo-key header                           │
+└───────────────────────────────────────────────────────────────────┘
+         │
+         ↓
+┌─── Dashboard Backend (Python/FastAPI) ──────────────────────────┐
+│                                                                  │
+│  POST /api/events                                               │
+│  ├─ Validate demo key                                           │
+│  ├─ Store in memory: latest[event_id]                           │
+│  └─ Broadcast to all WS clients                                 │
+│                                                                  │
+│  GET /api/events → return list(latest.values())                 │
+│                                                                  │
+│  WS /ws ↔ Browser UI                                            │
+│  ├─ Send snapshot on connect                                    │
+│  └─ Broadcast incident updates in real-time                     │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         ↓
+    [Browser: index.html]
+    Displays incident list sorted by priority
 ```
 
-This is **Developer A's scope** (Bible §20.1): BLE transport, frame codec,
-fragmentation/reassembly, relay, scheduler, ACK/retry, crypto envelope. It is
-covered by the protocol and transport tests in `mobile/test/`; the full local
-Flutter suite currently passes 59 tests — protocol wire format matches the
-Kotlin implementation byte-for-byte.
+---
 
-`app/mesh_event_controller.dart` is a thin demo harness Dev A wired up to
-prove the stack end-to-end (advertise/scan/connect/tick loop, a "send test
-SOS" button). It is **not** the product UI — that's Developer B's job below.
+## Dependency Injection (Riverpod, §4.2)
 
-## Developer B's scope — built
+**DI Boundary:** `mobile/lib/app/providers.dart`
 
-Per the Bible's module layout (§4.1) and team split (§20.1), `mobile/lib`
-now also has:
+```dart
+final databaseProvider = Provider<MeshDatabase>((ref) { ... });
+final sosRepositoryProvider = Provider<SosRepository>((ref) => 
+  DriftSosRepository(ref.watch(databaseProvider)));
+final joinRepositoryProvider = Provider<JoinRepository>((ref) => 
+  JoinRepository(ref.watch(databaseProvider)));
+final roomRepositoryProvider = Provider.family<RoomRepository, String>((ref, siteId) => 
+  RoomRepository(ref.watch(databaseProvider), siteId: siteId));
+final voiceRepositoryProvider = Provider<VoiceRepository>((ref) => 
+  VoiceRepository(ref.watch(databaseProvider), ref.watch(sosRepositoryProvider)));
 
-```
-core/data/          # Drift DB — durable outbox/inbox, event state machine
-                     #   (CREATED -> READY -> RELAYING -> ACKED/EXPIRED),
-                     #   OutboxSender drains it into the mesh
-feature/join/        # Mesh Code / QR join -> signed site manifest + Rooms
-feature/rooms/       # scoped Rooms UI + ACL policy (RoomPolicy, §10.2)
-feature/sos/         # SOS composition + state machine, SosRepository (frozen, §20.2)
-feature/voice/       # record-package capture (Opus), chunk lifecycle, inbox playback
-feature/stt/         # OfflineSttEngine frozen interface + NullSttEngine stub
-feature/triage/      # deterministic SafetyRules + TriageEngine fallback
-feature/gateway/     # gateway phone -> laptop dashboard HTTP bridge
+// State providers for gateway UI toggles
+final gatewayUrlProvider = StateProvider<String>((ref) => '');
+final gatewayEnabledProvider = StateProvider<bool>((ref) => false);
 ```
 
-plus a top-level `dashboard/` (FastAPI + WebSocket + minimal browser UI,
-Bible §15) and `app/mesh_bridge.dart` / `app/mesh_bridge_client.dart`, which
-carry envelopes and received objects across the isolate boundary between
-the UI isolate (where Drift/Riverpod live) and the `flutter_foreground_task`
-background isolate (where `MeshTransportCoordinator` lives).
+**Rule:** UI/features never touch `core/ble` directly; all access flows through repository interfaces.
 
-Key architectural rule (Bible §4.2): UI/features depend on Riverpod
-repositories, which depend on `core/data` + `core/protocol`, which depend on
-`core/ble`. Features never touch BLE or STT directly — `SosRepository` and
-`OfflineSttEngine` are the frozen contracts Dev A/B/C compile against
-independently (§20.2).
+---
 
-Not built (see `checklist.md` for the full rationale): a real STT engine or
-triage classifier (Dev C's primary ownership), `feature/map`/zone precursor
-scoring, and a hand-rolled native Opus FFI wrapper (unneeded — `record`'s
-built-in Opus file encoder covers the current voice-only path).
+## Key External Dependencies
 
-The current verification is local: Dart analysis, 59 Flutter tests, an Android
-debug APK build, and dashboard endpoint tests pass. Physical BLE relay,
-microphone capture, offline STT, and the full two-hop demo remain hardware /
-integration acceptance work rather than proven claims.
+| Package | Version | Used For |
+|---------|---------|----------|
+| `universal_ble` | 2.1.1 | BLE central/peripheral via custom fork in `third_party/` |
+| `drift` | 2.34.3 | SQLite ORM, reactive watches, code generation |
+| `flutter_riverpod` | 2.6.1 | Dependency injection, state management |
+| `flutter_foreground_task` | 10.0.0 | Background service isolate, cross-isolate messaging |
+| `record` | 7.1.1 | Microphone capture (Opus encoding) |
+| `audioplayers` | 6.5.1 | Voice clip playback |
+| `mobile_scanner` | 7.1.2 | QR code scanning |
+| `qr_flutter` | 4.1.0 | QR code generation |
+| `sherpa_onnx` | 0.2.x | Offline STT (ONNX Zipformer) |
+| `http` | 1.5.0 | Gateway HTTP bridge |
+| `uuid` | 4.5.1 | Event ID generation |
+| `cryptography` | 2.7.0 | AEAD cipher (AES-256-GCM) |
+| `protobuf` | 6.0.0 | Protobuf message serialization |
 
-**Not yet decided:** whether the Kotlin `core-model`/`core-protocol`/`core-ble`/`app`
-modules get deleted now that the Flutter port covers their scope — flagged for
-the user, not deleted unilaterally.
+---
+
+## Test Coverage
+
+- **Unit tests** (53+): protocol codec, relay state machine, triage rules, manifest validation, SOS payload round-trip
+- **Widget tests** (6+): UI screens (join, rooms, SOS, gateway)
+- **Integration tests** (dashboard): HTTP POST/GET/WebSocket endpoints
+- **No device tests:** physical BLE relay, microphone capture, model inference (requires Android device/emulator)
+
+---
+
+## Known Limitations & Future Work
+
+1. **STT Model Size:** Sherpa-ONNX Zipformer (200MB+) bloats APK; could optimize with quantization or serve remotely.
+2. **Dashboard Operator Workflow:** No ACK/dispatch UI; incidents are broadcast-only, not managed.
+3. **Zone Precursor Scoring:** Not implemented (§20.5); zone is stored but not computed.
+4. **Kotlin Modules:** Not deleted; live alongside Flutter port as reference. Decision pending.
+5. **Hardware Integration:** Full BLE relay, STT inference, and microphone capture require Android device testing.
+
+---
+
+## Build & Run
+
+```bash
+cd mobile
+flutter pub get
+flutter analyze        # Should pass cleanly
+flutter test          # 53+ tests
+dart format lib test  # Code formatting
+flutter build apk --debug
+```
+
+**Dashboard:**
+```bash
+cd dashboard
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Access dashboard: `http://localhost:8000` (or laptop IP if running remotely)

@@ -10,6 +10,8 @@ import '../../core/model/model.dart';
 /// it's opaque `bytes` to the transport either way, and adding a protoc
 /// toolchain step for one message isn't worth it for a hackathon build.
 final class StructuredSosPayload {
+  static const maxTranscriptUtf8Bytes = 160;
+
   const StructuredSosPayload({
     required this.incidentType,
     required this.transcript,
@@ -22,6 +24,10 @@ final class StructuredSosPayload {
     this.locationHint = '',
     this.logicalZone = '',
     this.voiceClipId = '',
+    this.latitude,
+    this.longitude,
+    this.accuracyM,
+    this.locationCapturedAtMs,
   });
 
   final String incidentType;
@@ -33,12 +39,14 @@ final class StructuredSosPayload {
   final List<String> rationale;
   final InputMode inputMode;
   final String locationHint, logicalZone, voiceClipId;
+  final double? latitude, longitude, accuracyM;
+  final int? locationCapturedAtMs;
 
   Uint8List encode() => Uint8List.fromList(
     utf8.encode(
       jsonEncode({
         'incidentType': incidentType,
-        'transcript': transcript,
+        'transcript': _truncateUtf8(transcript, maxTranscriptUtf8Bytes),
         'sttConfidence': sttConfidence,
         'triagePriority': triagePriority.name,
         'triageConfidence': triageConfidence,
@@ -48,6 +56,10 @@ final class StructuredSosPayload {
         'locationHint': locationHint,
         'logicalZone': logicalZone,
         'voiceClipId': voiceClipId,
+        'lat': latitude,
+        'lon': longitude,
+        'accuracyM': accuracyM,
+        'locationCapturedAtMs': locationCapturedAtMs,
       }),
     ),
   );
@@ -68,6 +80,23 @@ final class StructuredSosPayload {
       locationHint: map['locationHint'] as String? ?? '',
       logicalZone: map['logicalZone'] as String? ?? '',
       voiceClipId: map['voiceClipId'] as String? ?? '',
+      latitude: (map['lat'] as num?)?.toDouble(),
+      longitude: (map['lon'] as num?)?.toDouble(),
+      accuracyM: (map['accuracyM'] as num?)?.toDouble(),
+      locationCapturedAtMs: (map['locationCapturedAtMs'] as num?)?.toInt(),
     );
+  }
+
+  static String _truncateUtf8(String value, int maxBytes) {
+    final output = StringBuffer();
+    var bytes = 0;
+    for (final rune in value.runes) {
+      final character = String.fromCharCode(rune);
+      final characterBytes = utf8.encode(character).length;
+      if (bytes + characterBytes > maxBytes) break;
+      output.write(character);
+      bytes += characterBytes;
+    }
+    return output.toString();
   }
 }

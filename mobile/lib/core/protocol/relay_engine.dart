@@ -24,12 +24,19 @@ abstract class RelayStore {
 }
 
 class RelayMetric {
-  const RelayMetric(this.kind, {this.objectId, this.peerId, this.value});
+  const RelayMetric(
+    this.kind, {
+    this.objectId,
+    this.peerId,
+    this.value,
+    this.detail,
+  });
 
   final String kind;
   final int? objectId;
   final String? peerId;
   final int? value;
+  final String? detail;
 }
 
 class RelayResult {

@@ -46,23 +46,85 @@ class DiscoveredPeer {
   final DiscoveryMetadata metadata;
 }
 
+class MeshScanReport {
+  const MeshScanReport({
+    required this.peers,
+    required this.beacons,
+    required this.devicesSeen,
+    required this.serviceMatches,
+    required this.manufacturerMatches,
+    required this.malformedMetadata,
+    required this.fingerprintMismatches,
+  });
+
+  final List<DiscoveredPeer> peers;
+  final List<BeaconObservation> beacons;
+  final int devicesSeen;
+  final int serviceMatches;
+  final int manufacturerMatches;
+  final int malformedMetadata;
+  final int fingerprintMismatches;
+}
+
 abstract final class MeshScanner {
   static Future<List<DiscoveredPeer>> scan({
     Duration window = const Duration(seconds: 4),
     int? expectedFingerprint,
     Future<void>? cancel,
+  }) async => (await scanReport(
+    window: window,
+    expectedFingerprint: expectedFingerprint,
+    cancel: cancel,
+  )).peers;
+
+  static Future<MeshScanReport> scanReport({
+    Duration window = const Duration(seconds: 4),
+    int? expectedFingerprint,
+    Future<void>? cancel,
   }) async {
     final found = <String, DiscoveredPeer>{};
+    final devicesSeen = <String>{};
+    final serviceMatches = <String>{};
+    final manufacturerMatches = <String>{};
+    final malformedMetadata = <String>{};
+    final fingerprintMismatches = <String>{};
+    final beacons = <String, BeaconObservation>{};
     StreamSubscription<BleDevice>? subscription;
     var started = false;
     try {
       subscription = UniversalBle.scanStream.listen((device) {
+        devicesSeen.add(device.deviceId);
+        if (device.services.any(
+          (service) => service.toLowerCase() == MeshGatt.service,
+        )) {
+          serviceMatches.add(device.deviceId);
+        }
         for (final data in device.manufacturerDataList) {
+          if (data.companyId == MeshGatt.beaconManufacturerId) {
+            final metadata = BeaconMetadata.decode(data.payload);
+            if (metadata != null) {
+              final observation = BeaconObservation(
+                anchorId: metadata.anchorId,
+                rssi: device.rssi ?? -128,
+                observedAtMs: DateTime.now().millisecondsSinceEpoch,
+              );
+              final previous = beacons[metadata.anchorId];
+              if (previous == null || observation.rssi > previous.rssi) {
+                beacons[metadata.anchorId] = observation;
+              }
+            }
+            continue;
+          }
           if (data.companyId != MeshGatt.developmentManufacturerId) continue;
+          manufacturerMatches.add(device.deviceId);
           final metadata = DiscoveryMetadata.decode(data.payload);
-          if (metadata == null) continue;
+          if (metadata == null) {
+            malformedMetadata.add(device.deviceId);
+            continue;
+          }
           if (expectedFingerprint != null &&
               metadata.fingerprint != expectedFingerprint) {
+            fingerprintMismatches.add(device.deviceId);
             continue;
           }
           found[device.deviceId] = DiscoveredPeer(
@@ -72,7 +134,11 @@ abstract final class MeshScanner {
         }
       });
       await UniversalBle.startScan(
-        scanFilter: ScanFilter(withServices: const [MeshGatt.service]),
+        // Some Android devices expose the service UUID and manufacturer data
+        // in different advertisement/scan-response packets. A native service
+        // filter can discard the device before Dart receives the packet that
+        // contains our discovery metadata, so filtering is done above.
+        scanFilter: ScanFilter(),
         platformConfig: PlatformConfig(
           android: AndroidOptions(scanMode: AndroidScanMode.lowLatency),
         ),
@@ -95,7 +161,15 @@ abstract final class MeshScanner {
       }
       await subscription?.cancel();
     }
-    return found.values.toList(growable: false);
+    return MeshScanReport(
+      peers: found.values.toList(growable: false),
+      beacons: beacons.values.toList(growable: false),
+      devicesSeen: devicesSeen.length,
+      serviceMatches: serviceMatches.length,
+      manufacturerMatches: manufacturerMatches.length,
+      malformedMetadata: malformedMetadata.length,
+      fingerprintMismatches: fingerprintMismatches.length,
+    );
   }
 }
 

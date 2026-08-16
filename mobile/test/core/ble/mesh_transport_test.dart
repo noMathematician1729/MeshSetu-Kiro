@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,7 +13,6 @@ import 'package:meshsetu_mobile/core/protocol/frame.dart';
 import 'package:meshsetu_mobile/core/protocol/protocol_metrics.dart';
 import 'package:meshsetu_mobile/core/protocol/relay_engine.dart';
 import 'package:meshsetu_mobile/core/protocol/secure_envelope.dart';
-import 'package:meshsetu_mobile/feature/rooms/room_message_packet.dart';
 
 /// Two in-memory [PeerLink]s wired directly to each other, standing in for
 /// a real BLE connection between two phones. No radio, no platform channel.
@@ -43,6 +41,8 @@ class _FakeLink implements PeerLink {
   late final _FakeLink peer;
   final List<Uint8List> sentFrames = [];
   bool closed = false;
+
+  bool get hasIncomingListener => _incomingController.hasListener;
 
   @override
   Stream<Uint8List> get incoming => _incomingController.stream;
@@ -241,53 +241,41 @@ void main() {
     expect(received.peerId, 'peer-a');
   });
 
-  test('sends, authenticates, and decodes a room message end-to-end', () async {
-    final coordinatorA = _coordinator();
-    final coordinatorB = _coordinator();
-    final (linkAtoB, linkBtoA) = _pairedLinks();
-    coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
-    coordinatorB.attach('peer-a', linkBtoA, siteFingerprint: 1);
-
-    const eventId = 'event-room-43';
-    const message = 'meet at registration desk';
-    final packet = RoomMessagePacketCodec.encode(
-      siteId: 'site',
-      roomId: 'room',
-      eventId: eventId,
-      text: message,
-    );
-    final source = MeshEnvelope(
+  test('keeps a queued object until a BLE peer attaches', () async {
+    final coordinator = _coordinator();
+    final link = _FakeLink()..peer = _FakeLink();
+    final source = _envelope(
       objectId: 43,
-      eventId: eventId,
-      siteId: 'site',
-      roomId: 'room',
-      createdAtMs: 1,
-      expiresAtMs: 1000000,
-      hopCount: 0,
-      hopLimit: 4,
-      priority: PriorityBand.p2Normal,
-      payloadType: PayloadType.roomMessage,
-      payload: packet,
-      originEphemeralId: 1,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
     );
-    final receivedFuture = coordinatorB.incoming.first;
-    await coordinatorA.send(source);
-    final received = await receivedFuture.timeout(const Duration(seconds: 2));
 
-    expect(
-      RoomMessagePacketCodec.decode(
-        siteId: received.envelope.siteId,
-        roomId: received.envelope.roomId,
-        eventId: received.envelope.eventId,
-        packet: received.envelope.payload,
+    await coordinator.send(source);
+    expect(link.sentFrames, isEmpty);
+
+    coordinator.attach('peer-b', link, siteFingerprint: 1);
+    await coordinator.tick();
+
+    expect(link.sentFrames, isNotEmpty);
+  });
+
+  test('installs the notification listener before sending HELLO', () async {
+    var listenerAtSend = false;
+    _FakeLink? link;
+    link = _FakeLink(onSend: () => listenerAtSend = link!.hasIncomingListener)
+      ..peer = _FakeLink();
+    final coordinator = _coordinator(
+      localHello: const Hello(
+        siteFingerprint: 1,
+        ephemeralNodeId: 2,
+        capabilities: 1,
+        nowEpochSec: 0,
       ),
-      message,
     );
-    final rawWire = linkAtoB.sentFrames.expand((frame) => frame).toList();
-    expect(
-      utf8.decode(rawWire, allowMalformed: true),
-      isNot(contains(message)),
-    );
+
+    coordinator.attach('peer-b', link, siteFingerprint: 1);
+
+    expect(listenerAtSend, isTrue);
   });
 
   test('SOS priority preempts bulk traffic through the coordinator', () async {

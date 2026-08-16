@@ -2,18 +2,17 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/providers.dart';
 import '../../core/model/model.dart';
+import '../location/location_capture.dart';
 import '../triage/triage_engine.dart';
 import '../voice/voice_recorder.dart';
 import 'sos_repository.dart';
 
-/// SOS composition (Bible §3.2, `feature/sos`). Deliberately the shortest
-/// possible path from "user is in danger" to "persisted + relaying":
-/// deterministic triage runs inline (no async model to wait on), STT/voice
-/// attach later without blocking this screen — a manual SOS is never
-/// blocked (§20.5 checklist).
+/// The real emergency action: persist first, record voice, capture location,
+/// transcribe offline, then finalize one P0 structured SOS into the outbox.
 class SosScreen extends ConsumerStatefulWidget {
   const SosScreen({super.key, required this.siteId, required this.roomId});
 
@@ -25,11 +24,9 @@ class SosScreen extends ConsumerStatefulWidget {
 
 class _SosScreenState extends ConsumerState<SosScreen> {
   final _textController = TextEditingController();
-  final _voiceRecorder = VoiceRecorder();
+  final _voiceRecorder = VoiceRecorder.withCap(const Duration(seconds: 10));
   bool _sending = false;
-  bool _recording = false;
   String? _status;
-  String? _lastEventId;
 
   @override
   void dispose() {
@@ -39,98 +36,81 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   }
 
   Future<void> _sendSos() async {
+    if (_sending) return;
     setState(() {
       _sending = true;
-      _status = null;
+      _status = 'Persisting SOS draft…';
     });
+
     try {
-      final result = await _createAndFinalize(InputMode.text);
+      final repo = ref.read(sosRepositoryProvider);
+      final rawText = _textController.text.trim();
+      final eventId = await repo.createDraft(
+        SosInput(
+          siteId: widget.siteId,
+          roomId: widget.roomId,
+          inputMode: InputMode.voice,
+          rawText: rawText,
+        ),
+      );
+
+      // Request this before record's microphone permission request. Android
+      // can drop one of two simultaneous runtime permission dialogs.
+      _setStatus('SOS draft saved · checking location permission…');
+      final locationPermission = await Permission.locationWhenInUse.request();
+      final locationFuture = locationPermission.isGranted
+          ? const LocationCapture().capture()
+          : Future.value(
+              const LocationCaptureResult.failure(
+                LocationFailureReason.permissionDenied,
+              ),
+            );
+      _setStatus('SOS draft saved · recording voice for up to 10 seconds…');
+      String transcript = rawText;
+      var sttStatus = 'voice unavailable';
+      try {
+        final pcm = await _voiceRecorder.recordPcmClip();
+        _setStatus('Voice captured · transcribing offline…');
+        final engine = ref.read(offlineSttEngineProvider);
+        await engine.warmUp();
+        final stt = await engine.transcribe(pcm);
+        transcript = stt.text.trim().isEmpty ? rawText : stt.text.trim();
+        if (stt.text.trim().isNotEmpty) {
+          await repo.attachTranscript(eventId, stt);
+        }
+        sttStatus = stt.text.trim().isEmpty
+            ? 'no words detected'
+            : 'voice transcribed';
+      } catch (_) {
+        sttStatus = 'voice unavailable';
+        _setStatus('Voice/STT unavailable · sending available SOS data…');
+      }
+
+      final locationResult = await locationFuture;
+      final location = locationResult.location;
+      final triage = await TriageEngine(SafetyRules()).triage(transcript);
+      await repo.attachTriage(eventId, triage);
+      if (location != null) await repo.attachLocation(eventId, location);
+      await repo.finalizeAndEnqueue(eventId);
+
       if (!mounted) return;
       setState(() {
         _sending = false;
-        _lastEventId = result.eventId;
-        _status =
-            'SOS sent — priority ${result.triage.priority.name}, '
-            '${result.triage.incidentType.name}';
+        _status = 'SOS queued for BLE · ${locationResult.status} · $sttStatus';
+        _textController.clear();
       });
-      _textController.clear();
-    } catch (error) {
-      if (mounted) setState(() => _status = 'SOS failed: $error');
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  Future<({String eventId, TriageOutput triage})> _createAndFinalize(
-    InputMode inputMode,
-  ) async {
-    final text = _textController.text.trim();
-    final repo = ref.read(sosRepositoryProvider);
-    final eventId = await repo.createDraft(
-      SosInput(
-        siteId: widget.siteId,
-        roomId: widget.roomId,
-        inputMode: inputMode,
-        rawText: text,
-      ),
-    );
-    final triage = await TriageEngine(SafetyRules()).triage(text);
-    await repo.attachTriage(eventId, triage);
-    await repo.finalizeAndEnqueue(eventId);
-    return (eventId: eventId, triage: triage);
-  }
-
-  Future<void> _toggleVoice() async {
-    if (_recording) {
-      try {
-        await _voiceRecorder.stop();
-      } catch (error) {
-        if (mounted) {
-          setState(() {
-            _recording = false;
-            _status = 'Voice capture failed: $error';
-          });
-        }
-      }
-      return;
-    }
-    try {
-      var eventId = _lastEventId;
-      if (eventId == null) {
-        setState(() => _sending = true);
-        final result = await _createAndFinalize(InputMode.voice);
-        eventId = result.eventId;
-        if (mounted) {
-          setState(() {
-            _sending = false;
-            _lastEventId = eventId;
-            _status = 'SOS queued — recording voice evidence';
-          });
-        }
-      }
-      setState(() => _recording = true);
-      final bytes = await _voiceRecorder.start();
-      if (!mounted) return;
-      setState(() => _recording = false);
-      await ref
-          .read(voiceRepositoryProvider)
-          .attachToSos(
-            sosEventId: eventId,
-            siteId: widget.siteId,
-            roomId: widget.roomId,
-            encoded: bytes,
-          );
-      if (!mounted) return;
-      setState(() => _status = '$_status · voice evidence queued');
     } catch (error) {
       if (mounted) {
         setState(() {
           _sending = false;
-          _recording = false;
-          _status = 'Voice SOS failed: $error';
+          _status = 'SOS failed after draft persistence: $error';
         });
       }
     }
+  }
+
+  void _setStatus(String value) {
+    if (mounted) setState(() => _status = value);
   }
 
   @override
@@ -143,41 +123,35 @@ class _SosScreenState extends ConsumerState<SosScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Describe what is happening. This is sent at the highest '
-              'transport priority the mesh supports.',
+              'Tap once, speak naturally, and the app will attach offline '
+              'transcription and best-effort GPS before relaying the SOS.',
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _textController,
-              maxLines: 4,
+              maxLines: 3,
               decoration: const InputDecoration(
-                labelText: 'What is happening?',
+                labelText: 'Optional text fallback',
                 border: OutlineInputBorder(),
               ),
             ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              icon: const Icon(Icons.sos),
-              style: FilledButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: _sending ? null : _sendSos,
-              label: Text(_sending ? 'Sending…' : 'Send SOS'),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.sos),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                onPressed: _sending ? null : _sendSos,
+                label: Text(_sending ? 'Recording / sending…' : 'SEND SOS'),
+              ),
             ),
             if (_status != null) ...[
-              const SizedBox(height: 12),
-              Text(_status!, style: const TextStyle(color: Colors.green)),
+              const SizedBox(height: 16),
+              Text(_status!),
             ],
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              icon: Icon(_recording ? Icons.stop : Icons.mic),
-              label: Text(
-                _recording
-                    ? 'Stop (auto-stops at 10s)'
-                    : _lastEventId == null
-                    ? 'Record voice SOS'
-                    : 'Attach voice evidence',
-              ),
-              onPressed: _sending ? null : _toggleVoice,
-            ),
           ],
         ),
       ),

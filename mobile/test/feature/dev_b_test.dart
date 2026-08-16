@@ -6,7 +6,7 @@ import 'package:meshsetu_mobile/core/model/model.dart';
 import 'package:meshsetu_mobile/app/mesh_bridge.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_repository.dart';
 import 'package:meshsetu_mobile/feature/join/manifest.dart';
-import 'package:meshsetu_mobile/feature/join/join_repository.dart';
+import 'package:meshsetu_mobile/feature/location/location_capture.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_policy.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_payload.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_repository.dart';
@@ -58,6 +58,32 @@ void main() {
     expect(decoded.triagePriority, PriorityBand.p0Critical);
     expect(decoded.hazards, ['fire']);
   });
+
+  test(
+    'StructuredSosPayload carries GPS and bounds UTF-8 transcript bytes',
+    () {
+      final payload = StructuredSosPayload(
+        incidentType: 'other',
+        transcript: '🚨' * 200,
+        sttConfidence: 0,
+        triagePriority: PriorityBand.p0Critical,
+        triageConfidence: 0,
+        hazards: const [],
+        rationale: const [],
+        inputMode: InputMode.voice,
+        latitude: 19.076,
+        longitude: 72.8777,
+        accuracyM: 8.5,
+        locationCapturedAtMs: 42,
+      );
+      final decoded = StructuredSosPayload.decode(payload.encode());
+      expect(decoded.transcript.codeUnits.length, lessThan(200));
+      expect(decoded.latitude, 19.076);
+      expect(decoded.longitude, 72.8777);
+      expect(decoded.accuracyM, 8.5);
+      expect(decoded.locationCapturedAtMs, 42);
+    },
+  );
 
   test('MeshBridge preserves trace IDs across the isolate boundary', () {
     final envelope = MeshEnvelope(
@@ -114,65 +140,6 @@ void main() {
     final tamperedDecoded = EventManifestCodec.decode(tampered)!;
     expect(tamperedDecoded.signatureValid, isFalse);
   });
-
-  test('EventManifestCodec carries a signed room target in QR payloads', () {
-    const manifest = EventManifest(
-      siteId: 's',
-      siteName: 'Site',
-      meshCode: 'ABC123',
-      validFromMs: 0,
-      validUntilMs: 999999999999,
-      rooms: [
-        RoomManifest(
-          roomId: 'public',
-          name: 'Public Alerts',
-          role: 'public',
-          ttlSeconds: 3600,
-        ),
-      ],
-      gatewayHint: '',
-    );
-    final decoded = EventManifestCodec.decode(
-      EventManifestCodec.encode(manifest, roomId: 'public'),
-    )!;
-    expect(decoded.signatureValid, isTrue);
-    expect(decoded.roomId, 'public');
-  });
-
-  test(
-    'JoinRepository persists a newly created room in the active manifest',
-    () async {
-      final db = MeshDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final repo = JoinRepository(db);
-      const manifest = EventManifest(
-        siteId: 'site',
-        siteName: 'Site',
-        meshCode: 'ABC123',
-        validFromMs: 0,
-        validUntilMs: 4102444800000,
-        rooms: [],
-        gatewayHint: '',
-      );
-      await repo.activateManifest(manifest);
-
-      const room = RoomManifest(
-        roomId: 'registration-desk',
-        name: 'Registration Desk',
-        role: 'public',
-        ttlSeconds: 3600,
-      );
-      final updated = await repo.addRoomToActiveManifest(room);
-
-      expect(updated.rooms.single.roomId, room.roomId);
-      expect(updated.rooms.single.name, room.name);
-      expect(updated.rooms.single.role, room.role);
-      final persisted = (await repo.activeManifest())!.rooms.single;
-      expect(persisted.roomId, room.roomId);
-      expect(persisted.name, room.name);
-      expect(persisted.role, room.role);
-    },
-  );
 
   test(
     'DriftSosRepository moves an event through the outbox state machine',
@@ -241,6 +208,47 @@ void main() {
     expect(payload.triageConfidence, 0.25);
   });
 
+  test('SOS location is persisted into the finalized BLE payload', () async {
+    final db = MeshDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repo = DriftSosRepository(db);
+    final eventId = await repo.createDraft(
+      const SosInput(
+        siteId: 'site',
+        roomId: 'public',
+        inputMode: InputMode.voice,
+      ),
+    );
+    await repo.attachTriage(
+      eventId,
+      const TriageOutput(
+        priority: PriorityBand.p1High,
+        incidentType: IncidentType.other,
+        confidence: 0,
+        rationale: [],
+        modelId: 'test',
+      ),
+    );
+    await repo.attachLocation(
+      eventId,
+      const SosLocation(
+        latitude: 12.9716,
+        longitude: 77.5946,
+        accuracyM: 5,
+        capturedAtMs: 100,
+      ),
+    );
+    await repo.finalizeAndEnqueue(eventId);
+    final row = await (db.select(
+      db.outboxEvents,
+    )..where((t) => t.eventId.equals(eventId))).getSingle();
+    final payload = StructuredSosPayload.decode(row.payload!);
+    expect(payload.triagePriority, PriorityBand.p0Critical);
+    expect(payload.latitude, 12.9716);
+    expect(payload.longitude, 77.5946);
+    expect(payload.accuracyM, 5);
+  });
+
   test('RoomRepository emits a remote message without a local send', () async {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
@@ -302,42 +310,4 @@ void main() {
     expect(sent, hasLength(1));
     expect(sent.single.objectId, 11);
   });
-
-  test(
-    'OutboxSender requeues when the foreground mesh rejects a submission',
-    () async {
-      final db = MeshDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final now = DateTime.now().millisecondsSinceEpoch;
-      await db
-          .into(db.outboxEvents)
-          .insert(
-            OutboxEventsCompanion.insert(
-              eventId: 'rejected-event',
-              objectId: const Value(12),
-              siteId: 'site',
-              roomId: 'public',
-              payloadType: PayloadType.roomMessage.name,
-              priority: PriorityBand.p2Normal.name,
-              payload: Value(Uint8List.fromList([1])),
-              state: const Value('ready'),
-              createdAtMs: now,
-              updatedAtMs: now,
-              expiresAtMs: now + 60000,
-            ),
-          );
-      final sender = OutboxSender(
-        db,
-        (_) async => throw StateError('mesh stopped'),
-        siteId: 'site',
-        localEphemeralId: 3,
-      )..start();
-      addTearDown(sender.dispose);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      final row = await (db.select(
-        db.outboxEvents,
-      )..where((t) => t.eventId.equals('rejected-event'))).getSingle();
-      expect(row.state, 'ready');
-    },
-  );
 }

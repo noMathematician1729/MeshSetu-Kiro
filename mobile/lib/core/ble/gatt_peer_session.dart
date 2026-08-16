@@ -29,6 +29,10 @@ class GattPeerSession {
 
   PeerSessionState _state = PeerSessionState.connecting;
   PeerSessionState get state => _state;
+  String _phase = 'connect';
+  Object? _failure;
+  String get phase => _phase;
+  String? get failure => _failure?.toString();
 
   final StreamController<PeerSessionState> _stateController =
       StreamController<PeerSessionState>.broadcast();
@@ -51,6 +55,7 @@ class GattPeerSession {
 
   Future<void> _connect() async {
     try {
+      _phase = 'connect';
       _connectionSubscription = UniversalBle.connectionStream(deviceId).listen((
         connected,
       ) {
@@ -62,6 +67,7 @@ class GattPeerSession {
       await UniversalBle.connect(deviceId);
       _throwIfClosed();
       _setState(PeerSessionState.negotiating);
+      _phase = 'request_mtu';
       try {
         mtu = await UniversalBle.requestMtu(deviceId, 517);
       } catch (_) {
@@ -69,17 +75,21 @@ class GattPeerSession {
         mtu = 23;
       }
       _throwIfClosed();
+      _phase = 'discover_services';
       await UniversalBle.discoverServices(deviceId);
       _throwIfClosed();
+      _phase = 'subscribe_notifications';
       await UniversalBle.subscribeNotifications(
         deviceId,
         MeshGatt.service,
         MeshGatt.tx,
       );
       _throwIfClosed();
+      _phase = 'ready';
       _setState(PeerSessionState.ready);
       _ready.complete();
     } catch (error) {
+      _failure = error;
       if (!_closed) _setState(PeerSessionState.failed);
       if (!_ready.isCompleted) _ready.completeError(error);
     }

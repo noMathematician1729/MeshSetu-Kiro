@@ -330,26 +330,9 @@ class MeshTransportCoordinator implements MeshTransport {
       }),
     ];
 
-    final hello = localHello;
-    if (hello != null) {
-      unawaited(
-        _sendControl(
-          peerId,
-          link,
-          FrameCodec.encode(
-            MeshFrame(
-              type: FrameType.hello,
-              priority: 0,
-              flags: 0,
-              objectId: hello.ephemeralNodeId,
-              sequence: 0,
-              count: 1,
-              payload: HelloCodec.encode(hello),
-            ),
-          ),
-        ),
-      );
-    }
+    // Subscribe before sending HELLO. The peer can answer synchronously after
+    // the write completes; installing this listener later loses that first
+    // notification on fast links.
     subscriptions.add(
       link.incoming.listen((bytes) {
         unawaited(
@@ -381,6 +364,27 @@ class MeshTransportCoordinator implements MeshTransport {
       }),
     );
     _sessionSubscriptions[peerId] = subscriptions;
+
+    final hello = localHello;
+    if (hello != null) {
+      unawaited(
+        _sendControl(
+          peerId,
+          link,
+          FrameCodec.encode(
+            MeshFrame(
+              type: FrameType.hello,
+              priority: 0,
+              flags: 0,
+              objectId: hello.ephemeralNodeId,
+              sequence: 0,
+              count: 1,
+              payload: HelloCodec.encode(hello),
+            ),
+          ),
+        ),
+      );
+    }
   }
 
   @override

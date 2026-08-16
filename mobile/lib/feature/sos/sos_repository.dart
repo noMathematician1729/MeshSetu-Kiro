@@ -9,6 +9,7 @@ import '../../core/data/database.dart';
 import '../../core/model/model.dart';
 import '../stt/stt_engine.dart';
 import '../triage/triage_engine.dart';
+import '../location/location_capture.dart';
 import 'sos_payload.dart';
 
 const _uuid = Uuid();
@@ -38,6 +39,7 @@ final class SosInput {
 abstract interface class SosRepository {
   Future<String> createDraft(SosInput input);
   Future<void> attachTranscript(String eventId, SttResult stt);
+  Future<void> attachLocation(String eventId, SosLocation location);
   Future<void> attachVoice(String eventId, Uint8List encoded);
   Future<void> attachTriage(String eventId, TriageOutput output);
   Future<void> finalizeAndEnqueue(String eventId);
@@ -91,6 +93,29 @@ class DriftSosRepository implements SosRepository {
       );
 
   @override
+  Future<void> attachLocation(String eventId, SosLocation location) async {
+    if (!location.isValid) throw ArgumentError('location is invalid');
+    final row = await (_db.select(
+      _db.outboxEvents,
+    )..where((t) => t.eventId.equals(eventId))).getSingle();
+    final triage = _triageRecord(row.triageJson) ?? <String, Object?>{};
+    triage['location'] = {
+      'latitude': location.latitude,
+      'longitude': location.longitude,
+      'accuracyM': location.accuracyM,
+      'capturedAtMs': location.capturedAtMs,
+    };
+    await (_db.update(
+      _db.outboxEvents,
+    )..where((t) => t.eventId.equals(eventId))).write(
+      OutboxEventsCompanion(
+        triageJson: Value(jsonEncode(triage)),
+        updatedAtMs: Value(DateTime.now().millisecondsSinceEpoch),
+      ),
+    );
+  }
+
+  @override
   Future<void> attachVoice(String eventId, Uint8List encoded) async {
     if (encoded.isEmpty) throw ArgumentError('voice payload must not be empty');
     await (_db.update(
@@ -104,16 +129,25 @@ class DriftSosRepository implements SosRepository {
   }
 
   @override
-  Future<void> attachTriage(String eventId, TriageOutput output) =>
-      (_db.update(
-        _db.outboxEvents,
-      )..where((t) => t.eventId.equals(eventId))).write(
-        OutboxEventsCompanion(
-          triageJson: Value(_encodeTriage(output)),
-          priority: Value(output.priority.name),
-          updatedAtMs: Value(DateTime.now().millisecondsSinceEpoch),
-        ),
-      );
+  Future<void> attachTriage(String eventId, TriageOutput output) async {
+    final row = await (_db.select(
+      _db.outboxEvents,
+    )..where((t) => t.eventId.equals(eventId))).getSingle();
+    final encoded = <String, Object?>{
+      ...?_triageRecord(_encodeTriage(output)),
+      if (_locationFrom(row.triageJson) case final location?)
+        'location': location,
+    };
+    await (_db.update(
+      _db.outboxEvents,
+    )..where((t) => t.eventId.equals(eventId))).write(
+      OutboxEventsCompanion(
+        triageJson: Value(jsonEncode(encoded)),
+        priority: Value(output.priority.name),
+        updatedAtMs: Value(DateTime.now().millisecondsSinceEpoch),
+      ),
+    );
+  }
 
   @override
   Future<void> finalizeAndEnqueue(String eventId) async {
@@ -126,16 +160,23 @@ class DriftSosRepository implements SosRepository {
       throw StateError('SOS draft expired');
     }
     final priority = PriorityBand.values.byName(row.priority);
+    final location = _locationFrom(row.triageJson);
     final payload = StructuredSosPayload(
       incidentType: _incidentTypeFrom(row.triageJson),
       transcript: row.transcript ?? row.rawText ?? '',
       sttConfidence: 0,
-      triagePriority: priority,
+      triagePriority: row.inputMode == InputMode.voice.name
+          ? PriorityBand.p0Critical
+          : priority,
       triageConfidence: _confidenceFrom(row.triageJson),
       hazards: const [],
       rationale: _rationaleFrom(row.triageJson),
       inputMode: InputMode.values.byName(row.inputMode ?? InputMode.tap.name),
       voiceClipId: _voiceClipIdFrom(row.voicePath),
+      latitude: (location?['latitude'] as num?)?.toDouble(),
+      longitude: (location?['longitude'] as num?)?.toDouble(),
+      accuracyM: (location?['accuracyM'] as num?)?.toDouble(),
+      locationCapturedAtMs: (location?['capturedAtMs'] as num?)?.toInt(),
     );
     await (_db.update(
       _db.outboxEvents,
@@ -174,6 +215,11 @@ class DriftSosRepository implements SosRepository {
   List<String> _rationaleFrom(String? triageJson) =>
       ((_triageRecord(triageJson)?['rationale'] as List?)?.cast<String>()) ??
       const [];
+
+  Map<String, Object?>? _locationFrom(String? triageJson) {
+    final location = _triageRecord(triageJson)?['location'];
+    return location is Map ? location.cast<String, Object?>() : null;
+  }
 
   String _voiceClipIdFrom(String? voicePath) =>
       voicePath?.startsWith('clip:') == true
