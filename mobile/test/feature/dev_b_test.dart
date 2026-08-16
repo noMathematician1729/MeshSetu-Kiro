@@ -6,6 +6,7 @@ import 'package:meshsetu_mobile/core/model/model.dart';
 import 'package:meshsetu_mobile/app/mesh_bridge.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_repository.dart';
 import 'package:meshsetu_mobile/feature/join/manifest.dart';
+import 'package:meshsetu_mobile/feature/join/join_repository.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_policy.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_payload.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_repository.dart';
@@ -137,6 +138,41 @@ void main() {
     expect(decoded.signatureValid, isTrue);
     expect(decoded.roomId, 'public');
   });
+
+  test(
+    'JoinRepository persists a newly created room in the active manifest',
+    () async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final repo = JoinRepository(db);
+      const manifest = EventManifest(
+        siteId: 'site',
+        siteName: 'Site',
+        meshCode: 'ABC123',
+        validFromMs: 0,
+        validUntilMs: 4102444800000,
+        rooms: [],
+        gatewayHint: '',
+      );
+      await repo.activateManifest(manifest);
+
+      const room = RoomManifest(
+        roomId: 'registration-desk',
+        name: 'Registration Desk',
+        role: 'public',
+        ttlSeconds: 3600,
+      );
+      final updated = await repo.addRoomToActiveManifest(room);
+
+      expect(updated.rooms.single.roomId, room.roomId);
+      expect(updated.rooms.single.name, room.name);
+      expect(updated.rooms.single.role, room.role);
+      final persisted = (await repo.activeManifest())!.rooms.single;
+      expect(persisted.roomId, room.roomId);
+      expect(persisted.name, room.name);
+      expect(persisted.role, room.role);
+    },
+  );
 
   test(
     'DriftSosRepository moves an event through the outbox state machine',

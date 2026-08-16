@@ -9,6 +9,16 @@ import '../sos/sos_screen.dart';
 import '../voice/voice_inbox_screen.dart';
 import 'room_chat_screen.dart';
 
+String _roomIdFromName(String name) {
+  final slug = name
+      .trim()
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
+  final suffix = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+  return '${slug.isEmpty ? 'room' : slug}-$suffix';
+}
+
 /// Room list for the joined site (Bible §20.5: "Join -> Rooms -> SOS flow
 /// is understandable in under 30 seconds").
 class RoomsScreen extends ConsumerWidget {
@@ -29,7 +39,15 @@ class RoomsScreen extends ConsumerWidget {
           return ListView(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.add_home_work_outlined),
+                  label: const Text('Create room and generate QR'),
+                  onPressed: () => _createRoom(context, ref),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                 child: Text(
                   'Share a room QR so another phone can join this event and open the same room.',
                   style: Theme.of(context).textTheme.bodyMedium,
@@ -92,6 +110,86 @@ class RoomsScreen extends ConsumerWidget {
         },
       ),
     );
+  }
+
+  Future<void> _createRoom(BuildContext context, WidgetRef ref) async {
+    final nameController = TextEditingController();
+    var role = 'public';
+    final room = await showDialog<RoomManifest>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Create room'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Room name',
+                  hintText: 'e.g. Registration Desk',
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: role,
+                decoration: const InputDecoration(labelText: 'Room access'),
+                items: const [
+                  DropdownMenuItem(value: 'public', child: Text('Public')),
+                  DropdownMenuItem(
+                    value: 'volunteer',
+                    child: Text('Volunteer'),
+                  ),
+                  DropdownMenuItem(value: 'medical', child: Text('Medical')),
+                  DropdownMenuItem(
+                    value: 'responder',
+                    child: Text('Responder'),
+                  ),
+                ],
+                onChanged: (value) => setDialogState(() => role = value!),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final name = nameController.text.trim();
+                if (name.isEmpty) return;
+                Navigator.of(context).pop(
+                  RoomManifest(
+                    roomId: _roomIdFromName(name),
+                    name: name,
+                    role: role,
+                    ttlSeconds: 3600,
+                  ),
+                );
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        ),
+      ),
+    );
+    nameController.dispose();
+    if (room == null || !context.mounted) return;
+    try {
+      final updated = await ref
+          .read(joinRepositoryProvider)
+          .addRoomToActiveManifest(room);
+      refreshActiveSite(ref);
+      if (!context.mounted) return;
+      _showRoomQr(context, updated, room);
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not create room: $error')));
+    }
   }
 
   void _showRoomQr(

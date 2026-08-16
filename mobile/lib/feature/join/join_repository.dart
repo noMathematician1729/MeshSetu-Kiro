@@ -111,6 +111,30 @@ class JoinRepository {
         );
   }
 
+  Future<EventManifest> addRoomToActiveManifest(RoomManifest room) async {
+    final current = await activeManifest();
+    if (current == null) {
+      throw StateError('join an event before creating a room');
+    }
+    if (room.roomId.trim().isEmpty || room.name.trim().isEmpty) {
+      throw ArgumentError('room id and name must not be blank');
+    }
+    if (current.rooms.any((existing) => existing.roomId == room.roomId)) {
+      throw StateError('a room with this id already exists');
+    }
+    final updated = EventManifest(
+      siteId: current.siteId,
+      siteName: current.siteName,
+      meshCode: current.meshCode,
+      validFromMs: current.validFromMs,
+      validUntilMs: current.validUntilMs,
+      gatewayHint: current.gatewayHint,
+      rooms: [...current.rooms, room],
+    );
+    await activateManifest(updated);
+    return updated;
+  }
+
   Future<EventManifest?> activeManifest() async {
     final row = await _db.currentSite();
     if (row == null) return null;
