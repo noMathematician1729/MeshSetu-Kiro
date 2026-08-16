@@ -1,13 +1,22 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:ui';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
+import '../core/model/model.dart';
+import '../feature/gateway/gateway_bridge.dart';
+import '../feature/join/join_screen.dart';
+import '../feature/rooms/rooms_screen.dart';
+import 'mesh_bridge.dart';
+import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
+import 'providers.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event';
@@ -23,6 +32,7 @@ class _MeshEventTaskHandler extends TaskHandler {
   MeshEventController? _controller;
   bool _sosPending = false;
   bool _debugLossEnabled = false;
+  StreamSubscription<ReceivedObject>? _incomingSubscription;
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -81,6 +91,14 @@ class _MeshEventTaskHandler extends TaskHandler {
       );
       await controller.start();
       _controller = controller;
+      _incomingSubscription = controller.coordinator?.incoming.listen((
+        received,
+      ) {
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_received',
+          'received': MeshBridge.receivedToJson(received),
+        });
+      });
       controller.setDebugLossInjection(_debugLossEnabled);
       FlutterForegroundTask.sendDataToMain(const {'status': 'started'});
       if (_sosPending) {
@@ -100,6 +118,8 @@ class _MeshEventTaskHandler extends TaskHandler {
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    await _incomingSubscription?.cancel();
+    _incomingSubscription = null;
     await _controller?.stop();
     _controller = null;
     FlutterForegroundTask.sendDataToMain(const {'status': 'stopped'});
@@ -110,6 +130,13 @@ class _MeshEventTaskHandler extends TaskHandler {
     if (data is Map && data['debugLoss'] is bool) {
       _debugLossEnabled = data['debugLoss'] as bool;
       _controller?.setDebugLossInjection(_debugLossEnabled);
+      return;
+    }
+    if (data is Map && data['sendMeshObject'] is Map) {
+      final envelope = MeshBridge.envelopeFromJson(
+        (data['sendMeshObject'] as Map).cast<Object?, Object?>(),
+      );
+      unawaited(_controller?.coordinator?.send(envelope) ?? Future.value());
       return;
     }
     if (data != 'send_test_sos') return;
@@ -135,15 +162,16 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 }
 
-/// Port of `in.meshsetu.app.MainActivity` (Kotlin `MainActivity.kt`).
-class EventModeScreen extends StatefulWidget {
+/// Port of `in.meshsetu.app.MainActivity` (Kotlin `MainActivity.kt`), plus
+/// the Dev B navigation entry point into Join/Rooms/SOS once the mesh is up.
+class EventModeScreen extends ConsumerStatefulWidget {
   const EventModeScreen({super.key});
 
   @override
-  State<EventModeScreen> createState() => _EventModeScreenState();
+  ConsumerState<EventModeScreen> createState() => _EventModeScreenState();
 }
 
-class _EventModeScreenState extends State<EventModeScreen> {
+class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   bool _eventModeActive = false;
   bool _debugLossEnabled = false;
   String _status = 'MeshSetu\nEvent mode is off';
@@ -152,6 +180,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
   String _nearestBeacon = 'none';
   String _zone = 'unknown';
   List<Map<String, dynamic>> _peerDebug = const [];
+  MeshBridgeClient? _bridgeClient;
 
   @override
   void initState() {
@@ -181,6 +210,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
       _eventModeActive = true;
       _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
     });
+    await _startBridgeForActiveSite();
   }
 
   void _onTaskData(Object data) {
@@ -191,6 +221,7 @@ class _EventModeScreenState extends State<EventModeScreen> {
           _eventModeActive = true;
           _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
         });
+        unawaited(_startBridgeForActiveSite());
       case 'stopped':
         setState(() {
           _eventModeActive = false;
@@ -201,6 +232,9 @@ class _EventModeScreenState extends State<EventModeScreen> {
           _zone = 'unknown';
           _status = 'MeshSetu\nEvent mode is off';
         });
+        unawaited(_bridgeClient?.dispose());
+        _bridgeClient = null;
+        _bridgeClientSiteStarted = false;
       case 'error':
         setState(() {
           _eventModeActive = false;
@@ -325,14 +359,77 @@ class _EventModeScreenState extends State<EventModeScreen> {
     FlutterForegroundTask.sendDataToTask('send_test_sos');
   }
 
+  Future<void> _openJoinOrRooms() async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    if (!mounted) return;
+    if (site != null) {
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => JoinScreen(
+          onJoined: () {
+            unawaited(_startBridgeForActiveSite());
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  bool _bridgeClientSiteStarted = false;
+
+  Future<void> _startBridgeForActiveSite() async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    if (!mounted || !_eventModeActive) return;
+    _bridgeClient ??= MeshBridgeClient(ref.read(databaseProvider));
+    if (!_bridgeClientSiteStarted) {
+      _bridgeClient!.start(
+        siteId: site?.siteId ?? MeshEventController.siteId,
+        localEphemeralId: _randomEphemeralId(),
+      );
+      _bridgeClientSiteStarted = true;
+    } else if (site != null) {
+      _bridgeClient!.setSiteId(site.siteId);
+    }
+    _applyGatewaySettings();
+  }
+
+  void _applyGatewaySettings() {
+    final enabled = ref.read(gatewayEnabledProvider);
+    final url = ref.read(gatewayUrlProvider);
+    final key = ref.read(gatewayDemoKeyProvider);
+    _bridgeClient?.gatewayBridge = (enabled && url.isNotEmpty && key.isNotEmpty)
+        ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
+        : null;
+  }
+
+  int _randomEphemeralId() {
+    final random = Random.secure();
+    final high = random.nextInt(1 << 31);
+    final low = random.nextInt(1 << 32);
+    final value = (high << 32) | low;
+    return value == 0 ? 1 : value;
+  }
+
   @override
   void dispose() {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    unawaited(_bridgeClient?.dispose());
+    _bridgeClientSiteStarted = false;
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(gatewayEnabledProvider, (_, _) => _applyGatewaySettings());
+    ref.listen(gatewayUrlProvider, (_, _) => _applyGatewaySettings());
+    ref.listen(gatewayDemoKeyProvider, (_, _) => _applyGatewaySettings());
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -356,6 +453,11 @@ class _EventModeScreenState extends State<EventModeScreen> {
               FilledButton(
                 onPressed: _eventModeActive ? _sendTestSos : null,
                 child: const Text('Send 100-byte test SOS'),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: _eventModeActive ? _openJoinOrRooms : null,
+                child: const Text('Join event / Rooms / SOS'),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,

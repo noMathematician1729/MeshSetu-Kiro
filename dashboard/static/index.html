@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>MeshSetu Control Room</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+  article { border: 1px solid #444; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
+  article[data-priority="p0Critical"] { border-color: #e33; background: #2a1414; }
+  article[data-priority="p1High"] { border-color: #e93; }
+  small { color: #999; }
+</style>
+<h1>MeshSetu Local Control Room</h1>
+<p>Incident priority (relay order) is shown per-card; zone precursor scoring is a separate, not-yet-built
+  concept per the Bible §20.5 — this build only surfaces per-incident triage output.</p>
+<div id="events"></div>
+<script>
+  const root = document.getElementById('events');
+  const state = new Map();
+  function render() {
+    root.innerHTML = [...state.values()]
+      .sort((a, b) => a.priority.localeCompare(b.priority))
+      .map(e => `
+        <article data-priority="${e.priority}">
+          <h3>${escapeHtml(e.priority)} &middot; ${escapeHtml(e.incident_type)} &middot; ${escapeHtml(e.zone || 'unknown zone')}</h3>
+          <p>${escapeHtml(e.transcript || 'No transcript')}</p>
+          <small>${escapeHtml(e.hops)} hops &middot; ${escapeHtml(e.relay_latency_ms ?? '?')} ms &middot; audio ${escapeHtml(e.audio_state || 'n/a')}</small>
+        </article>
+      `).join('');
+  }
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  }
+  const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    (m.type === 'snapshot' ? m.data : [m.data]).forEach(e => state.set(e.event_id, e));
+    render();
+  };
+</script>

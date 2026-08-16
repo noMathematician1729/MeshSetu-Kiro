@@ -202,11 +202,7 @@ class MeshTransportCoordinator implements MeshTransport {
             if (!_acceptsHello(frame.bytes)) {
               final link = _sessions[frame.deviceId];
               server.rejectPeer(frame.deviceId);
-              _detach(
-                frame.deviceId,
-                expected: link,
-                promoteRejected: false,
-              );
+              _detach(frame.deviceId, expected: link, promoteRejected: false);
               unawaited(link?.close());
               return;
             }
