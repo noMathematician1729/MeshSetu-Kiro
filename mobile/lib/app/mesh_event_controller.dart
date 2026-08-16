@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -17,6 +16,7 @@ import '../core/protocol/frame.dart';
 import '../core/protocol/protocol_metrics.dart';
 import '../core/protocol/relay_engine.dart';
 import '../core/protocol/secure_envelope.dart';
+import 'test_sos_packet.dart';
 
 /// Port of `in.meshsetu.app.MeshEventService`'s mesh-orchestration logic
 /// (Kotlin `MeshEventService.kt` — `startMesh`, `sendTestObject`).
@@ -26,9 +26,6 @@ import '../core/protocol/secure_envelope.dart';
 class MeshEventController {
   static const String siteId = 'demo-site';
   static const String siteNamespace = 'demo';
-  static const String testSosMessage =
-      'TEST SOS RECEIVED: MeshSetu emergency link is working.';
-  static const int testSosPayloadBytes = 100;
   static const int capabilityRelay = 1;
   static const int capabilityVoice = 1 << 3;
 
@@ -312,42 +309,30 @@ class MeshEventController {
   }
 
   Future<bool> sendTestObject() async {
-    for (var attempt = 0; attempt < 100; attempt++) {
-      final coordinator = _coordinator;
-      if (coordinator != null) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        await coordinator.send(
-          MeshEnvelope(
-            objectId: _randomNonZero64(),
-            eventId: _randomUuidV4(),
-            siteId: siteId,
-            roomId: 'public',
-            createdAtMs: now,
-            expiresAtMs: now + 60000,
-            hopCount: 0,
-            hopLimit: 4,
-            priority: PriorityBand.p0Critical,
-            payloadType: PayloadType.structuredSos,
-            payload: _testSosPayload(),
-            originEphemeralId: _localToken,
-          ),
-        );
-        return true;
-      }
+    for (var attempt = 0; attempt < 100 && _coordinator == null; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    return false;
-  }
+    final coordinator = _coordinator;
+    if (coordinator == null) return false;
 
-  static Uint8List _testSosPayload() {
-    final message = Uint8List.fromList(utf8.encode(testSosMessage));
-    if (message.length > testSosPayloadBytes) {
-      throw StateError('test SOS message exceeds 100-byte payload');
-    }
-    final payload = Uint8List(testSosPayloadBytes);
-    payload.fillRange(message.length, payload.length, 0x20);
-    payload.setRange(0, message.length, message);
-    return payload;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await coordinator.send(
+      MeshEnvelope(
+        objectId: _randomNonZero64(),
+        eventId: _randomUuidV4(),
+        siteId: siteId,
+        roomId: 'public',
+        createdAtMs: now,
+        expiresAtMs: now + 60000,
+        hopCount: 0,
+        hopLimit: 4,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+        payload: TestSosPacket.payload,
+        originEphemeralId: _localToken,
+      ),
+    );
+    return true;
   }
 
   Future<void> stop() async {

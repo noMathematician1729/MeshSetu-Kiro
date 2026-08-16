@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 
@@ -10,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
+import '../core/data/database.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/join/manifest.dart';
@@ -21,6 +21,7 @@ import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
 import 'providers.dart';
+import 'test_sos_packet.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event';
@@ -300,16 +301,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         final received = MeshBridge.receivedFromJson(
           receivedJson.cast<Object?, Object?>(),
         );
-        if (received.envelope.payloadType == PayloadType.structuredSos) {
-          final message = utf8
-              .decode(received.envelope.payload, allowMalformed: true)
-              .trim();
-          if (message == MeshEventController.testSosMessage) {
-            setState(() {
-              _status = 'MeshSetu\n$message';
-              _lastMetric = 'test SOS received from ${received.peerId}';
-            });
-          }
+        if (TestSosPacket.matches(received.envelope)) {
+          setState(() {
+            _status = 'MeshSetu\n${TestSosPacket.message}';
+            _lastMetric = 'test SOS received from ${received.peerId}';
+          });
         }
       case 'mesh_metric':
         final metrics = data['metrics'];
@@ -558,6 +554,37 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(_status, style: Theme.of(context).textTheme.headlineSmall),
+              StreamBuilder<List<InboxEvent>>(
+                stream: ref
+                    .read(databaseProvider)
+                    .watchInboxRoom(MeshEventController.siteId, 'public'),
+                builder: (context, snapshot) {
+                  InboxEvent? testSos;
+                  for (final row in snapshot.data ?? const <InboxEvent>[]) {
+                    if (TestSosPacket.matchesPayload(
+                      PayloadType.values.byName(row.payloadType),
+                      row.payload,
+                    )) {
+                      testSos = row;
+                    }
+                  }
+                  if (testSos == null) return const SizedBox.shrink();
+                  return Card(
+                    color: Colors.green.shade50,
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.check_circle,
+                        color: Colors.green,
+                      ),
+                      title: const Text('Test packet received'),
+                      subtitle: Text(
+                        '${TestSosPacket.message}\n'
+                        'From: ${testSos!.peerId}',
+                      ),
+                    ),
+                  );
+                },
+              ),
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _eventModeActive ? null : _startEventMode,
