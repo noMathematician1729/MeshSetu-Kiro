@@ -65,19 +65,25 @@ class JoinRepository {
     return _activateIfValid(
       decoded.manifest,
       signatureValid: decoded.signatureValid,
+      roomId: decoded.roomId,
     );
   }
 
   Future<JoinResult> _activateIfValid(
     EventManifest manifest, {
     required bool signatureValid,
+    String? roomId,
   }) async {
     if (!signatureValid) return const JoinInvalid('signature');
+    if (roomId != null &&
+        !manifest.rooms.any((room) => room.roomId == roomId)) {
+      return const JoinInvalid('unknown_room');
+    }
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now > manifest.validUntilMs) return const JoinInvalid('expired');
     if (now < manifest.validFromMs) return const JoinInvalid('not_yet_valid');
     await activateManifest(manifest);
-    return JoinResult.ok(manifest);
+    return JoinResult.ok(manifest, roomId: roomId);
   }
 
   Future<void> activateManifest(EventManifest manifest) async {

@@ -13,6 +13,7 @@ abstract final class BlePermissions {
         Permission.bluetoothScan,
         Permission.bluetoothAdvertise,
         Permission.bluetoothConnect,
+        Permission.locationWhenInUse,
         if (sdkInt >= 33) Permission.notification,
       ];
     }

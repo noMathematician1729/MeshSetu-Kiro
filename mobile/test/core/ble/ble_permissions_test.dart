@@ -3,11 +3,12 @@ import 'package:meshsetu_mobile/core/ble/ble_permissions.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 void main() {
-  test('Android 31 requests granular bluetooth permissions only', () {
+  test('Android 31 requests bluetooth and location permissions', () {
     expect(BlePermissions.runtimePermissions(sdkInt: 31), [
       Permission.bluetoothScan,
       Permission.bluetoothAdvertise,
       Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
     ]);
   });
 
@@ -16,6 +17,7 @@ void main() {
       Permission.bluetoothScan,
       Permission.bluetoothAdvertise,
       Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
       Permission.notification,
     ]);
   });

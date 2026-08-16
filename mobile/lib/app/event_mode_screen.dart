@@ -11,8 +11,10 @@ import 'package:permission_handler/permission_handler.dart';
 import '../core/ble/ble_permissions.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
+import '../feature/join/manifest.dart';
 import '../feature/join/join_screen.dart';
 import '../feature/rooms/rooms_screen.dart';
+import '../feature/rooms/room_chat_screen.dart';
 import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
@@ -137,7 +139,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       final envelope = MeshBridge.envelopeFromJson(
         (data['sendMeshObject'] as Map).cast<Object?, Object?>(),
       );
-      unawaited(_controller?.coordinator?.send(envelope) ?? Future.value());
+      unawaited(_submitMeshObject(envelope, data['objectId']));
       return;
     }
     if (data != 'send_test_sos') return;
@@ -146,6 +148,36 @@ class _MeshEventTaskHandler extends TaskHandler {
       _sosPending = true;
     } else {
       unawaited(_sendTestSos(controller));
+    }
+  }
+
+  Future<void> _submitMeshObject(
+    MeshEnvelope envelope,
+    Object? requestId,
+  ) async {
+    final objectId = requestId is int ? requestId : envelope.objectId;
+    try {
+      final controller = _controller;
+      final coordinator = controller?.coordinator;
+      if (controller == null || coordinator == null) {
+        throw StateError('mesh service is not ready');
+      }
+      if (envelope.siteId != MeshEventController.siteId) {
+        throw StateError('object belongs to a different event site');
+      }
+      await coordinator.send(envelope);
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'mesh_submit_result',
+        'objectId': objectId,
+        'accepted': true,
+      });
+    } catch (error) {
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'mesh_submit_result',
+        'objectId': objectId,
+        'accepted': false,
+        'reason': error.toString(),
+      });
     }
   }
 
@@ -255,6 +287,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         });
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
+      case 'mesh_submit_result':
+        setState(
+          () => _lastMetric = data['accepted'] == true
+              ? 'mesh accepted object ${data['objectId']}'
+              : 'mesh rejected object ${data['objectId']}',
+        );
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is List && metrics.isNotEmpty && metrics.first is Map) {
@@ -377,10 +415,32 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: () {
+          onJoined: (roomId) async {
             unawaited(_startBridgeForActiveSite());
+            final joinedSite = await ref
+                .read(joinRepositoryProvider)
+                .activeManifest();
+            if (!mounted || !context.mounted || joinedSite == null) return;
+            RoomManifest? room;
+            if (roomId != null) {
+              for (final candidate in joinedSite.rooms) {
+                if (candidate.roomId == roomId) {
+                  room = candidate;
+                  break;
+                }
+              }
+            }
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => room == null
+                    ? const RoomsScreen()
+                    : RoomChatScreen(
+                        siteId: joinedSite.siteId,
+                        roomId: room.roomId,
+                        roomName: room.name,
+                        role: room.role,
+                      ),
+              ),
             );
           },
         ),
@@ -499,9 +559,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                     ? _runFakeSttSmokeTest
                     : null,
                 child: Text(
-                  _sttTesting
-                      ? 'Running STT test...'
-                      : 'Run STT smoke test',
+                  _sttTesting ? 'Running STT test...' : 'Run STT smoke test',
                 ),
               ),
               const SizedBox(height: 8),

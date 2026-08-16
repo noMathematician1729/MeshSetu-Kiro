@@ -12,7 +12,7 @@ import 'manifest.dart';
 class JoinScreen extends ConsumerStatefulWidget {
   const JoinScreen({super.key, this.onJoined});
 
-  final VoidCallback? onJoined;
+  final ValueChanged<String?>? onJoined;
 
   @override
   ConsumerState<JoinScreen> createState() => _JoinScreenState();
@@ -54,13 +54,13 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
     if (!mounted) return;
     setState(() => _submitting = false);
     switch (result) {
-      case JoinOk(:final manifest):
+      case JoinOk(:final manifest, :final roomId):
         refreshActiveSite(ref);
         if (!mounted) return;
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Joined ${manifest.siteName}')));
-        widget.onJoined?.call();
+        widget.onJoined?.call(roomId);
       case JoinInvalid(:final reason):
         setState(() => _error = 'Join failed: $reason');
     }

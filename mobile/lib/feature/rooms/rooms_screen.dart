@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../app/providers.dart';
 import '../gateway/gateway_screen.dart';
+import '../join/manifest.dart';
 import '../sos/sos_screen.dart';
 import '../voice/voice_inbox_screen.dart';
 import 'room_chat_screen.dart';
@@ -26,6 +28,13 @@ class RoomsScreen extends ConsumerWidget {
           }
           return ListView(
             children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Text(
+                  'Share a room QR so another phone can join this event and open the same room.',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
               ListTile(
                 leading: const Icon(Icons.sos, color: Colors.red),
                 title: const Text('Send SOS'),
@@ -62,6 +71,11 @@ class RoomsScreen extends ConsumerWidget {
                   leading: const Icon(Icons.forum_outlined),
                   title: Text(room.name),
                   subtitle: Text(room.role),
+                  trailing: IconButton(
+                    tooltip: 'Generate room QR',
+                    icon: const Icon(Icons.qr_code_2),
+                    onPressed: () => _showRoomQr(context, manifest, room),
+                  ),
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => RoomChatScreen(
@@ -76,6 +90,51 @@ class RoomsScreen extends ConsumerWidget {
             ],
           );
         },
+      ),
+    );
+  }
+
+  void _showRoomQr(
+    BuildContext context,
+    EventManifest manifest,
+    RoomManifest room,
+  ) {
+    final payload = EventManifestCodec.encode(manifest, roomId: room.roomId);
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${room.name} QR'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                color: Colors.white,
+                padding: const EdgeInsets.all(12),
+                child: QrImageView(
+                  data: payload,
+                  version: QrVersions.auto,
+                  size: 260,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(manifest.siteName),
+              Text('${room.name} · ${room.role}'),
+              const SizedBox(height: 8),
+              const Text(
+                'On the other phone, choose Join event and scan this code.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Done'),
+          ),
+        ],
       ),
     );
   }

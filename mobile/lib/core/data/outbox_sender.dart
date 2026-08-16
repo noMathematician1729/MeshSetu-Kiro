@@ -33,6 +33,7 @@ class OutboxSender {
   StreamSubscription<List<OutboxEvent>>? _sub;
   final Set<String> _draining = {};
   final Map<String, Timer> _retryTimers = {};
+  final Map<String, int> _retryAfterMs = {};
   bool _disposed = false;
 
   void start() {
@@ -52,7 +53,9 @@ class OutboxSender {
         );
     if (_disposed) return;
     _sub = _db.watchReady(siteId).listen((rows) {
+      final now = DateTime.now().millisecondsSinceEpoch;
       for (final row in rows) {
+        if ((_retryAfterMs[row.eventId] ?? 0) > now) continue;
         if (_draining.add(row.eventId)) unawaited(_drainOnce(row));
       }
     });
@@ -114,18 +117,22 @@ class OutboxSender {
         ),
       );
     } catch (_) {
-      // Keep the row durable without creating a hot retry loop.
+      // Return rejected submissions to READY immediately, but hold the
+      // watcher off for a short backoff so a stopped foreground task cannot
+      // spin the same row through RELAYING continuously.
+      final retryAt = DateTime.now().millisecondsSinceEpoch + 1000;
+      _retryAfterMs[row.eventId] = retryAt;
+      await _db.markState(row.eventId, 'ready', retryAt);
       final timer = Timer(const Duration(seconds: 1), () async {
         if (_disposed) return;
+        _retryAfterMs.remove(row.eventId);
         final current = await (_db.select(
           _db.outboxEvents,
         )..where((t) => t.eventId.equals(row.eventId))).getSingleOrNull();
-        if (current?.state == 'relaying') {
-          await _db.markState(
-            row.eventId,
-            'ready',
-            DateTime.now().millisecondsSinceEpoch,
-          );
+        if (current != null &&
+            current.state == 'ready' &&
+            _draining.add(row.eventId)) {
+          unawaited(_drainOnce(current));
         }
       });
       _retryTimers[row.eventId]?.cancel();
@@ -151,6 +158,7 @@ class OutboxSender {
       timer.cancel();
     }
     _retryTimers.clear();
+    _retryAfterMs.clear();
     _draining.clear();
   }
 }

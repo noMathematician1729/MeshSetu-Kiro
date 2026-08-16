@@ -40,13 +40,14 @@ enum RoomAccess { public, volunteer, medical, responder, authority }
 /// Result of validating a scanned/typed join code (Bible §9.3).
 sealed class JoinResult {
   const JoinResult();
-  factory JoinResult.ok(EventManifest manifest) = JoinOk;
+  factory JoinResult.ok(EventManifest manifest, {String? roomId}) = JoinOk;
   factory JoinResult.invalid(String reason) = JoinInvalid;
 }
 
 final class JoinOk extends JoinResult {
-  const JoinOk(this.manifest);
+  const JoinOk(this.manifest, {this.roomId});
   final EventManifest manifest;
+  final String? roomId;
 }
 
 final class JoinInvalid extends JoinResult {
@@ -65,13 +66,14 @@ final class JoinInvalid extends JoinResult {
 abstract final class EventManifestCodec {
   static const String demoSigningKeyB64 = 'meshsetu-demo-manifest-key-v1';
 
-  static String encode(EventManifest manifest) {
-    final body = _bodyJson(manifest);
+  static String encode(EventManifest manifest, {String? roomId}) {
+    final body = _bodyJson(manifest, roomId: roomId);
     final sig = _sign(body);
     return jsonEncode({'body': jsonDecode(body), 'sig': sig});
   }
 
-  static ({EventManifest manifest, bool signatureValid})? decode(String raw) {
+  static ({EventManifest manifest, bool signatureValid, String? roomId})?
+  decode(String raw) {
     try {
       final envelope = jsonDecode(raw) as Map<String, Object?>;
       final body = jsonEncode(envelope['body']);
@@ -94,19 +96,24 @@ abstract final class EventManifestCodec {
             ),
         ],
       );
-      return (manifest: manifest, signatureValid: signatureValid);
+      return (
+        manifest: manifest,
+        signatureValid: signatureValid,
+        roomId: map['roomId'] as String?,
+      );
     } catch (_) {
       return null;
     }
   }
 
-  static String _bodyJson(EventManifest m) => jsonEncode({
+  static String _bodyJson(EventManifest m, {String? roomId}) => jsonEncode({
     'siteId': m.siteId,
     'siteName': m.siteName,
     'meshCode': m.meshCode,
     'validFromMs': m.validFromMs,
     'validUntilMs': m.validUntilMs,
     'gatewayHint': m.gatewayHint,
+    if (roomId != null) 'roomId': roomId,
     'rooms': [
       for (final r in m.rooms)
         {

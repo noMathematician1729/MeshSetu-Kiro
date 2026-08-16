@@ -28,6 +28,8 @@ class MeshBridgeClient {
   GatewayBridge? _gatewayBridge;
   String? _siteId;
   int? _localEphemeralId;
+  final Map<int, Completer<void>> _pendingSubmissions = {};
+  final Map<int, Timer> _submissionTimers = {};
 
   /// Non-null only on the one phone acting as gateway (Bible §15.1);
   /// [feature/gateway/gateway_screen.dart] flips this on/off.
@@ -63,14 +65,52 @@ class MeshBridgeClient {
   }
 
   Future<void> _sendToMesh(MeshEnvelope envelope) async {
+    if (!await FlutterForegroundTask.isRunningService) {
+      throw StateError('event mode is not running');
+    }
+    final pending = Completer<void>();
+    _pendingSubmissions[envelope.objectId] = pending;
+    _submissionTimers[envelope.objectId] = Timer(
+      const Duration(seconds: 10),
+      () {
+        if (!pending.isCompleted) {
+          pending.completeError(
+            StateError('foreground mesh did not accept the object'),
+          );
+        }
+        _pendingSubmissions.remove(envelope.objectId);
+        _submissionTimers.remove(envelope.objectId);
+      },
+    );
     FlutterForegroundTask.sendDataToTask({
       'sendMeshObject': MeshBridge.envelopeToJson(envelope),
+      'objectId': envelope.objectId,
     });
+    try {
+      await pending.future;
+    } finally {
+      _submissionTimers.remove(envelope.objectId)?.cancel();
+      _pendingSubmissions.remove(envelope.objectId);
+    }
   }
 
   void _onTaskData(Object data) {
     if (data is! Map) return;
     switch (data['status']) {
+      case 'mesh_submit_result':
+        final objectId = data['objectId'];
+        if (objectId is! int) return;
+        final pending = _pendingSubmissions[objectId];
+        if (pending == null || pending.isCompleted) return;
+        if (data['accepted'] == true) {
+          pending.complete();
+        } else {
+          pending.completeError(
+            StateError(
+              data['reason'] as String? ?? 'foreground mesh rejected object',
+            ),
+          );
+        }
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
@@ -108,7 +148,22 @@ class MeshBridgeClient {
                 received.envelope.payloadType == PayloadType.voiceObject)) {
           unawaited(_forwardToGateway(bridge, received));
         }
+      case 'error' || 'stopped':
+        _failPendingSubmissions(
+          StateError(data['message'] as String? ?? 'foreground mesh stopped'),
+        );
     }
+  }
+
+  void _failPendingSubmissions(Object error) {
+    for (final pending in _pendingSubmissions.values) {
+      if (!pending.isCompleted) pending.completeError(error);
+    }
+    for (final timer in _submissionTimers.values) {
+      timer.cancel();
+    }
+    _pendingSubmissions.clear();
+    _submissionTimers.clear();
   }
 
   Future<void> _forwardToGateway(
@@ -140,6 +195,7 @@ class MeshBridgeClient {
     }
     await _outbox?.dispose();
     _outbox = null;
+    _failPendingSubmissions(StateError('mesh bridge disposed'));
     _siteId = null;
     _localEphemeralId = null;
   }

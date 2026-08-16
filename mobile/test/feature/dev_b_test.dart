@@ -114,6 +114,30 @@ void main() {
     expect(tamperedDecoded.signatureValid, isFalse);
   });
 
+  test('EventManifestCodec carries a signed room target in QR payloads', () {
+    const manifest = EventManifest(
+      siteId: 's',
+      siteName: 'Site',
+      meshCode: 'ABC123',
+      validFromMs: 0,
+      validUntilMs: 999999999999,
+      rooms: [
+        RoomManifest(
+          roomId: 'public',
+          name: 'Public Alerts',
+          role: 'public',
+          ttlSeconds: 3600,
+        ),
+      ],
+      gatewayHint: '',
+    );
+    final decoded = EventManifestCodec.decode(
+      EventManifestCodec.encode(manifest, roomId: 'public'),
+    )!;
+    expect(decoded.signatureValid, isTrue);
+    expect(decoded.roomId, 'public');
+  });
+
   test(
     'DriftSosRepository moves an event through the outbox state machine',
     () async {
@@ -242,4 +266,42 @@ void main() {
     expect(sent, hasLength(1));
     expect(sent.single.objectId, 11);
   });
+
+  test(
+    'OutboxSender requeues when the foreground mesh rejects a submission',
+    () async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await db
+          .into(db.outboxEvents)
+          .insert(
+            OutboxEventsCompanion.insert(
+              eventId: 'rejected-event',
+              objectId: const Value(12),
+              siteId: 'site',
+              roomId: 'public',
+              payloadType: PayloadType.roomMessage.name,
+              priority: PriorityBand.p2Normal.name,
+              payload: Value(Uint8List.fromList([1])),
+              state: const Value('ready'),
+              createdAtMs: now,
+              updatedAtMs: now,
+              expiresAtMs: now + 60000,
+            ),
+          );
+      final sender = OutboxSender(
+        db,
+        (_) async => throw StateError('mesh stopped'),
+        siteId: 'site',
+        localEphemeralId: 3,
+      )..start();
+      addTearDown(sender.dispose);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      final row = await (db.select(
+        db.outboxEvents,
+      )..where((t) => t.eventId.equals('rejected-event'))).getSingle();
+      expect(row.state, 'ready');
+    },
+  );
 }
