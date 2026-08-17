@@ -28,6 +28,10 @@ class Event(BaseModel):
     incident_type: str = "unknown"
     transcript: Optional[str] = None
     zone: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy_m: Optional[float] = None
+    location_captured_at_ms: Optional[int] = None
     room: Optional[str] = None
     hops: int = 0
     relay_latency_ms: Optional[int] = None

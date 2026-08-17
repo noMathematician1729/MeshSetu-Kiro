@@ -33,13 +33,18 @@ class MeshBridgeClient {
   int? _localEphemeralId;
   final Map<int, Completer<void>> _pendingSubmissions = {};
   final Map<int, Timer> _submissionTimers = {};
-  final Set<int> _importedObjectIds = {};
+  final Set<int> _storedObjectIds = {};
+  final Set<int> _forwardedObjectIds = {};
+  final Set<int> _forwardingObjectIds = {};
   Timer? _inboxSyncTimer;
   bool _syncingInbox = false;
 
   /// Non-null only on the one phone acting as gateway (Bible §15.1);
   /// [feature/gateway/gateway_screen.dart] flips this on/off.
-  set gatewayBridge(GatewayBridge? bridge) => _gatewayBridge = bridge;
+  set gatewayBridge(GatewayBridge? bridge) {
+    _gatewayBridge = bridge;
+    if (bridge != null) unawaited(_syncRelayInbox());
+  }
 
   void start({required String siteId, required int localEphemeralId}) {
     if (!_listening) {
@@ -176,8 +181,7 @@ class MeshBridgeClient {
         try {
           final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
           if (envelope.siteId != _siteId ||
-              envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch ||
-              _importedObjectIds.contains(envelope.objectId)) {
+              envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
             continue;
           }
           final modifiedAt =
@@ -200,24 +204,41 @@ class MeshBridgeClient {
   }
 
   Future<void> _storeReceived(ReceivedObject received) async {
-    await _db.insertInbox(
-      InboxEventsCompanion.insert(
-        objectId: Value(received.envelope.objectId),
-        eventId: received.envelope.eventId,
-        siteId: received.envelope.siteId,
-        roomId: received.envelope.roomId,
-        payloadType: received.envelope.payloadType.name,
-        payload: received.envelope.payload,
-        peerId: received.peerId,
-        receivedAtMs: received.receivedAtMs,
-      ),
-    );
-    _importedObjectIds.add(received.envelope.objectId);
+    final objectId = received.envelope.objectId;
+    if (_storedObjectIds.add(objectId)) {
+      try {
+        await _db.insertInbox(
+          InboxEventsCompanion.insert(
+            objectId: Value(objectId),
+            eventId: received.envelope.eventId,
+            siteId: received.envelope.siteId,
+            roomId: received.envelope.roomId,
+            payloadType: received.envelope.payloadType.name,
+            payload: received.envelope.payload,
+            peerId: received.peerId,
+            receivedAtMs: received.receivedAtMs,
+          ),
+        );
+      } catch (_) {
+        _storedObjectIds.remove(objectId);
+        rethrow;
+      }
+    }
     final bridge = _gatewayBridge;
-    if (bridge != null &&
-        (received.envelope.payloadType == PayloadType.structuredSos ||
-            received.envelope.payloadType == PayloadType.voiceObject)) {
+    if (bridge == null ||
+        (received.envelope.payloadType != PayloadType.structuredSos &&
+            received.envelope.payloadType != PayloadType.voiceObject) ||
+        _forwardedObjectIds.contains(objectId) ||
+        !_forwardingObjectIds.add(objectId)) {
+      return;
+    }
+    try {
       await _forwardToGateway(bridge, received);
+      _forwardedObjectIds.add(objectId);
+    } catch (_) {
+      // Keep the object eligible for the next durable-inbox retry.
+    } finally {
+      _forwardingObjectIds.remove(objectId);
     }
   }
 
@@ -225,21 +246,17 @@ class MeshBridgeClient {
     GatewayBridge bridge,
     ReceivedObject received,
   ) async {
-    try {
-      switch (received.envelope.payloadType) {
-        case PayloadType.structuredSos:
-          final sos = StructuredSosPayload.decode(received.envelope.payload);
-          await bridge.postToDashboard(
-            bridge.eventJson(envelope: received.envelope, sos: sos),
-          );
-        case PayloadType.voiceObject:
-          final voice = VoiceObjectPayload.decode(received.envelope.payload);
-          await bridge.postToDashboard(bridge.voiceCompleteJson(voice));
-        default:
-          return;
-      }
-    } catch (_) {
-      // Bible §3.4: gateway failure must not affect the local BLE loop.
+    switch (received.envelope.payloadType) {
+      case PayloadType.structuredSos:
+        final sos = StructuredSosPayload.decode(received.envelope.payload);
+        await bridge.postToDashboard(
+          bridge.eventJson(envelope: received.envelope, sos: sos),
+        );
+      case PayloadType.voiceObject:
+        final voice = VoiceObjectPayload.decode(received.envelope.payload);
+        await bridge.postToDashboard(bridge.voiceCompleteJson(voice));
+      default:
+        return;
     }
   }
 
@@ -255,6 +272,8 @@ class MeshBridgeClient {
     _failPendingSubmissions(StateError('mesh bridge disposed'));
     _siteId = null;
     _localEphemeralId = null;
-    _importedObjectIds.clear();
+    _storedObjectIds.clear();
+    _forwardedObjectIds.clear();
+    _forwardingObjectIds.clear();
   }
 }

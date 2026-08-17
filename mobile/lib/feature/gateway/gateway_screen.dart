@@ -3,11 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 
-/// Bible §15.1: "gateway phone and laptop join the same local Wi-Fi
-/// hotspot." This screen just lets the operator point the phone at the
-/// laptop's dashboard address and flip it into gateway mode — the actual
-/// forwarding is `GatewayForwarder`, started from `app/mesh_event_controller.dart`
-/// once a `MeshTransportCoordinator` exists.
+/// This screen lets the operator point the phone at a reachable dashboard
+/// address (local Wi-Fi or an HTTPS tunnel) and flip it into gateway mode —
+/// forwarding is performed by `MeshBridgeClient` when event mode is running.
 class GatewayScreen extends ConsumerStatefulWidget {
   const GatewayScreen({super.key});
 
@@ -41,8 +39,9 @@ class _GatewayScreenState extends ConsumerState<GatewayScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Enable this on the one phone that shares Wi-Fi with the '
-              'control-room laptop. Every other phone stays purely peer-to-peer.',
+              'Enable this on the phone that receives BLE SOS packets and can '
+              'reach the control-room dashboard. Every other phone stays '
+              'purely peer-to-peer.',
             ),
             const SizedBox(height: 12),
             TextField(

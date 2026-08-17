@@ -42,7 +42,7 @@ class RoomsScreen extends ConsumerWidget {
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                 child: FilledButton.icon(
                   icon: const Icon(Icons.add_home_work_outlined),
-                  label: const Text('Create your own room · Generate QR'),
+                  label: const Text('Create room · Generate QR'),
                   onPressed: () => _createRoom(context, ref),
                 ),
               ),

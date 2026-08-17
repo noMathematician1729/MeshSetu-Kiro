@@ -12,6 +12,8 @@ import 'package:meshsetu_mobile/feature/sos/sos_payload.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_repository.dart';
 import 'package:meshsetu_mobile/feature/triage/triage_engine.dart';
 import 'package:meshsetu_mobile/feature/voice/voice_repository.dart';
+import 'package:meshsetu_mobile/feature/gateway/gateway_bridge.dart';
+import 'package:meshsetu_mobile/feature/join/join_repository.dart';
 import 'package:test/test.dart';
 import 'dart:typed_data';
 
@@ -105,6 +107,82 @@ void main() {
       MeshBridge.envelopeToJson(envelope).cast<Object?, Object?>(),
     );
     expect(decoded.traceId, orderedEquals(envelope.traceId));
+  });
+
+  test('GatewayBridge maps received SOS location into dashboard JSON', () {
+    final envelope = MeshEnvelope(
+      objectId: 8,
+      eventId: 'sos-event',
+      siteId: 'site',
+      roomId: 'public',
+      createdAtMs: 1,
+      expiresAtMs: 2,
+      hopCount: 1,
+      hopLimit: 4,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([1]),
+      originEphemeralId: 9,
+      traceId: Uint8List(16),
+    );
+    const sos = StructuredSosPayload(
+      incidentType: 'medical',
+      transcript: 'help',
+      sttConfidence: 1,
+      triagePriority: PriorityBand.p0Critical,
+      triageConfidence: 1,
+      hazards: [],
+      rationale: [],
+      inputMode: InputMode.voice,
+      latitude: 19.076,
+      longitude: 72.8777,
+      accuracyM: 8.5,
+      locationCapturedAtMs: 42,
+    );
+    final event = GatewayBridge(
+      baseUrl: Uri.parse('https://example.test'),
+      demoKey: 'test',
+    ).eventJson(envelope: envelope, sos: sos);
+    expect(event['event_id'], 'sos-event');
+    expect(event['latitude'], 19.076);
+    expect(event['longitude'], 72.8777);
+    expect(event['accuracy_m'], 8.5);
+  });
+
+  test('JoinRepository persists a newly created room', () async {
+    final db = MeshDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repository = JoinRepository(db);
+    const manifest = EventManifest(
+      siteId: 'site',
+      siteName: 'Site',
+      meshCode: 'CODE',
+      validFromMs: 0,
+      validUntilMs: 9999999999999,
+      gatewayHint: '',
+      rooms: [
+        RoomManifest(
+          roomId: 'public',
+          name: 'Public',
+          role: 'public',
+          ttlSeconds: 3600,
+        ),
+      ],
+    );
+    await repository.activateManifest(manifest);
+    final updated = await repository.addRoomToActiveManifest(
+      const RoomManifest(
+        roomId: 'medical-a',
+        name: 'Medical A',
+        role: 'medical',
+        ttlSeconds: 3600,
+      ),
+    );
+    expect(updated.rooms.map((room) => room.roomId), contains('medical-a'));
+    expect(
+      (await repository.activeManifest())!.rooms.map((room) => room.roomId),
+      contains('medical-a'),
+    );
   });
 
   test('VoiceObjectPayload rejects tampering before playback', () {

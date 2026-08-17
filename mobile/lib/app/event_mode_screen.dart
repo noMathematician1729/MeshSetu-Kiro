@@ -4,7 +4,9 @@ import 'dart:ui';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart'
+    hide NotificationVisibility;
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -25,6 +27,49 @@ import 'providers.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event-v2';
+const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
+final FlutterLocalNotificationsPlugin _sosNotifications =
+    FlutterLocalNotificationsPlugin();
+bool _sosNotificationsInitialized = false;
+
+Future<void> _showSosNotification({
+  required ReceivedObject received,
+  required String detail,
+}) async {
+  try {
+    if (!_sosNotificationsInitialized) {
+      const settings = InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      );
+      await _sosNotifications.initialize(settings: settings);
+      _sosNotificationsInitialized = true;
+    }
+    var notificationId = received.envelope.objectId & 0x7fffffff;
+    if (notificationId == 0) notificationId = 1;
+    await _sosNotifications.show(
+      id: notificationId,
+      title: 'SOS RECEIVED',
+      body: detail,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Nearby MeshSetu emergency signals',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          ticker: 'SOS received',
+          category: AndroidNotificationCategory.alarm,
+          visibility: NotificationVisibility.public,
+          onlyAlertOnce: false,
+        ),
+      ),
+    );
+  } catch (_) {
+    // A notification failure must not stop BLE relaying.
+  }
+}
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
 /// controller is deliberately created in this task isolate, not the UI one.
@@ -195,16 +240,23 @@ class _MeshEventTaskHandler extends TaskHandler {
       // A random/test structured frame is not an SOS notification.
       return;
     }
-    await FlutterForegroundTask.updateService(
-      notificationTitle: 'SOS RECEIVED',
-      notificationText: detail,
-    );
+    await _showSosNotification(received: received, detail: detail);
+    try {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: 'SOS RECEIVED',
+        notificationText: detail,
+      );
+    } catch (_) {
+      // The separate SOS notification above remains the user-visible alert.
+    }
     await Future<void>.delayed(const Duration(seconds: 6));
     if (generation != _notificationGeneration) return;
-    await FlutterForegroundTask.updateService(
-      notificationTitle: 'MeshSetu event mode active',
-      notificationText: 'BLE relay is listening for nearby peers',
-    );
+    try {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: 'MeshSetu event mode active',
+        notificationText: 'BLE relay is listening for nearby peers',
+      );
+    } catch (_) {}
   }
 }
 
@@ -660,7 +712,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: _eventModeActive ? _openJoinOrRooms : null,
-                child: const Text('Join / Rooms / Create QR / SOS'),
+                child: const Text('Join / Rooms / Create room / SOS'),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,

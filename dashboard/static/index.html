@@ -22,6 +22,7 @@
         <article data-priority="${e.priority}">
           <h3>${escapeHtml(e.priority)} &middot; ${escapeHtml(e.incident_type)} &middot; ${escapeHtml(e.zone || 'unknown zone')}</h3>
           <p>${escapeHtml(e.transcript || 'No transcript')}</p>
+          <small>location ${e.latitude == null ? 'unavailable' : `${escapeHtml(e.latitude)}, ${escapeHtml(e.longitude)}`} </small><br>
           <small>${escapeHtml(e.hops)} hops &middot; ${escapeHtml(e.relay_latency_ms ?? '?')} ms &middot; audio ${escapeHtml(e.audio_state || 'n/a')}</small>
         </article>
       `).join('');

@@ -27,6 +27,10 @@ class DashboardTest(unittest.TestCase):
                     "priority": "p0Critical",
                     "incident_type": "medical",
                     "transcript": "help",
+                    "latitude": 19.076,
+                    "longitude": 72.8777,
+                    "accuracy_m": 8.5,
+                    "location_captured_at_ms": 42,
                 },
             ).status_code,
             200,
@@ -45,6 +49,10 @@ class DashboardTest(unittest.TestCase):
         )
         event = self.client.get("/api/events").json()[0]
         self.assertEqual(event["transcript"], "help")
+        self.assertEqual(event["latitude"], 19.076)
+        self.assertEqual(event["longitude"], 72.8777)
+        self.assertEqual(event["accuracy_m"], 8.5)
+        self.assertEqual(event["location_captured_at_ms"], 42)
         self.assertEqual(event["audio_state"], "complete")
 
 

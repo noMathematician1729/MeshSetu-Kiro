@@ -9,7 +9,7 @@ import '../voice/voice_repository.dart';
 /// Bible §15.1/§3.4: the gateway phone receives mesh objects exactly like
 /// any other peer (Dev A's `MeshTransportCoordinator`); this bridge only
 /// pushes already-verified/reassembled `StructuredSos` events on to the
-/// laptop dashboard over local Wi-Fi. No internet is required.
+/// configured dashboard URL over local Wi-Fi or an HTTPS tunnel.
 class GatewayBridge {
   GatewayBridge({required this.baseUrl, required this.demoKey});
 
