@@ -1,16 +1,14 @@
+import Architecture from './Architecture';
 import Capabilities from './Capabilities';
-import ClosingCta from './ClosingCta';
-import DemoLoop from './DemoLoop';
 import Footer from './Footer';
 import Header from './Header';
 import Hero from './Hero';
 import HowItWorks from './HowItWorks';
 import Interfaces from './Interfaces';
-import ProblemSection from './ProblemSection';
-import Prototype from './Prototype';
+import MeshSimulation from './MeshSimulation';
 import Safety from './Safety';
-import Trust from './Trust';
+import TechStack from './TechStack';
 
 export default function App() {
-  return <><Header /><main><Hero /><ProblemSection /><HowItWorks /><DemoLoop /><Capabilities /><Safety /><Interfaces /><Trust /><Prototype /><ClosingCta /></main><Footer /></>;
+  return <><Header /><main><Hero /><HowItWorks /><MeshSimulation /><Capabilities /><Safety /><TechStack /><Architecture /><Interfaces /></main><Footer /></>;
 }

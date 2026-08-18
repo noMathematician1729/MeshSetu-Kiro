@@ -7,14 +7,14 @@ export default function Hero() {
       <div className="hero-ornament" aria-hidden="true">M</div>
       <div className="container hero-inner">
         <div className="hero-copy">
-          <SectionLabel className="hero-eyebrow">MeshSetu / Offline emergency relay</SectionLabel>
-          <h1>WHEN THE<br />NETWORK <em>FALLS,</em><br />THE MESSAGE<br /><span>MOVES</span><b>.</b></h1>
+          <SectionLabel className="hero-eyebrow">MeshSetu / Offline emergency plan</SectionLabel>
+          <h1>Help still moves<br />when networks fail.</h1>
+          <p className="hero-description">MeshSetu uses nearby Android phones to carry a structured SOS, short voice evidence, and scoped updates across a store-and-forward Bluetooth Low Energy overlay when internet and cellular service are unavailable.</p>
           <div className="hero-actions">
             <a className="button button--signal" href="#demo">Trace the relay <Arrow /></a>
             <a className="text-link" href="#how-it-works">How it works <Arrow /></a>
           </div>
         </div>
-        <p className="hero-description">MeshSetu uses nearby Android phones to carry a structured SOS, short voice evidence, and scoped updates across a store-and-forward Bluetooth Low Energy overlay when internet and cellular service are unavailable.</p>
       </div>
       <div className="container hero-metrics" aria-label="MeshSetu system principles">
         <div className="hero-metric hero-metric--signal"><strong>OFFLINE</strong><span>Internet is optional</span></div>

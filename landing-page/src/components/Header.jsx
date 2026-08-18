@@ -16,7 +16,9 @@ export default function Header() {
         <nav id="site-nav" className={`site-nav ${menuOpen ? 'site-nav--open' : ''}`} aria-label="Main navigation">
           <a href="#how-it-works" onClick={closeMenu}>How it works</a>
           <a href="#capabilities" onClick={closeMenu}>Capabilities</a>
-          <a href="#safety" onClick={closeMenu}>Safety</a>
+          {/* <a href="#safety" onClick={closeMenu}>Safety</a> */}
+          <a href="#tech-stack" onClick={closeMenu}>Tech stack</a>
+          <a href="#architecture" onClick={closeMenu}>Architecture</a>
           <a href="#prototype" onClick={closeMenu}>Prototype</a>
           <a className="button button--small button--dark" href="#demo" onClick={closeMenu}>View demo <Arrow /></a>
         </nav>
