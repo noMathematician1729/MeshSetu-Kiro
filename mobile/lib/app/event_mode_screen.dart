@@ -469,6 +469,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   '${detail == null ? '' : ': $detail'}';
               if (kind == 'peer_connect_failed' ||
                   kind == 'peer_connected' ||
+                  kind == 'peer_session_ready' ||
+                  kind.startsWith('gatt_') ||
+                  kind.startsWith('server_') ||
                   kind == 'send_failed' ||
                   kind == 'control_send_failed') {
                 _lastConnection = _lastMetric;

@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:universal_ble/universal_ble.dart';
 
 import '../core/ble/ble_discovery.dart';
 import '../core/ble/device_key_store.dart';
@@ -92,6 +94,7 @@ class MeshEventController {
     MeshTransportCoordinator? coordinator;
     IOSink? metricSink;
     try {
+      if (kDebugMode) await UniversalBle.setLogLevel(BleLogLevel.debug);
       final siteFingerprint = MeshGatt.siteFingerprint(
         siteId,
         namespace: siteNamespace,
@@ -114,7 +117,13 @@ class MeshEventController {
         store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
         clockMs: () => DateTime.now().millisecondsSinceEpoch,
       );
-      final server = MeshGattServer();
+      final server = MeshGattServer(
+        onDiagnostic: (kind, peerId, {detail, value}) {
+          _reportMetrics([
+            RelayMetric(kind, peerId: peerId, detail: detail, value: value),
+          ]);
+        },
+      );
       final hello = Hello(
         siteFingerprint: siteFingerprint,
         ephemeralNodeId: _localToken,
@@ -141,6 +150,7 @@ class MeshEventController {
       );
       await MeshAdvertiser.start(_discoveryMetadata!);
       if (_stopRequested) throw StateError('mesh start cancelled');
+      _reportMetrics([RelayMetric('advertising_started')]);
 
       _looping = true;
       _scanCancel = Completer<void>();
@@ -207,6 +217,12 @@ class MeshEventController {
           value: report.fingerprintMismatches,
         ),
         RelayMetric('scan_peers_accepted', value: peers.length),
+        for (final peer in peers)
+          RelayMetric(
+            'peer_discovered',
+            peerId: peer.device.deviceId,
+            value: peer.device.rssi,
+          ),
         for (final peer in peers)
           RelayMetric(
             'scan_found',
@@ -280,8 +296,23 @@ class MeshEventController {
   ) async {
     GattPeerSession? session;
     try {
-      session = GattPeerSession.open(peer.device.deviceId);
-      await session.awaitReady().timeout(const Duration(seconds: 8));
+      session = GattPeerSession.open(
+        peer.device.deviceId,
+        onLifecycle: (kind, {phase, detail, value}) {
+          _reportMetrics([
+            RelayMetric(
+              kind,
+              peerId: peer.device.deviceId,
+              detail: detail ?? phase,
+              value: value,
+            ),
+          ]);
+        },
+      );
+      // GattPeerSession has phase-specific timeouts. This outer timeout is
+      // only a final guard against a platform implementation that never
+      // returns from an operation at all.
+      await session.awaitReady().timeout(const Duration(seconds: 45));
       if (!_looping) {
         await session.close();
         return;

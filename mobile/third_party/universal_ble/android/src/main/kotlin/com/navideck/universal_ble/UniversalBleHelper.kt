@@ -69,6 +69,7 @@ fun String.isKnownGatt(): Boolean {
 
 fun String.findGatt(): BluetoothGatt? {
     return knownGatts[this]
+        ?: knownGatts.entries.firstOrNull { it.key.equals(this, ignoreCase = true) }?.value
 }
 
 fun BluetoothManager.isBluetoothEnabled(): Boolean {

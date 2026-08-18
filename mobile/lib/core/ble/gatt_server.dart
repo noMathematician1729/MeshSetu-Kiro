@@ -19,6 +19,9 @@ class IncomingGattFrame {
   final Uint8List bytes;
 }
 
+typedef GattServerDiagnostic =
+    void Function(String kind, String? peerId, {String? detail, int? value});
+
 /// Port of `in.meshsetu.ble.MeshGattServer` (Kotlin `GattServer.kt`) — the
 /// peripheral/server role that receives frames and notifies subscribers.
 ///
@@ -32,6 +35,9 @@ class IncomingGattFrame {
 /// `universal_ble`'s write-request handler (the plugin handles prepared
 /// writes internally), so that check from the Kotlin source is dropped.
 class MeshGattServer {
+  MeshGattServer({this.onDiagnostic});
+
+  final GattServerDiagnostic? onDiagnostic;
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
@@ -103,6 +109,7 @@ class MeshGattServer {
   Future<void> start() async {
     _running = true;
     _rejectedPeers.clear();
+    _diagnostic('gatt_server_open', null);
     UniversalBlePeripheral.setWriteRequestHandlers((
       deviceId,
       characteristicId,
@@ -113,16 +120,24 @@ class MeshGattServer {
         return PeripheralWriteRequestResult(status: _gattFailure);
       }
       if (characteristicId != MeshGatt.rx || offset != 0 || value == null) {
+        _diagnostic(
+          'gatt_rx_rejected',
+          deviceId,
+          detail: 'characteristic=$characteristicId offset=$offset',
+        );
         return PeripheralWriteRequestResult(status: _gattRequestNotSupported);
       }
       if (_rejectedPeers.contains(deviceId) ||
           !_subscribers.contains(deviceId)) {
+        _diagnostic('gatt_rx_rejected', deviceId, detail: 'peer_not_ready');
         return PeripheralWriteRequestResult(status: _gattFailure);
       }
       if (_pendingFrames >= _maxPendingFrames) {
+        _diagnostic('gatt_rx_rejected', deviceId, detail: 'receive_queue_full');
         return PeripheralWriteRequestResult(status: _gattFailure);
       }
       _pendingFrames++;
+      _diagnostic('gatt_rx_frame', deviceId, value: value.length);
       _frames.add(
         IncomingGattFrame(deviceId: deviceId, bytes: Uint8List.fromList(value)),
       );
@@ -134,6 +149,11 @@ class MeshGattServer {
         .listen((event) {
           if (event.characteristicId != MeshGatt.tx) return;
           if (event.isSubscribed) {
+            _diagnostic(
+              'server_descriptor_write_request',
+              event.deviceId,
+              detail: 'characteristic=${event.characteristicId} enabled=true',
+            );
             _knownSubscribers.add(event.deviceId);
             // A fresh subscription is the client's retry after a capacity
             // disconnect. It is safe to let the coordinator re-run its
@@ -141,7 +161,13 @@ class MeshGattServer {
             _rejectedPeers.remove(event.deviceId);
             _reconnectRequests.remove(event.deviceId);
             _subscribers.add(event.deviceId);
+            _diagnostic('server_notification_subscribed', event.deviceId);
           } else {
+            _diagnostic(
+              'server_descriptor_write_request',
+              event.deviceId,
+              detail: 'characteristic=${event.characteristicId} enabled=false',
+            );
             _subscribers.remove(event.deviceId);
             _knownSubscribers.remove(event.deviceId);
             // Keep a capacity rejection across the disconnect so a freed
@@ -149,12 +175,19 @@ class MeshGattServer {
             if (!_rejectedPeers.contains(event.deviceId)) {
               _reconnectRequests.remove(event.deviceId);
             }
+            _diagnostic('server_notification_unsubscribed', event.deviceId);
           }
         });
 
     _connectionSubscription = UniversalBlePeripheral.connectionStateStream
         .listen((event) {
           _observedConnectionStates.add(event.deviceId);
+          _diagnostic(
+            event.connected
+                ? 'gatt_server_connected'
+                : 'gatt_server_disconnected',
+            event.deviceId,
+          );
           if (event.connected) {
             _connectedPeers.add(event.deviceId);
           } else {
@@ -165,20 +198,46 @@ class MeshGattServer {
 
     _mtuSubscription = UniversalBlePeripheral.mtuChangedStream.listen((event) {
       _mtus[event.deviceId] = event.mtu;
+      _diagnostic('gatt_server_mtu_changed', event.deviceId, value: event.mtu);
     });
 
     // Android's addService is asynchronous. Advertising before its callback
     // lets a peer connect to an empty GATT database and fail discovery.
-    final serviceAdded = UniversalBlePeripheral.serviceAddedStream
-        .firstWhere(
-          (event) => event.serviceId.toLowerCase() == MeshGatt.service,
-        )
-        .timeout(const Duration(seconds: 3));
-    await UniversalBlePeripheral.addService(MeshGatt.buildService());
-    final added = await serviceAdded;
-    if (added.error != null) {
-      throw StateError('Mesh GATT service registration failed: ${added.error}');
+    final serviceAdded = Completer<BlePeripheralServiceAdded>();
+    final serviceAddedSubscription = UniversalBlePeripheral.serviceAddedStream
+        .listen((event) {
+          if (event.serviceId.toLowerCase() != MeshGatt.service ||
+              serviceAdded.isCompleted) {
+            return;
+          }
+          serviceAdded.complete(event);
+        });
+    _diagnostic('gatt_service_add_requested', null);
+    try {
+      await UniversalBlePeripheral.addService(MeshGatt.buildService());
+      final added = await serviceAdded.future.timeout(
+        const Duration(seconds: 3),
+      );
+      if (added.error != null) {
+        throw StateError(
+          'Mesh GATT service registration failed: ${added.error}',
+        );
+      }
+      _diagnostic('gatt_service_added', null);
+      _diagnostic('gatt_server_ready', null);
+    } catch (_) {
+      _running = false;
+      UniversalBlePeripheral.setWriteRequestHandlers(null);
+      await serviceAddedSubscription.cancel();
+      await _cancelPlatformSubscriptions();
+      try {
+        await UniversalBlePeripheral.clearServices();
+      } catch (_) {
+        // Preserve the registration error; cleanup is best effort.
+      }
+      rethrow;
     }
+    await serviceAddedSubscription.cancel();
   }
 
   /// Releases one slot from the bounded receive queue after the coordinator
@@ -195,6 +254,13 @@ class MeshGattServer {
   /// disconnected.
   bool hasLiveSubscription(String deviceId) {
     if (!_knownSubscribers.contains(deviceId)) return false;
+    // On Android, CCCD state without a successful server connection callback
+    // is not a usable peer session. Host tests do not expose that callback, so
+    // retain the platform fallback outside Android.
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        !_connectedPeers.contains(deviceId)) {
+      return false;
+    }
     return !_observedConnectionStates.contains(deviceId) ||
         _connectedPeers.contains(deviceId);
   }
@@ -255,6 +321,7 @@ class MeshGattServer {
     return _notifyLock.synchronized(() async {
       if (!_running || !_subscribers.contains(deviceId)) return false;
       final notificationId = ++_notificationSequence;
+      _diagnostic('tx_notify_attempt', deviceId, value: bytes.length);
       Future<BlePeripheralNotificationSent>? completion;
       StreamSubscription<BlePeripheralNotificationSent>? completionSubscription;
       if (defaultTargetPlatform == TargetPlatform.android) {
@@ -280,14 +347,31 @@ class MeshGattServer {
           deviceId: deviceId,
         ).timeout(const Duration(seconds: 2));
       } catch (_) {
+        _diagnostic('tx_notify_api_result', deviceId, detail: 'failed');
         await completionSubscription?.cancel();
         return false;
       }
-      if (completion == null) return true;
+      if (completion == null) {
+        _diagnostic('tx_notify_api_result', deviceId, detail: 'accepted');
+        return true;
+      }
       try {
-        return (await completion.timeout(const Duration(seconds: 2))).status ==
-            0;
+        final status = (await completion.timeout(
+          const Duration(seconds: 2),
+        )).status;
+        _diagnostic(
+          'tx_notify_api_result',
+          deviceId,
+          value: status,
+          detail: status == 0 ? 'remote_stack_accepted' : 'remote_stack_failed',
+        );
+        return status == 0;
       } catch (_) {
+        _diagnostic(
+          'tx_notify_api_result',
+          deviceId,
+          detail: 'callback_timeout',
+        );
         return false;
       } finally {
         await completionSubscription?.cancel();
@@ -298,12 +382,7 @@ class MeshGattServer {
   Future<void> stop() async {
     _running = false;
     UniversalBlePeripheral.setWriteRequestHandlers(null);
-    await _subscriptionSubscription?.cancel();
-    _subscriptionSubscription = null;
-    await _mtuSubscription?.cancel();
-    _mtuSubscription = null;
-    await _connectionSubscription?.cancel();
-    _connectionSubscription = null;
+    await _cancelPlatformSubscriptions();
     await _notifyLock.idle;
     await UniversalBlePeripheral.clearServices();
     _subscribers.clear();
@@ -315,5 +394,22 @@ class MeshGattServer {
     _mtus.clear();
     _pendingFrames = 0;
     await _frames.close();
+  }
+
+  Future<void> _cancelPlatformSubscriptions() async {
+    await _subscriptionSubscription?.cancel();
+    _subscriptionSubscription = null;
+    await _mtuSubscription?.cancel();
+    _mtuSubscription = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+  }
+
+  void _diagnostic(String kind, String? peerId, {String? detail, int? value}) {
+    try {
+      onDiagnostic?.call(kind, peerId, detail: detail, value: value);
+    } catch (_) {
+      // Diagnostics must never prevent a GATT callback from being answered.
+    }
   }
 }

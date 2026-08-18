@@ -21,6 +21,21 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
 }
 
 void main() {
+  test('MeshSetu service declares the required RX/TX roles', () {
+    final service = MeshGatt.buildService();
+    final rx = service.characteristics.firstWhere(
+      (characteristic) => characteristic.uuid == MeshGatt.rx,
+    );
+    final tx = service.characteristics.firstWhere(
+      (characteristic) => characteristic.uuid == MeshGatt.tx,
+    );
+
+    expect(rx.properties, contains(CharacteristicProperty.write));
+    expect(tx.properties, contains(CharacteristicProperty.notify));
+    // universal_ble adds the CCCD in its Android native service conversion.
+    expect(MeshGatt.cccd, '00002902-0000-1000-8000-00805f9b34fb');
+  });
+
   test('beacon metadata round trips bounded UTF-8 anchor IDs', () {
     final encoded = const BeaconMetadata('gate-east').encode();
     expect(BeaconMetadata.decode(encoded)?.anchorId, 'gate-east');

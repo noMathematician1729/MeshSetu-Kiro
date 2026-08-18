@@ -223,6 +223,14 @@ class MeshRelayEngine {
       bytes: buffer.join(),
       expiresAtMs: _maxInt,
     );
+    _metrics.add(
+      RelayMetric(
+        'object_reassembled',
+        objectId: frame.objectId,
+        peerId: peerId,
+        value: encrypted.bytes.length,
+      ),
+    );
     final envelope = await crypto.decrypt(encrypted);
     if (envelope == null) {
       _metrics.add(
@@ -230,6 +238,13 @@ class MeshRelayEngine {
       );
       return RelayResult(const [], _drain());
     }
+    _metrics.add(
+      RelayMetric(
+        'object_verified',
+        objectId: envelope.objectId,
+        peerId: peerId,
+      ),
+    );
     if (envelope.siteId != siteId) {
       _metrics.add(
         RelayMetric('wrong_site', objectId: envelope.objectId, peerId: peerId),
@@ -273,6 +288,13 @@ class MeshRelayEngine {
         objectId: envelope.objectId,
         peerId: peerId,
         value: envelope.hopCount,
+      ),
+    );
+    _metrics.add(
+      RelayMetric(
+        'object_received',
+        objectId: envelope.objectId,
+        peerId: peerId,
       ),
     );
     _metrics.add(

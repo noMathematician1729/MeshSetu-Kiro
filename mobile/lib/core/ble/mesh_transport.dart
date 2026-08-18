@@ -303,6 +303,8 @@ class MeshTransportCoordinator implements MeshTransport {
     if (old != null) unawaited(old.close());
 
     _sessions[peerId] = link;
+    final peerCountBefore = _sessions.length - 1;
+    final schedulerHasQueuedObject = relay.scheduler.size() > 0;
     _peers = [
       for (final p in _peers)
         if (p.peerId != peerId) p,
@@ -319,6 +321,13 @@ class MeshTransportCoordinator implements MeshTransport {
     _emitPeers();
     _onMetrics([
       RelayMetric('peer_connected', peerId: peerId, value: link.mtu),
+      RelayMetric('peer_session_ready', peerId: peerId, value: link.mtu),
+      RelayMetric(
+        'peer_count_changed',
+        peerId: peerId,
+        value: _sessions.length,
+        detail: '$peerCountBefore->${_sessions.length}',
+      ),
     ]);
 
     final subscriptions = <StreamSubscription<Object?>>[
@@ -386,6 +395,7 @@ class MeshTransportCoordinator implements MeshTransport {
         ),
       );
     }
+    if (schedulerHasQueuedObject) _wakeScheduler('peer_ready');
   }
 
   @override
@@ -429,6 +439,13 @@ class MeshTransportCoordinator implements MeshTransport {
       while (true) {
         final objectToSend = relay.nextOutbound();
         if (objectToSend == null) return;
+        _onMetrics([
+          RelayMetric(
+            'scheduler_selected_object',
+            objectId: objectToSend.objectId,
+            detail: objectToSend.trafficClass.name,
+          ),
+        ]);
         var sentToAny = false;
         var mtuRejectedPeers = 0;
         var attemptedPeers = 0;
@@ -445,6 +462,14 @@ class MeshTransportCoordinator implements MeshTransport {
         for (final peer in peers) {
           if (successfulPeers >= maxReplicationPeers) break;
           attemptedPeers++;
+          _onMetrics([
+            RelayMetric(
+              'scheduler_selected_peer',
+              objectId: objectToSend.objectId,
+              peerId: peer.key,
+              value: peer.value.mtu,
+            ),
+          ]);
           try {
             final frames = fragment(
               objectId: objectToSend.objectId,
@@ -463,6 +488,15 @@ class MeshTransportCoordinator implements MeshTransport {
                 break;
               }
               final ok = await peer.value.send(intercepted, withResponse: true);
+              _onMetrics([
+                RelayMetric(
+                  'frame_write_accepted_locally',
+                  objectId: objectToSend.objectId,
+                  peerId: peer.key,
+                  value: intercepted.length,
+                  detail: ok ? 'accepted' : 'rejected',
+                ),
+              ]);
               if (!ok) {
                 allOk = false;
                 break;
@@ -485,6 +519,7 @@ class MeshTransportCoordinator implements MeshTransport {
                   objectId: objectToSend.objectId,
                   peerId: peer.key,
                   value: frames.length,
+                  detail: 'local_writes_accepted_waiting_for_ack',
                 ),
                 RelayMetric(
                   'frame_tx',
@@ -583,6 +618,7 @@ class MeshTransportCoordinator implements MeshTransport {
   }) {
     final current = _sessions[peerId];
     if (current == null || (expected != null && current != expected)) return;
+    final peerCountBefore = _sessions.length;
     _sessions.remove(peerId);
     final subs = _sessionSubscriptions.remove(peerId);
     if (subs != null) {
@@ -596,7 +632,16 @@ class MeshTransportCoordinator implements MeshTransport {
           if (p.peerId != peerId) p,
       ];
       _emitPeers();
-      _onMetrics([RelayMetric('peer_disconnected', peerId: peerId)]);
+      _onMetrics([
+        RelayMetric('peer_disconnected', peerId: peerId),
+        RelayMetric(
+          'peer_count_changed',
+          peerId: peerId,
+          value: _sessions.length,
+          detail: '$peerCountBefore->${_sessions.length}',
+        ),
+      ]);
+      _wakeScheduler('peer_disconnected');
     }
     if (promoteRejected && !_stopped) _promoteRejectedPeers();
   }
@@ -627,6 +672,18 @@ class MeshTransportCoordinator implements MeshTransport {
     if (!_peersController.isClosed) {
       _peersController.add(List<PeerState>.unmodifiable(_peers));
     }
+  }
+
+  void _wakeScheduler(String reason) {
+    if (_stopped) return;
+    unawaited(
+      _relayLock.synchronized(() async {
+        if (_stopped) return;
+        _onMetrics([RelayMetric('scheduler_wake', detail: reason)]);
+        await _pump();
+        _onMetrics(relay.drainMetrics());
+      }),
+    );
   }
 
   void _markPeerSeen(String peerId) {

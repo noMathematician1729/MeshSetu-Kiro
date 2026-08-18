@@ -11,6 +11,7 @@ abstract final class MeshGatt {
   static const String service = '2a6f5f10-4f7b-4c46-8cc8-cf282e4f4c01';
   static const String rx = '2a6f5f11-4f7b-4c46-8cc8-cf282e4f4c01';
   static const String tx = '2a6f5f12-4f7b-4c46-8cc8-cf282e4f4c01';
+  static const String cccd = '00002902-0000-1000-8000-00805f9b34fb';
   static const int discoveryVersion = 1;
 
   /// Bluetooth SIG's reserved "for testing" company identifier. Used as the

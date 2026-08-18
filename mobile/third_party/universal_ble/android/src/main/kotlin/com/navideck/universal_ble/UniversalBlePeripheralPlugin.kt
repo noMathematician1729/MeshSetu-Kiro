@@ -330,14 +330,17 @@ class UniversalBlePeripheralPlugin(
     }
 
     private fun onConnectionUpdate(device: BluetoothDevice, status: Int, newState: Int) {
-        Log.e(TAG, "onConnectionStateChange: $status -> $newState")
+        Log.d(TAG, "GATT_SERVER_CONNECTION: ${device.address} status=$status state=$newState")
+        val connected =
+            status == BluetoothGatt.GATT_SUCCESS &&
+                newState == BluetoothProfile.STATE_CONNECTED
         handler.post {
             callback.onConnectionStateChange(
                 device.address,
-                newState == BluetoothProfile.STATE_CONNECTED,
+                connected,
             ) {}
         }
-        if (newState == BluetoothProfile.STATE_DISCONNECTED) cleanConnection(device)
+        if (!connected) cleanConnection(device)
     }
 
     private fun cleanConnection(device: BluetoothDevice) {
@@ -397,13 +400,19 @@ class UniversalBlePeripheralPlugin(
             super.onConnectionStateChange(device, status, newState)
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    synchronized(bluetoothDevicesMap) {
-                        bluetoothDevicesMap[device.address] = device
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        synchronized(bluetoothDevicesMap) {
+                            bluetoothDevicesMap[device.address] = device
+                        }
+                        synchronized(knownBluetoothDevicesMap) {
+                            knownBluetoothDevicesMap[device.address] = device
+                        }
+                        handler.post { gattServer?.connect(device, true) }
+                    } else {
+                        synchronized(bluetoothDevicesMap) {
+                            bluetoothDevicesMap.remove(device.address)
+                        }
                     }
-                    synchronized(knownBluetoothDevicesMap) {
-                        knownBluetoothDevicesMap[device.address] = device
-                    }
-                    handler.post { gattServer?.connect(device, true) }
                     onConnectionUpdate(device, status, newState)
                 }
 
@@ -426,6 +435,7 @@ class UniversalBlePeripheralPlugin(
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             super.onNotificationSent(device, status)
+            Log.d(TAG, "TX_NOTIFY_COMPLETE: ${device.address} status=$status")
             val value = takePendingNotification(device.address)
             handler.post {
                 callback.onNotificationSent(
@@ -479,6 +489,11 @@ class UniversalBlePeripheralPlugin(
             offset: Int,
             value: ByteArray,
         ) {
+            Log.d(
+                TAG,
+                "RX_WRITE_REQUEST: ${device.address} characteristic=${characteristic.uuid} " +
+                    "requestId=$requestId offset=$offset bytes=${value.size}",
+            )
             super.onCharacteristicWriteRequest(
                 device, requestId, characteristic, preparedWrite, responseNeeded, offset, value,
             )
@@ -505,6 +520,7 @@ class UniversalBlePeripheralPlugin(
 
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             super.onServiceAdded(status, service)
+            Log.d(TAG, "GATT_SERVICE_ADDED: ${service.uuid} status=$status")
             val error = if (status != BluetoothGatt.GATT_SUCCESS) "Adding Service failed" else null
             handler.post { callback.onServiceAdded(service.uuid.toString(), error) {} }
         }
@@ -557,6 +573,11 @@ class UniversalBlePeripheralPlugin(
         ) {
             super.onDescriptorWriteRequest(
                 device, requestId, descriptor, preparedWrite, responseNeeded, offset, value,
+            )
+            Log.d(
+                TAG,
+                "CCCD_WRITE_REQUEST: ${device.address} descriptor=${descriptor.uuid} " +
+                    "characteristic=${descriptor.characteristic.uuid} bytes=${value?.size ?: 0}",
             )
             descriptor.value = value
             if (descriptor.uuid.toString().lowercase() == peripheralDescriptorCCUUID.lowercase()) {

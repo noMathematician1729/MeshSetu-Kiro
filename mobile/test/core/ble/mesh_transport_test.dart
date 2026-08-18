@@ -209,6 +209,7 @@ MeshTransportCoordinator _coordinator({
   LossyFrameInterceptor? frameInterceptor,
   MeshGattServer? server,
   RelayStore? store,
+  MetricsListener? onMetrics,
 }) => MeshTransportCoordinator(
   server: server ?? MeshGattServer(),
   relay: MeshRelayEngine(
@@ -219,6 +220,7 @@ MeshTransportCoordinator _coordinator({
   ),
   localHello: localHello,
   frameInterceptor: frameInterceptor,
+  onMetrics: onMetrics,
 );
 
 void main() {
@@ -257,7 +259,10 @@ void main() {
     expect(link.sentFrames, isEmpty);
 
     coordinator.attach('peer-b', link, siteFingerprint: 1);
-    await coordinator.tick();
+    // Attaching a READY peer is itself the scheduler wake-up event; a scan
+    // tick must not be required to drain a durable object that was already
+    // queued.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
     expect(link.sentFrames, isNotEmpty);
   });
@@ -687,6 +692,9 @@ void main() {
 
       final server = MeshGattServer();
       await server.start();
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('peer', true),
+      );
       peripheral.updateCharacteristicSubscription(
         BlePeripheralCharacteristicSubscriptionChanged(
           deviceId: 'peer',
@@ -798,6 +806,9 @@ void main() {
     }
 
     for (final peerId in ['server-peer-a', 'server-peer-b']) {
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged(peerId, true),
+      );
       peripheral.updateCharacteristicSubscription(
         BlePeripheralCharacteristicSubscriptionChanged(
           deviceId: peerId,
@@ -853,6 +864,9 @@ void main() {
     final server = MeshGattServer();
     final coordinator = _coordinator(server: server);
     await coordinator.start();
+    peripheral.updateConnectionState(
+      BlePeripheralConnectionStateChanged('server-peer', true),
+    );
     peripheral.updateCharacteristicSubscription(
       BlePeripheralCharacteristicSubscriptionChanged(
         deviceId: 'server-peer',
@@ -896,6 +910,9 @@ void main() {
       ),
     );
     await coordinator.start();
+    peripheral.updateConnectionState(
+      BlePeripheralConnectionStateChanged('foreign-peer', true),
+    );
     peripheral.updateCharacteristicSubscription(
       BlePeripheralCharacteristicSubscriptionChanged(
         deviceId: 'foreign-peer',
@@ -934,4 +951,64 @@ void main() {
     expect(server.isPeerRejected('foreign-peer'), isTrue);
     await coordinator.stop();
   });
+
+  test(
+    'server RX callback accepts a MeshSetu frame after subscription',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      final metrics = <RelayMetric>[];
+      final server = MeshGattServer();
+      final coordinator = _coordinator(
+        server: server,
+        onMetrics: metrics.addAll,
+      );
+      await coordinator.start();
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('client', true),
+      );
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'client',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final result = peripheral.writeRequestHandler?.call(
+        'client',
+        MeshGatt.rx,
+        0,
+        FrameCodec.encode(
+          MeshFrame(
+            type: FrameType.hello,
+            priority: 0,
+            flags: 0,
+            objectId: 7,
+            sequence: 0,
+            count: 1,
+            payload: HelloCodec.encode(
+              const Hello(
+                siteFingerprint: 1,
+                ephemeralNodeId: 7,
+                capabilities: 1,
+                nowEpochSec: 0,
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(result, isNull);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(metrics.any((metric) => metric.kind == 'frame_rx'), isTrue);
+      await coordinator.stop();
+    },
+  );
 }
