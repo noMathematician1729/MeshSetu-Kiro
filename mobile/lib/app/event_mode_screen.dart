@@ -11,6 +11,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
+import '../core/ble/mesh_gatt.dart';
+import '../core/ble/sos_advertisement.dart';
 import '../core/data/database.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
@@ -71,6 +73,41 @@ Future<void> _showSosNotification({
   }
 }
 
+Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
+  try {
+    if (!_sosNotificationsInitialized) {
+      const settings = InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      );
+      await _sosNotifications.initialize(settings: settings);
+      _sosNotificationsInitialized = true;
+    }
+    final id = Object.hash(alert.originId, alert.sequence) & 0x7fffffff;
+    await _sosNotifications.show(
+      id: id == 0 ? 1 : id,
+      title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
+      body: alert.isTest
+          ? 'Nearby BLE transport test received.'
+          : 'Nearby emergency alert received. Details may follow.',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Nearby MeshSetu emergency signals',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          category: AndroidNotificationCategory.alarm,
+          visibility: NotificationVisibility.public,
+        ),
+      ),
+    );
+  } catch (_) {
+    // BLE relaying must remain live if Android rejects an alert.
+  }
+}
+
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
 /// controller is deliberately created in this task isolate, not the UI one.
 @pragma('vm:entry-point')
@@ -84,6 +121,7 @@ class _MeshEventTaskHandler extends TaskHandler {
   bool _debugLossEnabled = false;
   StreamSubscription<ReceivedObject>? _incomingSubscription;
   int _notificationGeneration = 0;
+  final Set<String> _compactAlertKeys = {};
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -140,6 +178,7 @@ class _MeshEventTaskHandler extends TaskHandler {
           'anchorId': estimate.anchorId,
           'uncertainty': estimate.uncertainty,
         }),
+        onCompactSosAlert: _announceCompactSos,
       );
       await controller.start();
       _controller = controller;
@@ -202,7 +241,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       final envelope = MeshBridge.envelopeFromJson(
         (data['sendMeshObject'] as Map).cast<Object?, Object?>(),
       );
-      unawaited(_controller?.coordinator?.send(envelope) ?? Future.value());
+      unawaited(_submitMeshObject(envelope));
       return;
     }
     if (data != 'send_test_sos') return;
@@ -227,6 +266,47 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
   }
 
+  Future<void> _submitMeshObject(MeshEnvelope envelope) async {
+    final controller = _controller;
+    if (controller == null || controller.coordinator == null) {
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'mesh_submit_result',
+        'objectId': envelope.objectId,
+        'accepted': false,
+        'reason': 'event mode is not ready',
+      });
+      return;
+    }
+    try {
+      if (envelope.payloadType == PayloadType.structuredSos) {
+        unawaited(
+          controller.broadcastCompactSos(
+            originId: envelope.originEphemeralId,
+            sequence: envelope.objectId & 0xffff,
+          ),
+        );
+      }
+      await controller.coordinator!.send(envelope);
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'mesh_submit_result',
+        'objectId': envelope.objectId,
+        'accepted': true,
+      });
+    } catch (error) {
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'mesh_submit_result',
+        'objectId': envelope.objectId,
+        'accepted': false,
+        'reason': '$error',
+      });
+    }
+  }
+
+  void _announceCompactSos(MeshSosAdvertisement alert) {
+    _compactAlertKeys.add(alert.dedupeKey);
+    unawaited(_showCompactSosNotification(alert));
+  }
+
   Future<void> _announceReceivedSos(ReceivedObject received) async {
     final generation = ++_notificationGeneration;
     late final String detail;
@@ -240,6 +320,9 @@ class _MeshEventTaskHandler extends TaskHandler {
       // A random/test structured frame is not an SOS notification.
       return;
     }
+    final compactKey =
+        '${MeshGatt.siteFingerprint(MeshEventController.siteId, namespace: MeshEventController.siteNamespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
+    if (_compactAlertKeys.remove(compactKey)) return;
     await _showSosNotification(received: received, detail: detail);
     try {
       await FlutterForegroundTask.updateService(
@@ -275,6 +358,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _status = 'MeshSetu\nEvent mode is off';
   String _meshStatus = 'stopped';
   String _lastMetric = 'none';
+  String _lastConnection = 'none';
   String _nearestBeacon = 'none';
   String _zone = 'unknown';
   String _sttStatus = 'not run';
@@ -345,6 +429,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _zone = 'unknown';
           _scanStats.clear();
           _lastReceived = 'none';
+          _lastConnection = 'none';
           _status = 'MeshSetu\nEvent mode is off';
         });
         unawaited(_bridgeClient?.dispose());
@@ -382,6 +467,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   '$kind'
                   '${peer == null ? '' : ' ($peer)'}'
                   '${detail == null ? '' : ': $detail'}';
+              if (kind == 'peer_connect_failed' ||
+                  kind == 'peer_connected' ||
+                  kind == 'send_failed' ||
+                  kind == 'control_send_failed') {
+                _lastConnection = _lastMetric;
+              }
               if (kind == 'object_received') {
                 _lastReceived =
                     '${metric['objectId'] ?? '?'} · ${value ?? '?'} bytes'
@@ -495,6 +586,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _nearestBeacon = 'none';
       _zone = 'unknown';
       _scanStats.clear();
+      _lastConnection = 'none';
       _lastReceived = 'none';
       _status = 'MeshSetu\nEvent mode is off';
     });
@@ -689,7 +781,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               const SizedBox(height: 12),
               FilledButton(
                 onPressed: _eventModeActive ? _sendTestSos : null,
-                child: const Text('Send 100-byte test SOS'),
+                child: const Text('Send BLE SOS notification test'),
               ),
               const SizedBox(height: 12),
               FilledButton.icon(
@@ -741,6 +833,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
+              Text('Connection: $_lastConnection'),
               Text('Last object: $_lastReceived'),
               if (_peerDebug.isNotEmpty) ...[
                 const SizedBox(height: 4),

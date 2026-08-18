@@ -185,6 +185,23 @@ void main() {
     );
   });
 
+  test('local event creation persists a QR-joinable room namespace', () async {
+    final db = MeshDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repository = JoinRepository(db);
+    final manifest = await repository.createLocalEvent(
+      siteName: 'Safety drill',
+    );
+    expect(manifest.siteName, 'Safety drill');
+    expect(manifest.rooms.single.roomId, 'public');
+    final result = await repository.parseAndValidateQr(
+      EventManifestCodec.encode(manifest),
+    );
+    expect(result, isA<JoinOk>());
+    expect((result as JoinOk).manifest.siteId, manifest.siteId);
+    expect(await repository.activeManifest(), isNotNull);
+  });
+
   test('VoiceObjectPayload rejects tampering before playback', () {
     final payload = VoiceObjectPayload(
       sosEventId: 'sos',

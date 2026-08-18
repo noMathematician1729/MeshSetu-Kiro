@@ -17,6 +17,10 @@ abstract final class MeshGatt {
   /// manufacturer-data tag for discovery metadata (see `ble_discovery.dart`)
   /// — swap for an assigned company ID before any real deployment.
   static const int developmentManufacturerId = 0xFFFF;
+
+  /// Development-only manufacturer tag for compact SOS advertisements.
+  /// Replace both testing identifiers with assigned IDs before production.
+  static const int sosManufacturerId = 0xFFFD;
   static const int beaconManufacturerId = 0xFFFE;
   static const int beaconVersion = 1;
 
