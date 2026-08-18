@@ -8,15 +8,16 @@ import { decryptPacket } from './protocol/mesh.js'
 import { store } from './store.js'
 
 const app = express()
+const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
 const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173']
 const configuredOrigins = [
   process.env.MESHSETU_ADMIN_ORIGIN,
   ...(process.env.CORS_ALLOWED_ORIGINS || '').split(','),
-].map(value => value?.trim()).filter(Boolean) as string[]
+].map(normalizeOrigin).filter(Boolean) as string[]
 const allowedOrigins = new Set([...localOrigins, ...configuredOrigins])
 
 app.use((req, res, next) => {
-  const origin = req.headers.origin
+  const origin = normalizeOrigin(req.headers.origin)
   if (origin && allowedOrigins.has(origin)) {
     res.header('Access-Control-Allow-Origin', origin)
     res.header('Vary', 'Origin')
