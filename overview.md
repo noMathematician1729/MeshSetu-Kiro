@@ -15,8 +15,8 @@ Full spec: `MeshSetu_Technical_Development_Bible_Flutter.pdf`.
 ### Active Development (Flutter/Dart + Node/React)
 
 - **`mobile/`** — Flutter Android app (Dart) with complete BLE mesh, durable outbox, UI, and integrations.
-- **`backend/`** — Express/TypeScript backend for the control room API, gateway ingest, WebSocket stream, and persistence.
-- **`admin-dashboard/`** — React/Vite operator dashboard.
+- **`admin/server/`** — Express/TypeScript backend for the control room API, gateway ingest, WebSocket stream, and persistence.
+- **`admin/client/`** — React/Vite operator dashboard.
 - **`landing-page/`** — Public React/Vite site.
 - **`docs/`, `.github/`** — Documentation and CI/CD workflows.
 
@@ -230,7 +230,7 @@ await sosRepo.finalizeAndEnqueue(sos);  // → Drift OUTBOX_EVENTS, state=READY
 
 ---
 
-### Backend: Control Room Services (`backend/` + `admin-dashboard/`)
+### Backend: Control Room Services (`admin/server/` + `admin/client/`)
 
 **Languages:** Node.js/TypeScript (API) + React/Vite (operator UI)
 
@@ -238,10 +238,10 @@ await sosRepo.finalizeAndEnqueue(sos);  // → Drift OUTBOX_EVENTS, state=READY
 
 | File | Purpose |
 |------|---------|
-| `backend/src/server.ts` | Express app: `/health`, `/v1/*`, compatibility `/api/events`, and `/ws` or `/v1/stream` WebSocket endpoints |
-| `backend/src/store.ts` | Postgres-backed incident store with in-memory fallback |
-| `admin-dashboard/src/App.jsx` | Operator dashboard UI (login, live incident queue, playback, status updates) |
-| `admin-dashboard/src/api.js` | Dashboard API and WebSocket client |
+| `admin/server/src/server.ts` | Express app: `/health`, `/v1/*`, compatibility `/api/events`, and `/ws` or `/v1/stream` WebSocket endpoints |
+| `admin/server/src/store.ts` | Postgres-backed incident store with in-memory fallback |
+| `admin/client/src/App.jsx` | Operator dashboard UI (login, live incident queue, playback, status updates) |
+| `admin/client/src/api.js` | Dashboard API and WebSocket client |
 
 **API:**
 ```
@@ -267,12 +267,12 @@ WS /v1/stream?token=<jwt>
 
 **Deployment:**
 ```bash
-cd backend
+cd admin/server
 npm ci
 npm run build
 npm start
 
-cd ../admin-dashboard
+cd ../client
 npm ci
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
@@ -351,7 +351,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 └──────────────────────────────────────────────────────────────────┘
          │
          ↓
-    [Browser: admin-dashboard]
+    [Browser: admin/client]
     Displays incident list, status workflow, and verified playback
 ```
 
@@ -433,12 +433,12 @@ flutter build apk --debug
 
 **Control room:**
 ```bash
-cd backend
+cd admin/server
 npm ci
 npm run build
 npm start
 
-cd ../admin-dashboard
+cd ../client
 npm ci
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```

@@ -18,7 +18,7 @@ The work is complete only when every P0/P1 item below is fixed, the automated ga
 |---|---|---|
 | `flutter pub get` | **FAIL** at `mobile/pubspec.yaml:57` (`Expected ':'`) | Committed merge-conflict markers make the current Flutter tree unbuildable. |
 | `flutter analyze` / `flutter test` / APK build | **BLOCKED** by invalid `pubspec.yaml` | Earlier green results predate the current launcher-icon merge and are not evidence for HEAD. |
-| Control-room web tests | Not fully run in this checkout | Install Node deps in `backend/` and `admin-dashboard/`, then run the documented build/test commands. |
+| Control-room web tests | Not fully run in this checkout | Install Node deps in `admin/server/` and `admin/client/`, then run the documented build/test commands. |
 | Physical BLE and microphone tests | **NOT PROVEN** | Synthetic tests do not establish Android radio, callback-thread, codec, background, or OEM behavior. |
 | Worktree | `context.md`, `core-model/bin/`, and `core-protocol/bin/` are untracked | Do not accidentally commit generated `bin/` output. Decide separately whether `context.md` belongs in source control. |
 
@@ -120,11 +120,11 @@ flutter test --reporter expanded
 flutter build apk --debug
 flutter build apk --release
 
-cd ../backend
+cd ../admin/server
 npm ci
 npm run build
 
-cd ../admin-dashboard
+cd ../client
 npm ci
 npm run build
 ```

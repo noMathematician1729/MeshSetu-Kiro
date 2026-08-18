@@ -15,7 +15,7 @@ services:
   - type: web
     runtime: static
     name: meshsetu-admin-dashboard
-    rootDir: admin-dashboard
+    rootDir: admin/client
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
     envVars:
@@ -29,7 +29,7 @@ services:
     runtime: node
     name: meshsetu-control-room-backend
     plan: free
-    rootDir: backend
+    rootDir: admin/server
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /health
@@ -58,7 +58,7 @@ services:
     runtime: node
     name: meshsetu-backend-healthcheck
     plan: starter
-    rootDir: backend
+    rootDir: admin/server
     buildCommand: npm ci && npm run build
     startCommand: node dist/cron/healthcheck.js
     schedule: "*/5 * * * *"

@@ -1,5 +1,5 @@
 {
-  "name": "meshsetu-control-room-backend",
+  "name": "meshsetu-admin-server",
   "private": true,
   "type": "module",
   "scripts": {

@@ -37,18 +37,18 @@ Expected result:
 Test the backend and admin dashboard in separate terminals:
 
 ```bash
-cd backend
+cd admin/server
 npm ci
 npm run build
 
-cd ../admin-dashboard
+cd ../client
 npm ci
 npm run build
 ```
 
 ## 3. Control-room smoke test
 
-Start the local backend from the `backend/` directory:
+Start the local backend from the `admin/server/` directory:
 
 ```bash
 npm run dev
@@ -81,7 +81,7 @@ HTTP 401.
 To run the dashboard UI locally:
 
 ```bash
-cd admin-dashboard
+cd admin/client
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 

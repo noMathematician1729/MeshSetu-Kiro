@@ -11,8 +11,8 @@ Ceal
 .env
 .env.*
 !.env.example
-backend/.env
-admin-dashboard/.env
+admin/server/.env
+admin/client/.env
 
 # Dependency and generated tool output
 node_modules/
