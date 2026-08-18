@@ -16,5 +16,8 @@ admin-dashboard/.env
 
 # Dependency and generated tool output
 node_modules/
+__pycache__/
+*.py[cod]
+.venv/
 core-model/bin/
 core-protocol/bin/
