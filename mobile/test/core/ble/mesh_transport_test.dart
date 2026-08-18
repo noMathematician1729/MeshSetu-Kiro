@@ -89,7 +89,8 @@ class _RecordingStore extends RelayStore {
   final List<EncryptedObject> deferred = [];
 
   @override
-  void persist(MeshEnvelope envelope) => stored.add(envelope);
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) =>
+      stored.add(envelope);
 
   @override
   void markDeferred(EncryptedObject value) => deferred.add(value);

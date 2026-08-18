@@ -6,3 +6,15 @@ local.properties
 *.iml
 
 Ceal
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+backend/.env
+admin-dashboard/.env
+
+# Dependency and generated tool output
+node_modules/
+core-model/bin/
+core-protocol/bin/

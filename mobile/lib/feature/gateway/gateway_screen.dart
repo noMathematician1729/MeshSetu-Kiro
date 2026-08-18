@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 /// This screen lets the operator point the phone at a reachable dashboard
 /// address (local Wi-Fi or an HTTPS tunnel) and flip it into gateway mode —
 /// forwarding is performed by `MeshBridgeClient` when event mode is running.
+/// The gateway sends encrypted mesh objects; the Node server verifies them.
 class GatewayScreen extends ConsumerStatefulWidget {
   const GatewayScreen({super.key});
 
@@ -58,7 +59,7 @@ class _GatewayScreenState extends ConsumerState<GatewayScreen> {
               controller: _keyController,
               obscureText: true,
               decoration: const InputDecoration(
-                labelText: 'Dashboard demo key',
+                labelText: 'Dashboard gateway key',
                 border: OutlineInputBorder(),
               ),
               onChanged: (v) =>

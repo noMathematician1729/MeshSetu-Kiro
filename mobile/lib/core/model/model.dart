@@ -125,11 +125,13 @@ class ReceivedObject {
     required this.envelope,
     required this.peerId,
     required this.receivedAtMs,
+    this.encryptedBytes,
   });
 
   final MeshEnvelope envelope;
   final String peerId;
   final int receivedAtMs;
+  final Uint8List? encryptedBytes;
 }
 
 class PeerState {

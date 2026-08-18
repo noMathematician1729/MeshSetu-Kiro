@@ -186,11 +186,17 @@ class MeshBridgeClient {
           }
           final modifiedAt =
               (await entity.stat()).modified.millisecondsSinceEpoch;
+          final wire = File(
+            '${directory.path}/${entity.uri.pathSegments.last.replaceFirst('.bin', '.wire')}',
+          );
           await _storeReceived(
             ReceivedObject(
               envelope: envelope,
               peerId: 'durable-relay',
               receivedAtMs: modifiedAt,
+              encryptedBytes: await wire.exists()
+                  ? await wire.readAsBytes()
+                  : null,
             ),
           );
         } catch (_) {
@@ -246,6 +252,19 @@ class MeshBridgeClient {
     GatewayBridge bridge,
     ReceivedObject received,
   ) async {
+    final wire = received.encryptedBytes;
+    if (wire != null &&
+        (received.envelope.payloadType == PayloadType.structuredSos ||
+            received.envelope.payloadType == PayloadType.voiceObject)) {
+      await bridge.postEncryptedObject(
+        siteId: received.envelope.siteId,
+        objectId: received.envelope.objectId,
+        packet: wire,
+        receivedAtMs: received.receivedAtMs,
+        peerId: received.peerId,
+      );
+      return;
+    }
     switch (received.envelope.payloadType) {
       case PayloadType.structuredSos:
         final sos = StructuredSosPayload.decode(received.envelope.payload);

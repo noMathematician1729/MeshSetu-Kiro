@@ -1,0 +1,21 @@
+syntax = "proto3";
+package meshsetu.v1;
+
+message MeshEnvelope {
+  uint64 object_id = 1;
+  string event_id = 2;
+  string site_id = 3;
+  string room_id = 4;
+  int64 created_at_ms = 5;
+  int64 expires_at_ms = 6;
+  uint32 hop_count = 7;
+  uint32 hop_limit = 8;
+  Priority priority = 9;
+  PayloadType payload_type = 10;
+  bytes payload = 11;
+  uint64 origin_ephemeral_id = 12;
+  bytes trace_id = 13;
+}
+
+enum Priority { P_UNSPECIFIED = 0; P0_CRITICAL = 1; P1_HIGH = 2; P2_NORMAL = 3; P3_BULK = 4; }
+enum PayloadType { PT_UNSPECIFIED = 0; STRUCTURED_SOS = 1; ROOM_MESSAGE = 2; VOICE_MANIFEST = 3; VOICE_OBJECT = 4; ACK = 5; RESPONDER_UPDATE = 6; BEACON_OBSERVATION = 7; }
