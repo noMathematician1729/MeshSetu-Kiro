@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:drift/drift.dart' show Value;
 
@@ -57,6 +58,33 @@ class JoinRepository {
     final manifest = bundledManifests[code.trim().toUpperCase()];
     if (manifest == null) return const JoinInvalid('unknown_code');
     return _activateIfValid(manifest, signatureValid: true);
+  }
+
+  /// Creates a local event namespace for the organizer flow. Other phones
+  /// join it by scanning a room QR, which carries the complete manifest.
+  Future<EventManifest> createLocalEvent({required String siteName}) async {
+    final name = siteName.trim();
+    if (name.isEmpty) throw ArgumentError('event name must not be blank');
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final suffix = Random.secure().nextInt(1 << 32).toRadixString(36);
+    final manifest = EventManifest(
+      siteId: 'event-$now-$suffix',
+      siteName: name,
+      meshCode: 'LOCAL-${suffix.toUpperCase()}',
+      validFromMs: now,
+      validUntilMs: now + const Duration(days: 1).inMilliseconds,
+      gatewayHint: '',
+      rooms: const [
+        RoomManifest(
+          roomId: 'public',
+          name: 'Public Alerts',
+          role: 'public',
+          ttlSeconds: 86400,
+        ),
+      ],
+    );
+    await activateManifest(manifest);
+    return manifest;
   }
 
   Future<JoinResult> parseAndValidateQr(String raw) async {

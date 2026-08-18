@@ -10,6 +10,7 @@ import '../core/ble/gatt_peer_session.dart';
 import '../core/ble/gatt_server.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/mesh_transport.dart';
+import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
 import '../core/protocol/frame.dart';
 import '../core/protocol/protocol_metrics.dart';
@@ -45,6 +46,7 @@ class MeshEventController {
     this.onBeaconObservations,
     this.zoneResolver,
     this.onZoneEstimate,
+    this.onCompactSosAlert,
   });
 
   final void Function(List<PeerState> peers)? onPeerState;
@@ -54,6 +56,7 @@ class MeshEventController {
   onBeaconObservations;
   final ZoneResolver? zoneResolver;
   final void Function(ZoneEstimate estimate)? onZoneEstimate;
+  final void Function(MeshSosAdvertisement alert)? onCompactSosAlert;
 
   MeshTransportCoordinator? _coordinator;
   int _localToken = 0;
@@ -68,6 +71,9 @@ class MeshEventController {
   final Set<Future<void>> _connectionAttempts = {};
   final Set<String> _connectingPeerIds = {};
   StreamSubscription<List<PeerState>>? _peerStateSubscription;
+  DiscoveryMetadata? _discoveryMetadata;
+  int _sosSequence = 0;
+  final Map<String, int> _seenCompactAlerts = {};
 
   MeshTransportCoordinator? get coordinator => _coordinator;
 
@@ -128,13 +134,12 @@ class MeshEventController {
         onPeerState?.call(peers);
       });
 
-      await MeshAdvertiser.start(
-        DiscoveryMetadata(
-          fingerprint: siteFingerprint,
-          connectionToken: _localToken,
-          capabilities: capabilityRelay | capabilityVoice,
-        ),
+      _discoveryMetadata = DiscoveryMetadata(
+        fingerprint: siteFingerprint,
+        connectionToken: _localToken,
+        capabilities: capabilityRelay | capabilityVoice,
       );
+      await MeshAdvertiser.start(_discoveryMetadata!);
       if (_stopRequested) throw StateError('mesh start cancelled');
 
       _looping = true;
@@ -179,6 +184,7 @@ class MeshEventController {
         report = await MeshScanner.scanReport(
           expectedFingerprint: siteFingerprint,
           cancel: _scanCancel?.future,
+          onSosAlert: _onCompactSosAlert,
         );
       } catch (error) {
         _reportMetrics([RelayMetric('scan_failed', detail: error.toString())]);
@@ -331,6 +337,8 @@ class MeshEventController {
     final coordinator = _coordinator;
     if (coordinator == null) return false;
 
+    unawaited(broadcastCompactSos(isTest: true));
+
     final now = DateTime.now().millisecondsSinceEpoch;
     await coordinator.send(
       MeshEnvelope(
@@ -351,6 +359,52 @@ class MeshEventController {
     return true;
   }
 
+  /// Sends an immediately detectable emergency alert independently of GATT.
+  /// Rich SOS data remains in the normal durable GATT envelope.
+  Future<void> broadcastCompactSos({
+    bool isTest = false,
+    int? originId,
+    int? sequence,
+  }) async {
+    final metadata = _discoveryMetadata;
+    if (!_looping || metadata == null) {
+      throw StateError('event mode is not running');
+    }
+    final alert = MeshSosAdvertisement(
+      siteFingerprint: metadata.fingerprint,
+      originId: originId ?? _localToken,
+      sequence: sequence ?? ++_sosSequence,
+      flags:
+          MeshSosAdvertisement.alertFlag |
+          (isTest ? MeshSosAdvertisement.testFlag : 0),
+      ttl: 4,
+    );
+    _reportMetrics([RelayMetric('sos_alert_broadcast', value: alert.sequence)]);
+    try {
+      await MeshAdvertiser.broadcastSos(alert, metadata);
+    } catch (error) {
+      _reportMetrics([RelayMetric('sos_alert_failed', detail: '$error')]);
+    }
+  }
+
+  void _onCompactSosAlert(MeshSosAdvertisement alert, String deviceId) {
+    if (alert.originId == (_localToken & 0xffffffff)) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _seenCompactAlerts.removeWhere((_, expiresAt) => expiresAt <= now);
+    if (_seenCompactAlerts.containsKey(alert.dedupeKey)) return;
+    _seenCompactAlerts[alert.dedupeKey] =
+        now + const Duration(minutes: 5).inMilliseconds;
+    _reportMetrics([
+      RelayMetric(
+        'sos_alert_received',
+        peerId: deviceId,
+        value: alert.sequence,
+        detail: alert.isTest ? 'test' : 'emergency',
+      ),
+    ]);
+    onCompactSosAlert?.call(alert);
+  }
+
   Future<void> stop() async {
     _stopRequested = true;
     _looping = false;
@@ -361,6 +415,8 @@ class MeshEventController {
     _scanCancel = null;
     _scanFuture = null;
     _retryAfterMs.clear();
+    _seenCompactAlerts.clear();
+    _discoveryMetadata = null;
     final coordinator = _coordinator;
     _coordinator = null;
     final metricSink = _metricSink;

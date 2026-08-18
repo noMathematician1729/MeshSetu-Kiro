@@ -167,7 +167,18 @@ class MeshGattServer {
       _mtus[event.deviceId] = event.mtu;
     });
 
+    // Android's addService is asynchronous. Advertising before its callback
+    // lets a peer connect to an empty GATT database and fail discovery.
+    final serviceAdded = UniversalBlePeripheral.serviceAddedStream
+        .firstWhere(
+          (event) => event.serviceId.toLowerCase() == MeshGatt.service,
+        )
+        .timeout(const Duration(seconds: 3));
     await UniversalBlePeripheral.addService(MeshGatt.buildService());
+    final added = await serviceAdded;
+    if (added.error != null) {
+      throw StateError('Mesh GATT service registration failed: ${added.error}');
+    }
   }
 
   /// Releases one slot from the bounded receive queue after the coordinator

@@ -115,7 +115,9 @@ class _FakePeripheral extends UniversalBlePeripheralUnsupported {
     PeripheralService service, {
     bool primary = true,
     Duration? timeout,
-  }) async {}
+  }) async {
+    updateServiceAdded(BlePeripheralServiceAdded(service.uuid, null));
+  }
 
   @override
   Future<void> clearServices() async {}

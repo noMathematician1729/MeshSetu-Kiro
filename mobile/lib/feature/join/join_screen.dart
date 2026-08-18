@@ -41,6 +41,60 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
     await _handleResult(result);
   }
 
+  Future<void> _createLocalEvent() async {
+    if (_scanning) setState(() => _scanning = false);
+    final nameController = TextEditingController();
+    final siteName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Create event'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Event name',
+            hintText: 'e.g. Campus Safety Drill',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(context).pop(nameController.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    nameController.dispose();
+    if (siteName == null || siteName.isEmpty || !mounted) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      final manifest = await ref
+          .read(joinRepositoryProvider)
+          .createLocalEvent(siteName: siteName);
+      refreshActiveSite(ref);
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Created ${manifest.siteName}')));
+      widget.onJoined?.call(null);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _error = 'Could not create event: $error';
+      });
+    }
+  }
+
   Future<void> _handleQr(String raw) async {
     if (!_scanning) return;
     setState(() => _scanning = false);
@@ -62,7 +116,11 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
         ).showSnackBar(SnackBar(content: Text('Joined ${manifest.siteName}')));
         widget.onJoined?.call(roomId);
       case JoinInvalid(:final reason):
-        setState(() => _error = 'Join failed: $reason');
+        setState(
+          () => _error = reason == 'unknown_code'
+              ? 'Unknown code. Enter the organizer code, scan their QR, or create an event below.'
+              : 'Join failed: $reason',
+        );
     }
   }
 
@@ -97,6 +155,17 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
               icon: const Icon(Icons.qr_code_scanner),
               label: Text(_scanning ? 'Scanning…' : 'Scan QR instead'),
               onPressed: () => setState(() => _scanning = !_scanning),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              icon: const Icon(Icons.add_home_work_outlined),
+              label: const Text('Create event & rooms'),
+              onPressed: _submitting ? null : _createLocalEvent,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Create an event here, then add rooms and share each room QR.',
+              textAlign: TextAlign.center,
             ),
             if (_error != null) ...[
               const SizedBox(height: 8),

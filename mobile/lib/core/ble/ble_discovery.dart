@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:universal_ble/universal_ble.dart';
 
 import 'mesh_gatt.dart';
+import 'sos_advertisement.dart';
+import 'async_lock.dart';
 import '../model/model.dart';
 
 /// Port of `in.meshsetu.ble.MeshAdvertiser` / `MeshScanner` (Kotlin
@@ -18,25 +20,67 @@ import '../model/model.dart';
 /// - `scan` is time-bounded but also accepts a cancellation future so a
 ///   foreground service can release the radio immediately on shutdown.
 abstract final class MeshAdvertiser {
-  static Future<void> start(DiscoveryMetadata metadata) =>
-      UniversalBlePeripheral.startAdvertising(
+  static final AsyncLock _advertisingLock = AsyncLock();
+  static int _advertisingGeneration = 0;
+
+  static Future<void> start(DiscoveryMetadata metadata) async {
+    _advertisingGeneration++;
+    await UniversalBlePeripheral.startAdvertising(
+      services: const [MeshGatt.service],
+      localName: 'MeshSetu',
+      manufacturerData: ManufacturerData(
+        MeshGatt.developmentManufacturerId,
+        metadata.encode(),
+      ),
+      // Keep the 128-bit service UUID in the primary advertisement for the
+      // scan filter and move the 14-byte discovery record to the scan
+      // response so both packets stay within Android's 31-byte limit.
+      platformConfig: PeripheralPlatformConfig(
+        android: PeripheralAndroidOptions(
+          addManufacturerDataInScanResponse: true,
+        ),
+      ),
+    );
+  }
+
+  static Future<void> stop() async {
+    _advertisingGeneration++;
+    await UniversalBlePeripheral.stopAdvertising();
+  }
+
+  /// Temporarily replaces discovery metadata with a continuously repeated SOS
+  /// advertisement. Android broadcasts the active advertisement repeatedly;
+  /// the normal discovery beacon is restored after the bounded alert window.
+  static Future<void> broadcastSos(
+    MeshSosAdvertisement alert,
+    DiscoveryMetadata discovery, {
+    Duration duration = const Duration(seconds: 12),
+  }) => _advertisingLock.synchronized(() async {
+    final generation = ++_advertisingGeneration;
+    await UniversalBlePeripheral.stopAdvertising();
+    try {
+      await UniversalBlePeripheral.startAdvertising(
         services: const [MeshGatt.service],
         localName: 'MeshSetu',
         manufacturerData: ManufacturerData(
-          MeshGatt.developmentManufacturerId,
-          metadata.encode(),
+          MeshGatt.sosManufacturerId,
+          alert.encode(),
         ),
-        // Keep the 128-bit service UUID in the primary advertisement for the
-        // scan filter and move the 14-byte discovery record to the scan
-        // response so both packets stay within Android's 31-byte limit.
         platformConfig: PeripheralPlatformConfig(
           android: PeripheralAndroidOptions(
             addManufacturerDataInScanResponse: true,
           ),
         ),
       );
-
-  static Future<void> stop() => UniversalBlePeripheral.stopAdvertising();
+      await Future<void>.delayed(duration);
+    } finally {
+      // Do not revive the advertiser after event mode explicitly stopped.
+      if (generation == _advertisingGeneration) {
+        await UniversalBlePeripheral.stopAdvertising();
+        await start(discovery);
+      }
+    }
+  });
 }
 
 class DiscoveredPeer {
@@ -81,6 +125,7 @@ abstract final class MeshScanner {
     Duration window = const Duration(seconds: 4),
     int? expectedFingerprint,
     Future<void>? cancel,
+    void Function(MeshSosAdvertisement alert, String deviceId)? onSosAlert,
   }) async {
     final found = <String, DiscoveredPeer>{};
     final devicesSeen = <String>{};
@@ -100,6 +145,16 @@ abstract final class MeshScanner {
           serviceMatches.add(device.deviceId);
         }
         for (final data in device.manufacturerDataList) {
+          if (data.companyId == MeshGatt.sosManufacturerId) {
+            final alert = MeshSosAdvertisement.decode(data.payload);
+            if (alert != null &&
+                (expectedFingerprint == null ||
+                    alert.siteFingerprint ==
+                        (expectedFingerprint & 0xffffffff))) {
+              onSosAlert?.call(alert, device.deviceId);
+            }
+            continue;
+          }
           if (data.companyId == MeshGatt.beaconManufacturerId) {
             final metadata = BeaconMetadata.decode(data.payload);
             if (metadata != null) {
