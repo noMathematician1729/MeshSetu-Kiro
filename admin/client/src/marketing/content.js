@@ -29,17 +29,3 @@ export const demoStages = [
   { label: 'GATEWAY DEVICE', title: 'Local handoff confirmed', detail: 'A gateway phone bridges the verified incident to the control-room dashboard.', color: 'teal' },
   { label: 'CONTROL ROOM', title: 'Responder sees the signal', detail: 'Priority, zone uncertainty, hop count, and delivery state become actionable context.', color: 'blue' },
 ];
-
-export const implemented = [
-  'Flutter/Dart Android-first application architecture',
-  'BLE discovery, GATT transport, framing, fragmentation, reassembly, and relay logic',
-  'Encryption/authentication envelope, priority scheduling, ACK/retry, deduplication, and expiry',
-  'Durable inbox/outbox, Mesh Code / QR flow, Rooms, SOS, bounded voice packaging, gateway bridge, and local dashboard',
-];
-
-export const next = [
-  'Multi-phone physical BLE relay acceptance and full two-hop demo validation',
-  'Real offline speech-to-text benchmark on device',
-  'Learned triage classifier and zone visualization integration',
-  'Production enrollment, key lifecycle, fixed relay, and field hardening',
-];

@@ -1,5 +1,24 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap');
 
+/* Keep the Three.js scene intact while matching the surrounding page palette. */
+.mesh-simulation { background: var(--void) !important; }
+.mesh-simulation__heading h2 em { color: #83fff7 !important; }
+.mesh-simulation__heading > p { color: var(--pebble) !important; }
+.mesh-simulation__stage { border-color: rgba(30, 112, 254, 0.32) !important; background: radial-gradient(circle at 52% 38%, rgba(254,30,52,.15), transparent 35%), radial-gradient(circle at 76% 20%, rgba(252,252,252,.06), transparent 34%), linear-gradient(180deg, #171617, #080808 68%, #000) !important; }
+.mesh-simulation__stage::after { background: linear-gradient(90deg, rgba(8,8,8,.52), transparent 42%, transparent 76%, rgba(8,8,8,.2)) !important; }
+.mesh-simulation__timeline { border-color: rgba(164,231,255,.24) !important; background: rgba(13,28,42,.76) !important; }
+.mesh-simulation__timeline span { color: #7f9bb0 !important; }
+.mesh-simulation__timeline span:not(:last-child)::after { background: #43607a !important; }
+.mesh-simulation__timeline span.active { color: #61efe7 !important; }
+.mesh-simulation__timeline span.active:not(:last-child)::after { background: #61efe7 !important; box-shadow: 0 0 8px rgba(50,212,204,.65) !important; }
+.mesh-simulation__status { color: var(--bone) !important; }
+.mesh-simulation__status > i { background: var(--red) !important; box-shadow: 0 0 16px var(--red) !important; }
+.mesh-simulation__legend { color: var(--pebble) !important; }
+.mesh-simulation__legend .relay { background: var(--red) !important; box-shadow: 0 0 8px var(--red) !important; }
+.mesh-simulation__controls button { border-color: rgba(164,231,255,.24) !important; color: #f7fcff !important; background: rgba(13,28,42,.72) !important; }
+.mesh-simulation__controls button:nth-child(-n + 2) { border-color: rgba(97,239,231,.52) !important; color: #83fff7 !important; }
+.mesh-simulation__controls button:hover { border-color: #61efe7 !important; color: #f7fcff !important; background: rgba(22,51,67,.88) !important; }
+
 :root {
   --void: #080808;
   --absolute: #000000;
@@ -59,6 +78,8 @@ main section[id] { scroll-margin-top: 96px; }
 .site-nav > a:not(.button) { transition: color .2s ease; }
 .site-nav > a:not(.button):hover { color: var(--bone); }
 .site-nav .button { color: var(--bone); }
+.site-nav .button--nav-cta { padding: 11px 15px; border: 1px solid var(--red); color: var(--bone); background: var(--red); }
+.site-nav .button--nav-cta:hover, .site-nav .button--nav-cta:focus-visible { border-color: var(--bone); color: var(--void); background: var(--bone); transform: none; }
 .menu-toggle { display: none; border: 0; color: var(--bone); background: transparent; }
 .menu-lines { display: inline-flex; flex-direction: column; gap: 4px; margin-left: 8px; }
 .menu-lines i { display: block; width: 20px; height: 1px; background: currentColor; }
@@ -165,7 +186,8 @@ main section[id] { scroll-margin-top: 96px; }
 }
 
 .mesh-simulation__controls { flex-wrap: wrap; justify-content: flex-end; max-width: 430px; }
-.mesh-simulation__controls button:nth-child(-n + 2) { border-color: rgba(97,239,231,.52); color: #83fff7; }
+.mesh-simulation__controls button:nth-child(-n + 2) { border-color: rgba(254,30,52,.7); color: #ff7a86; }
+.mesh-simulation__controls button:hover { border-color: var(--red); color: var(--bone); background: rgba(254,30,52,.16); }
 
 @media (max-width: 680px) {
   .mesh-simulation__controls { display: grid; grid-template-columns: repeat(3, 1fr); max-width: none; }

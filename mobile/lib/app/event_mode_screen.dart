@@ -255,8 +255,14 @@ class _MeshEventTaskHandler extends TaskHandler {
 
   Future<void> _sendTestSos(MeshEventController controller) async {
     try {
-      if (!await controller.sendTestObject()) {
+      final envelope = await controller.sendTestObject();
+      if (envelope == null) {
         FlutterForegroundTask.sendDataToMain(const {'status': 'sos_failed'});
+      } else {
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_test_origin_submitted',
+          'envelope': MeshBridge.envelopeToJson(envelope),
+        });
       }
     } catch (error) {
       FlutterForegroundTask.sendDataToMain({
@@ -292,6 +298,12 @@ class _MeshEventTaskHandler extends TaskHandler {
         'objectId': envelope.objectId,
         'accepted': true,
       });
+      if (envelope.payloadType == PayloadType.structuredSos) {
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'mesh_origin_submitted',
+          'envelope': MeshBridge.envelopeToJson(envelope),
+        });
+      }
     } catch (error) {
       FlutterForegroundTask.sendDataToMain({
         'status': 'mesh_submit_result',
@@ -367,6 +379,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   final Map<String, int> _scanStats = {};
   String _lastReceived = 'none';
   MeshBridgeClient? _bridgeClient;
+  late final TextEditingController _adminServerController;
+  late final TextEditingController _gatewayKeyController;
   final VoiceRecorder _sttRecorder = VoiceRecorder.withCap(
     const Duration(seconds: 3),
   );
@@ -374,6 +388,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   @override
   void initState() {
     super.initState();
+    _adminServerController = TextEditingController(
+      text: ref.read(gatewayUrlProvider),
+    );
+    _gatewayKeyController = TextEditingController(
+      text: ref.read(gatewayDemoKeyProvider),
+    );
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
@@ -447,6 +467,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status =
               'MeshSetu\n${data['message'] ?? 'Test SOS could not queue'}';
         });
+      case 'mesh_test_origin_submitted':
+        final envelopeJson = data['envelope'];
+        if (envelopeJson is Map) {
+          unawaited(_forwardTestSosToAdmin(
+            MeshBridge.envelopeFromJson(
+              envelopeJson.cast<Object?, Object?>(),
+            ),
+          ));
+        }
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
       case 'mesh_metric':
@@ -510,6 +539,29 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           () => _zone =
               '${data['zone'] ?? 'unknown'} (${data['uncertainty'] ?? 'unknown'})',
         );
+    }
+  }
+
+  Future<void> _forwardTestSosToAdmin(MeshEnvelope envelope) async {
+    if (!ref.read(gatewayEnabledProvider)) {
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nTest SOS sent over BLE only');
+      }
+      return;
+    }
+    try {
+      final bridge = GatewayBridge(
+        baseUrl: Uri.parse(ref.read(gatewayUrlProvider)),
+        demoKey: ref.read(gatewayDemoKeyProvider),
+      );
+      await bridge.postToDashboard(bridge.testSosJson(envelope));
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nTest SOS sent to admin server');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nAdmin test send failed: $error');
+      }
     }
   }
 
@@ -678,6 +730,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     unawaited(_bridgeClient?.dispose());
     unawaited(_sttRecorder.dispose());
+    _adminServerController.dispose();
+    _gatewayKeyController.dispose();
     _bridgeClientSiteStarted = false;
     super.dispose();
   }
@@ -792,6 +846,46 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 icon: const Icon(Icons.sos),
                 style: FilledButton.styleFrom(backgroundColor: Colors.red),
                 label: const Text('Send real voice + GPS SOS'),
+              ),
+              const SizedBox(height: 12),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('Admin server forwarding'),
+                subtitle: const Text('Send this phone\'s SOS directly to the control room'),
+                children: [
+                  TextField(
+                    controller: _adminServerController,
+                    keyboardType: TextInputType.url,
+                    decoration: const InputDecoration(
+                      labelText: 'Admin server URL',
+                      hintText: 'http://192.168.1.42:8000',
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) => ref
+                        .read(gatewayUrlProvider.notifier)
+                        .state = value.trim(),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _gatewayKeyController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Admin server key',
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) => ref
+                        .read(gatewayDemoKeyProvider.notifier)
+                        .state = value,
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Forward SOS to admin server'),
+                    value: ref.watch(gatewayEnabledProvider),
+                    onChanged: (value) => ref
+                        .read(gatewayEnabledProvider.notifier)
+                        .state = value,
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               OutlinedButton(

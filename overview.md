@@ -16,8 +16,7 @@ Full spec: `MeshSetu_Technical_Development_Bible_Flutter.pdf`.
 
 - **`mobile/`** — Flutter Android app (Dart) with complete BLE mesh, durable outbox, UI, and integrations.
 - **`admin/server/`** — Express/TypeScript backend for the control room API, gateway ingest, WebSocket stream, and persistence.
-- **`admin/client/`** — React/Vite operator dashboard.
-- **`landing-page/`** — Public React/Vite site.
+- **`admin/client/`** — React/Vite public landing page and operator dashboard (`/control-room`).
 - **`docs/`, `.github/`** — Documentation and CI/CD workflows.
 
 ---

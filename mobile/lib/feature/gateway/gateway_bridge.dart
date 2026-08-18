@@ -28,7 +28,7 @@ class GatewayBridge {
           },
           body: jsonEncode(event),
         )
-        .timeout(const Duration(seconds: 3));
+        .timeout(const Duration(seconds: 12));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('dashboard HTTP ${response.statusCode}');
     }
@@ -56,7 +56,7 @@ class GatewayBridge {
             'peer_id': peerId,
           }),
         )
-        .timeout(const Duration(seconds: 3));
+        .timeout(const Duration(seconds: 12));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('dashboard packet HTTP ${response.statusCode}');
     }
@@ -70,6 +70,9 @@ class GatewayBridge {
     int? relayLatencyMs,
   }) => {
     'event_id': envelope.eventId,
+    'object_id': envelope.objectId.toString(),
+    'site_id': envelope.siteId,
+    'room_id': envelope.roomId,
     'priority': sos.triagePriority.name,
     'incident_type': sos.incidentType,
     'transcript': sos.transcript.isEmpty ? null : sos.transcript,
@@ -78,7 +81,6 @@ class GatewayBridge {
     'longitude': sos.longitude,
     'accuracy_m': sos.accuracyM,
     'location_captured_at_ms': sos.locationCapturedAtMs,
-    'room': envelope.roomId,
     'hops': envelope.hopCount,
     'relay_latency_ms': relayLatencyMs,
     'voice_clip_id': sos.voiceClipId.isEmpty ? null : sos.voiceClipId,
@@ -91,6 +93,18 @@ class GatewayBridge {
     'incident_type': 'unknown',
     'voice_clip_id': voice.clipId,
     'audio_state': 'complete',
+  };
+
+  Map<String, Object?> testSosJson(MeshEnvelope envelope) => {
+    'event_id': envelope.eventId,
+    'object_id': envelope.objectId.toString(),
+    'site_id': envelope.siteId,
+    'room_id': envelope.roomId,
+    'priority': 'p0Critical',
+    'incident_type': 'test_sos',
+    'transcript': 'BLE SOS notification test',
+    'hops': envelope.hopCount,
+    'audio_state': 'n/a',
   };
 }
 

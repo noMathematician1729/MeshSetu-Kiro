@@ -31,7 +31,7 @@ function MarketingPage() {
     root.render(<div className="marketing-root"><MarketingApp /></div>)
     return () => root.unmount()
   }, [])
-  return <div className="marketing-shell"><a className="marketing-link" href={controlRoomPath}>Open control room</a><div ref={hostRef} /></div>
+  return <div className="marketing-shell"><div ref={hostRef} /></div>
 }
 
 function ControlRoomApp() { const [signedIn, setSignedIn] = useState(Boolean(authToken())); return signedIn ? <ControlRoom onLogout={() => { setToken(''); setSignedIn(false) }} /> : <Login onLogin={() => setSignedIn(true)} /> }

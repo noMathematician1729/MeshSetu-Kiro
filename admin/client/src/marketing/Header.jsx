@@ -5,6 +5,16 @@ import Logo from './Logo';
 export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = () => setMenuOpen(false);
+  const scrollToSection = (event) => {
+    const target = event.currentTarget.getAttribute('href');
+    if (!target?.startsWith('#')) {
+      closeMenu();
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.getRootNode().querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    closeMenu();
+  };
 
   return (
     <header className="site-header">
@@ -14,14 +24,11 @@ export default function Header() {
           <span>{menuOpen ? 'Close' : 'Menu'}</span><span className="menu-lines" aria-hidden="true"><i /><i /></span>
         </button>
         <nav id="site-nav" className={`site-nav ${menuOpen ? 'site-nav--open' : ''}`} aria-label="Main navigation">
-          <a href="#how-it-works" onClick={closeMenu}>How it works</a>
-          <a href="#capabilities" onClick={closeMenu}>Capabilities</a>
-          {/* <a href="#safety" onClick={closeMenu}>Safety</a> */}
-          <a href="#tech-stack" onClick={closeMenu}>Tech stack</a>
-          <a href="#architecture" onClick={closeMenu}>Architecture</a>
-          <a href="#prototype" onClick={closeMenu}>Prototype</a>
-          <a href="/control-room" onClick={closeMenu}>Control room</a>
-          <a className="button button--small button--dark" href="#demo" onClick={closeMenu}>View demo <Arrow /></a>
+          <a href="#how-it-works" onClick={scrollToSection}>How it works</a>
+          <a href="#capabilities" onClick={scrollToSection}>Features</a>
+          <a href="#tech-stack" onClick={scrollToSection}>Tech stack</a>
+          <a href="#architecture" onClick={scrollToSection}>Architecture</a>
+          <a className="button button--small button--nav-cta" href="/control-room" onClick={scrollToSection}>Control room <Arrow /></a>
         </nav>
       </div>
     </header>

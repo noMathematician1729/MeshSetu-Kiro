@@ -361,18 +361,17 @@ class MeshEventController {
     );
   }
 
-  Future<bool> sendTestObject() async {
+  Future<MeshEnvelope?> sendTestObject() async {
     for (var attempt = 0; attempt < 100 && _coordinator == null; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     final coordinator = _coordinator;
-    if (coordinator == null) return false;
+    if (coordinator == null) return null;
 
     unawaited(broadcastCompactSos(isTest: true));
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    await coordinator.send(
-      MeshEnvelope(
+    final envelope = MeshEnvelope(
         objectId: _randomNonZero64(),
         eventId: _randomUuidV4(),
         siteId: siteId,
@@ -385,9 +384,9 @@ class MeshEventController {
         payloadType: PayloadType.structuredSos,
         payload: TestSosPacket.payload,
         originEphemeralId: _localToken,
-      ),
     );
-    return true;
+    await coordinator.send(envelope);
+    return envelope;
   }
 
   /// Sends an immediately detectable emergency alert independently of GATT.

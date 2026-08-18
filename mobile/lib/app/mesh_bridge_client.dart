@@ -146,10 +146,27 @@ class MeshBridgeClient {
           receivedJson.cast<Object?, Object?>(),
         );
         unawaited(_storeReceived(received));
+      case 'mesh_origin_submitted':
+        final envelopeJson = data['envelope'];
+        if (envelopeJson is! Map || _gatewayBridge == null) return;
+        unawaited(_forwardOriginSos(
+          MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
+        ));
       case 'error' || 'stopped':
         _failPendingSubmissions(
           StateError(data['message'] as String? ?? 'foreground mesh stopped'),
         );
+    }
+  }
+
+  Future<void> _forwardOriginSos(MeshEnvelope envelope) async {
+    final bridge = _gatewayBridge;
+    if (bridge == null || envelope.payloadType != PayloadType.structuredSos) return;
+    try {
+      final sos = StructuredSosPayload.decode(envelope.payload);
+      await bridge.postToDashboard(bridge.eventJson(envelope: envelope, sos: sos));
+    } catch (_) {
+      // The durable mesh object remains available for retry through the normal gateway path.
     }
   }
 

@@ -1,4 +1,7 @@
-const base = (import.meta.env.VITE_API_BASE_URL || 'https://sih26-1xdevs.onrender.com').replace(/\/$/, '')
+const localBackend = window.location.protocol === 'http:'
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : 'https://sih26-1xdevs.onrender.com'
+const base = (import.meta.env.VITE_API_BASE_URL || localBackend).replace(/\/$/, '')
 let token = localStorage.getItem('meshsetu_token') || ''
 export const authToken = () => token
 export function setToken(value) { token = value; value ? localStorage.setItem('meshsetu_token', value) : localStorage.removeItem('meshsetu_token') }

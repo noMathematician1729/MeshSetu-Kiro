@@ -5,7 +5,7 @@ local.properties
 .idea/
 *.iml
 
-Ceal
+*.DS_Store
 
 # Local secrets and environment overrides
 .env

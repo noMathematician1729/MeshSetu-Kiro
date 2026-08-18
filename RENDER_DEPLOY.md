@@ -4,8 +4,7 @@ This repository is set up for a Render Blueprint via [`render.yaml`](./render.ya
 
 Services created:
 
-- `meshsetu-landing-page`: public Vite static site from `landing-page/`
-- `meshsetu-admin-dashboard`: operator dashboard static site from `admin/client/`
+- `meshsetu-admin-dashboard`: public landing page at `/` and operator dashboard at `/control-room`, from `admin/client/`
 - `meshsetu-control-room-backend`: Node/Express API + WebSocket service from `admin/server/`
 - `meshsetu-backend-healthcheck`: Render cron job that hits the backend every 5 minutes
 - `meshsetu-db`: Render Postgres for incident storage
