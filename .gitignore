@@ -6,3 +6,18 @@ local.properties
 *.iml
 
 Ceal
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+backend/.env
+admin-dashboard/.env
+
+# Dependency and generated tool output
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+core-model/bin/
+core-protocol/bin/

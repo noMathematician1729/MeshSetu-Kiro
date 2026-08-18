@@ -49,6 +49,9 @@ abstract final class MeshBridge {
     'envelope': envelopeToJson(r.envelope),
     'peerId': r.peerId,
     'receivedAtMs': r.receivedAtMs,
+    'encryptedBytes': r.encryptedBytes == null
+        ? null
+        : base64Encode(r.encryptedBytes!),
   };
 
   static ReceivedObject receivedFromJson(Map<Object?, Object?> map) =>
@@ -56,6 +59,9 @@ abstract final class MeshBridge {
         envelope: envelopeFromJson(map['envelope'] as Map<Object?, Object?>),
         peerId: map['peerId'] as String,
         receivedAtMs: map['receivedAtMs'] as int,
+        encryptedBytes: map['encryptedBytes'] == null
+            ? null
+            : base64Decode(map['encryptedBytes'] as String),
       );
 
   static RelayMetric metricFromJson(Map<Object?, Object?> map) => RelayMetric(

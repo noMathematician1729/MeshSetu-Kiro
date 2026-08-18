@@ -15,7 +15,7 @@ import 'secure_envelope.dart';
 /// defaults won't carry over — Dart's `implements` only takes the member
 /// signatures, not their bodies.
 abstract class RelayStore {
-  void persist(MeshEnvelope envelope);
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes});
   bool contains(int objectId) => false;
   void enqueue(EncryptedObject value) {}
   List<EncryptedObject> pending(int nowMs) => const [];
@@ -46,7 +46,12 @@ class RelayResult {
   final List<RelayMetric> metrics;
 }
 
-typedef PersistListener = void Function(MeshEnvelope envelope, String peerId);
+typedef PersistListener =
+    void Function(
+      MeshEnvelope envelope,
+      String peerId,
+      Uint8List encryptedBytes,
+    );
 
 const int _maxPartialObjects = 128;
 const int _partialTimeoutMs = 30000;
@@ -68,7 +73,7 @@ class MeshRelayEngine {
     PersistListener? onPersist,
   }) : scheduler = scheduler ?? OutboundScheduler(),
        dedupe = dedupe ?? RecentObjectCache(),
-       _onPersist = onPersist ?? ((_, __) {}) {
+       _onPersist = onPersist ?? ((_, __, ___) {}) {
     final now = clockMs();
     for (final value in store.pending(now)) {
       _knownObjects[value.objectId] = value;
@@ -247,7 +252,7 @@ class MeshRelayEngine {
     }
 
     try {
-      store.persist(envelope);
+      store.persist(envelope, encryptedBytes: encrypted.bytes);
     } catch (_) {
       _metrics.add(
         RelayMetric(
@@ -258,9 +263,9 @@ class MeshRelayEngine {
       );
       return RelayResult(const [], _drain());
     }
-    _onPersist(envelope, peerId);
+    _onPersist(envelope, peerId, encrypted.bytes);
     for (final listener in _listeners) {
-      listener(envelope, peerId);
+      listener(envelope, peerId, encrypted.bytes);
     }
     _metrics.add(
       RelayMetric(
@@ -446,10 +451,18 @@ class FileRelayStore extends RelayStore {
   Directory get _outbox => Directory('${directory.path}/outbox');
 
   @override
-  void persist(MeshEnvelope envelope) => _writeAtomically(
-    File('${_inbox.path}/${envelope.objectId}.bin'),
-    Uint8List.fromList(EnvelopeCodec.encode(envelope)),
-  );
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) {
+    _writeAtomically(
+      File('${_inbox.path}/${envelope.objectId}.bin'),
+      Uint8List.fromList(EnvelopeCodec.encode(envelope)),
+    );
+    if (encryptedBytes != null) {
+      _writeAtomically(
+        File('${_inbox.path}/${envelope.objectId}.wire'),
+        encryptedBytes,
+      );
+    }
+  }
 
   @override
   bool contains(int objectId) =>

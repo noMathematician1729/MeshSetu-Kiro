@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meshsetu
+      POSTGRES_PASSWORD: meshsetu
+      POSTGRES_DB: meshsetu
+    volumes:
+      - meshsetu-postgres:/var/lib/postgresql/data
+  backend:
+    image: node:22-alpine
+    working_dir: /app/backend
+    command: sh -c "npm install && npm run migrate && npm run dev"
+    environment:
+      PORT: 8000
+      DATABASE_URL: postgresql://meshsetu:meshsetu@postgres:5432/meshsetu
+      JWT_SECRET: ${JWT_SECRET:-local-jwt-change-me}
+      MESHSETU_ADMIN_EMAIL: ${MESHSETU_ADMIN_EMAIL:-operator@meshsetu.local}
+      MESHSETU_ADMIN_PASSWORD: ${MESHSETU_ADMIN_PASSWORD:-meshsetu-demo}
+      MESHSETU_GATEWAY_SECRET: ${MESHSETU_GATEWAY_SECRET:-change-me}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+volumes:
+  meshsetu-postgres:

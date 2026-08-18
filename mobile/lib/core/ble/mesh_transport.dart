@@ -117,12 +117,13 @@ class MeshTransportCoordinator implements MeshTransport {
     MetricsListener? onMetrics,
   }) : _onMetrics = onMetrics ?? ((_) {}) {
     _peersController = StreamController<List<PeerState>>.broadcast();
-    relay.addPersistListener((envelope, peerId) {
+    relay.addPersistListener((envelope, peerId, encryptedBytes) {
       _receivedController.add(
         ReceivedObject(
           envelope: envelope,
           peerId: peerId,
           receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+          encryptedBytes: Uint8List.fromList(encryptedBytes),
         ),
       );
     });

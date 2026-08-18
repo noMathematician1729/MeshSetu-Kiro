@@ -52,7 +52,7 @@ final offlineSttEngineProvider = Provider<OfflineSttEngine>(
 );
 
 final gatewayUrlProvider = StateProvider<String>(
-  (ref) => 'https://kisha-volcanologic-motherly.ngrok-free.dev',
+  (ref) => '',
 );
 final gatewayEnabledProvider = StateProvider<bool>((ref) => true);
 final gatewayDemoKeyProvider = StateProvider<String>((ref) => 'change-me');

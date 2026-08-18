@@ -11,7 +11,8 @@ class _RecordingStore extends RelayStore {
   final List<MeshEnvelope> stored = [];
 
   @override
-  void persist(MeshEnvelope envelope) => stored.add(envelope);
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) =>
+      stored.add(envelope);
 }
 
 class _AckTrackingStore extends RelayStore {
@@ -19,7 +20,7 @@ class _AckTrackingStore extends RelayStore {
   final List<int> acked;
 
   @override
-  void persist(MeshEnvelope envelope) {}
+  void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) {}
 
   @override
   void markAck(int objectId, String peerId) => acked.add(objectId);

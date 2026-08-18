@@ -8,8 +8,9 @@ import '../voice/voice_repository.dart';
 
 /// Bible §15.1/§3.4: the gateway phone receives mesh objects exactly like
 /// any other peer (Dev A's `MeshTransportCoordinator`); this bridge only
-/// pushes already-verified/reassembled `StructuredSos` events on to the
-/// configured dashboard URL over local Wi-Fi or an HTTPS tunnel.
+/// pushes the original encrypted/reassembled mesh object to the configured
+/// dashboard URL over local Wi-Fi. The Node backend independently verifies
+/// and decrypts the packet; the gateway never supplies trusted SOS fields.
 class GatewayBridge {
   GatewayBridge({required this.baseUrl, required this.demoKey});
 
@@ -30,6 +31,34 @@ class GatewayBridge {
         .timeout(const Duration(seconds: 3));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('dashboard HTTP ${response.statusCode}');
+    }
+  }
+
+  Future<void> postEncryptedObject({
+    required String siteId,
+    required int objectId,
+    required List<int> packet,
+    required int receivedAtMs,
+    String? peerId,
+  }) async {
+    final response = await http
+        .post(
+          baseUrl.resolve('/v1/gateway/objects'),
+          headers: {
+            'content-type': 'application/json',
+            'x-meshsetu-gateway-key': demoKey,
+          },
+          body: jsonEncode({
+            'site_id': siteId,
+            'object_id': objectId.toString(),
+            'packet_b64': base64Encode(packet),
+            'received_at_ms': receivedAtMs,
+            'peer_id': peerId,
+          }),
+        )
+        .timeout(const Duration(seconds: 3));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('dashboard packet HTTP ${response.statusCode}');
     }
   }
 
