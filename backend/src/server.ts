@@ -1,6 +1,5 @@
 import 'dotenv/config'
 import http from 'node:http'
-import path from 'node:path'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import { WebSocketServer } from 'ws'
@@ -9,8 +8,26 @@ import { decryptPacket } from './protocol/mesh.js'
 import { store } from './store.js'
 
 const app = express()
+const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173']
+const configuredOrigins = [
+  process.env.MESHSETU_ADMIN_ORIGIN,
+  ...(process.env.CORS_ALLOWED_ORIGINS || '').split(','),
+].map(value => value?.trim()).filter(Boolean) as string[]
+const allowedOrigins = new Set([...localOrigins, ...configuredOrigins])
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin
+  if (origin && allowedOrigins.has(origin)) {
+    res.header('Access-Control-Allow-Origin', origin)
+    res.header('Vary', 'Origin')
+    res.header('Access-Control-Allow-Credentials', 'true')
+    res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS')
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204)
+  next()
+})
 app.use(express.json({ limit: '12mb' }))
-app.use(express.static(path.resolve(import.meta.dirname, '../../admin-dashboard/dist')))
 const clients = new Set<any>()
 const jwtSecret = () => process.env.JWT_SECRET || 'meshsetu-local-jwt-change-me'
 const gatewaySecret = () => process.env.MESHSETU_GATEWAY_SECRET || process.env.MESHSETU_DEMO_KEY || 'change-me'
@@ -20,7 +37,29 @@ const emit = (type: string, data: any) => { const message = JSON.stringify({ typ
 function bearer(req: express.Request, res: express.Response, next: express.NextFunction) { const token = req.headers.authorization?.replace(/^Bearer\s+/i, ''); if (!token) return res.status(401).json({ error: 'authentication required' }); try { (req as any).operator = jwt.verify(token, jwtSecret()); next() } catch { res.status(401).json({ error: 'invalid token' }) } }
 function gateway(req: express.Request, res: express.Response, next: express.NextFunction) { if (req.header('x-meshsetu-gateway-key') !== gatewaySecret() && req.header('x-meshsetu-demo-key') !== gatewaySecret()) return res.status(401).json({ error: 'bad gateway key' }); next() }
 
-app.get('/v1/health', async (_req, res) => res.json({ ok: true, service: 'meshsetu-control-room', database: Boolean(store.pool), time: Date.now() }))
+async function healthPayload() {
+  let database = 'memory'
+  if (store.pool) {
+    await store.pool.query('SELECT 1')
+    database = 'postgres'
+  }
+  return { ok: true, service: 'meshsetu-control-room', database, time: Date.now() }
+}
+
+app.get('/health', async (_req, res) => {
+  try {
+    res.json(await healthPayload())
+  } catch (error: any) {
+    res.status(503).json({ ok: false, service: 'meshsetu-control-room', error: error?.message || 'health check failed', time: Date.now() })
+  }
+})
+app.get('/v1/health', async (_req, res) => {
+  try {
+    res.json(await healthPayload())
+  } catch (error: any) {
+    res.status(503).json({ ok: false, service: 'meshsetu-control-room', error: error?.message || 'health check failed', time: Date.now() })
+  }
+})
 app.post('/v1/auth/token', (req, res) => { const body = z.object({ email: z.string().email(), password: z.string().min(1) }).safeParse(req.body); if (!body.success || body.data.email !== adminEmail() || body.data.password !== adminPassword()) return res.status(401).json({ error: 'invalid credentials' }); const token = jwt.sign({ sub: body.data.email, role: 'operator' }, jwtSecret(), { expiresIn: '12h' }); res.json({ access_token: token, token_type: 'Bearer', expires_in: 43200, operator: { email: body.data.email, role: 'operator' } }) })
 
 const packetSchema = z.object({ site_id: z.string().min(1), object_id: z.union([z.string(), z.number()]).transform(String), packet_b64: z.string().min(1), peer_id: z.string().optional(), received_at_ms: z.number().optional() })

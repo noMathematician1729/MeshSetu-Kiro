@@ -16,6 +16,8 @@ admin-dashboard/.env
 
 # Dependency and generated tool output
 node_modules/
+dist/
+.dart_tool/
 __pycache__/
 *.py[cod]
 .venv/

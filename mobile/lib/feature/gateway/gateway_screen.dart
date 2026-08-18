@@ -49,7 +49,7 @@ class _GatewayScreenState extends ConsumerState<GatewayScreen> {
               controller: _urlController,
               decoration: const InputDecoration(
                 labelText: 'Dashboard base URL',
-                hintText: 'http://192.168.1.20:8000',
+                hintText: productionBackendUrl,
                 border: OutlineInputBorder(),
               ),
               onChanged: (v) => ref.read(gatewayUrlProvider.notifier).state = v,

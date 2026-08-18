@@ -18,7 +18,7 @@ The work is complete only when every P0/P1 item below is fixed, the automated ga
 |---|---|---|
 | `flutter pub get` | **FAIL** at `mobile/pubspec.yaml:57` (`Expected ':'`) | Committed merge-conflict markers make the current Flutter tree unbuildable. |
 | `flutter analyze` / `flutter test` / APK build | **BLOCKED** by invalid `pubspec.yaml` | Earlier green results predate the current launcher-icon merge and are not evidence for HEAD. |
-| Dashboard tests | **NOT RUN in this checkout** (`fastapi` is not installed in the active Python environment) | Install `dashboard/requirements.txt` in a venv, then run the documented tests. This is an environment gap, not by itself a code failure. |
+| Control-room web tests | Not fully run in this checkout | Install Node deps in `backend/` and `admin-dashboard/`, then run the documented build/test commands. |
 | Physical BLE and microphone tests | **NOT PROVEN** | Synthetic tests do not establish Android radio, callback-thread, codec, background, or OEM behavior. |
 | Worktree | `context.md`, `core-model/bin/`, and `core-protocol/bin/` are untracked | Do not accidentally commit generated `bin/` output. Decide separately whether `context.md` belongs in source control. |
 
@@ -71,7 +71,7 @@ Dev A is done only when native callbacks are thread-safe and exactly-once, capac
 ### Already implemented
 
 - Drift outbox/inbox and repository skeletons, join via typed code/QR, Rooms screens, SOS draft/finalize flow, deterministic safety rules, voice capture/package/playback primitives, Riverpod wiring, and cross-isolate bridge.
-- Gateway HTTP client, FastAPI ingest/WebSocket server, and a minimal browser incident list.
+- Gateway HTTP client, the Node/Express control-room backend, and the React browser dashboard.
 - A packaged sherpa-onnx engine now exists, but it is currently exposed only through a standalone smoke-test path rather than the SOS flow.
 
 ### P1 safety, privacy, and product-flow blockers
@@ -105,7 +105,7 @@ Dev A is done only when native callbacks are thread-safe and exactly-once, capac
 
 ### Dev B done criteria
 
-Dev B is done only when restricted content is not exposed, manual and voice SOS use the real/failing-cleanly STT path, voice remains linked to its SOS with visible state, location reaches the incident, gateway delivery survives outage, the browser supports verified playback and operator action, and the full product flow passes on physical phones plus the local dashboard.
+Dev B is done only when restricted content is not exposed, manual and voice SOS use the real/failing-cleanly STT path, voice remains linked to its SOS with visible state, location reaches the incident, gateway delivery survives outage, the browser supports verified playback and operator action, and the full product flow passes on physical phones plus the local control room.
 
 ## Shared final release gate
 
@@ -120,19 +120,20 @@ flutter test --reporter expanded
 flutter build apk --debug
 flutter build apk --release
 
-cd ../dashboard
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m unittest discover -s . -p 'test_*.py' -v
-python -m py_compile main.py test_main.py
+cd ../backend
+npm ci
+npm run build
+
+cd ../admin-dashboard
+npm ci
+npm run build
 ```
 
 Also run the vendored Android plugin/JVM tests with the repository's supported JDK, then install the exact release-candidate APK on the demo phones.
 
 Final acceptance sequence:
 
-1. Clean/reset three phones and dashboard; join the same signed manifest and correct roles.
+1. Clean/reset three phones and the control room; join the same signed manifest and correct roles.
 2. Disable cellular and internet uplink. Keep only the gateway/laptop local LAN.
 3. Force A → B → C, send a typed P0 SOS, and verify persistence, priority, hops, latency, zone, dedupe, and dashboard display.
 4. Send a voice SOS, verify real offline STT or explicit unavailable state, structured SOS first, bounded Opus second, integrity, progress, receiver/browser playback, and no incident-field regression.

@@ -1,0 +1,72 @@
+databases:
+  - name: meshsetu-db
+    plan: free
+    databaseName: meshsetu
+    user: meshsetu
+
+services:
+  - type: web
+    runtime: static
+    name: meshsetu-landing-page
+    rootDir: landing-page
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+
+  - type: web
+    runtime: static
+    name: meshsetu-admin-dashboard
+    rootDir: admin-dashboard
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: meshsetu-control-room-backend
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    runtime: node
+    name: meshsetu-control-room-backend
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: DATABASE_URL
+        fromDatabase:
+          name: meshsetu-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MESHSETU_ADMIN_EMAIL
+        value: operator@meshsetu.local
+      - key: MESHSETU_ADMIN_PASSWORD
+        sync: false
+      - key: MESHSETU_GATEWAY_SECRET
+        sync: false
+      - key: MESHSETU_ADMIN_ORIGIN
+        fromService:
+          type: web
+          name: meshsetu-admin-dashboard
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: cron
+    runtime: node
+    name: meshsetu-backend-healthcheck
+    plan: starter
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/cron/healthcheck.js
+    schedule: "*/5 * * * *"
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HEALTHCHECK_URL
+        fromService:
+          type: web
+          name: meshsetu-control-room-backend
+          envVarKey: RENDER_EXTERNAL_URL

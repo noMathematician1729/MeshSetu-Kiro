@@ -10,6 +10,8 @@ Product contract: offline-first emergency communication using participating Andr
 
 The previously mentioned “fourth feature” remains unspecified by the product team. This document does not invent it. A clean extension point is reserved for it. 
 
+Note: this document is a frozen product and architecture spec. Parts of it still describe an earlier FastAPI dashboard design; the live implementation in this repository is `backend/` plus `admin-dashboard/`.
+
 MeshSetu Technical Development Bible  |  1 
 
 ## **Table of contents** 
@@ -2363,4 +2365,3 @@ Local project source files used while preparing this document: `MeshSetu Researc
 **☐** Unknown fourth product feature remains a documented extension point, not an invented claim. 
 
 MeshSetu Technical Development Bible  |  32 
-

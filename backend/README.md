@@ -9,11 +9,11 @@ npm run build
 npm start
 ```
 
-The server listens on `0.0.0.0:8000`, serves the built React dashboard, exposes
-the versioned `/v1` API, and preserves `/api/events` and `/ws` compatibility
-routes. The gateway posts raw encrypted objects to `/v1/gateway/objects`; the
-server validates the AES-256-GCM envelope, decodes `MeshEnvelope`, and only then
-persists the SOS or verified voice evidence.
+The server listens on `0.0.0.0:8000`, exposes the versioned `/v1` API, and
+preserves `/api/events` and `/ws` compatibility routes. The gateway posts raw
+encrypted objects to `/v1/gateway/objects`; the server validates the
+AES-256-GCM envelope, decodes `MeshEnvelope`, and only then persists the SOS
+or verified voice evidence.
 
 For the offline demo, run the repository root with Docker Compose:
 

@@ -12,10 +12,12 @@ Full spec: `MeshSetu_Technical_Development_Bible_Flutter.pdf`.
 
 - **`core-model/`, `core-protocol/`, `core-ble/`, `app/`** — Original Kotlin implementation, kept in sync for protocol wire format verification. Not actively developed; used only as test oracle for Dart port correctness.
 
-### Active Development (Flutter/Dart + Python)
+### Active Development (Flutter/Dart + Node/React)
 
 - **`mobile/`** — Flutter Android app (Dart) with complete BLE mesh, durable outbox, UI, and integrations.
-- **`dashboard/`** — FastAPI Python backend (local control room, receives incidents via HTTP from gateway phone).
+- **`backend/`** — Express/TypeScript backend for the control room API, gateway ingest, WebSocket stream, and persistence.
+- **`admin-dashboard/`** — React/Vite operator dashboard.
+- **`landing-page/`** — Public React/Vite site.
 - **`docs/`, `.github/`** — Documentation and CI/CD workflows.
 
 ---
@@ -228,43 +230,51 @@ await sosRepo.finalizeAndEnqueue(sos);  // → Drift OUTBOX_EVENTS, state=READY
 
 ---
 
-### Backend: Control Room Dashboard (`dashboard/`)
+### Backend: Control Room Services (`backend/` + `admin-dashboard/`)
 
-**Language:** Python 3.10+, FastAPI 0.104+
+**Languages:** Node.js/TypeScript (API) + React/Vite (operator UI)
 
-**Responsibilities:** Receive incidents, real-time incident feed, operator dashboard UI.
+**Responsibilities:** Receive incidents, validate/decrypt gateway objects, persist incidents, stream updates over WebSocket, and provide the operator dashboard UI.
 
 | File | Purpose |
 |------|---------|
-| `main.py` | FastAPI app: `POST /api/events` (ingest), `GET /api/events` (list), `WS /ws` (real-time broadcast) |
-| `static/index.html` | Incident list UI (priority sort, incident type, transcript, zone, hops, relay latency, audio state) |
-| `test_main.py` | Unit tests: auth, event ingest, WebSocket broadcast |
-| `requirements.txt` | Dependencies: `fastapi`, `uvicorn`, `pydantic` |
+| `backend/src/server.ts` | Express app: `/health`, `/v1/*`, compatibility `/api/events`, and `/ws` or `/v1/stream` WebSocket endpoints |
+| `backend/src/store.ts` | Postgres-backed incident store with in-memory fallback |
+| `admin-dashboard/src/App.jsx` | Operator dashboard UI (login, live incident queue, playback, status updates) |
+| `admin-dashboard/src/api.js` | Dashboard API and WebSocket client |
 
 **API:**
 ```
-POST /api/events
-  Header: x-meshsetu-demo-key: "<MESHSETU_DEMO_KEY>"
-  Body: { event_id, priority, incident_type, transcript, zone, room, hops, relay_latency_ms, voice_clip_id, audio_state }
-  Response: { ok: true } or 401 Unauthorized
+GET /health
+  Response: { ok, service, database, time }
 
-GET /api/events
+POST /v1/gateway/objects
+  Header: x-meshsetu-gateway-key: "<MESHSETU_GATEWAY_SECRET>"
+  Body: { site_id, object_id, packet_b64, peer_id?, received_at_ms? }
+  Response: { ok: true, verified: true, event? } or 401/422
+
+GET /v1/sos
+  Header: Authorization: Bearer <token>
   Response: [ { event_id, priority, ... }, ... ]
 
-WS /ws
+WS /v1/stream?token=<jwt>
   Real-time incident stream; client receives:
   - { type: "snapshot", data: [...current events...] } on connect
-  - { type: "event", data: {...updated event...} } on any new/updated incident
+  - { type: "incident" | "voice" | "event", data: {...updated event...} }
 ```
 
-**Demo Auth:** Shared secret `MESHSETU_DEMO_KEY` (env-override, default: "change-me")
+**Gateway/Auth Config:** `MESHSETU_GATEWAY_SECRET`, `MESHSETU_ADMIN_EMAIL`, `MESHSETU_ADMIN_PASSWORD`, and `JWT_SECRET`
 
 **Deployment:**
 ```bash
-cd dashboard
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+cd backend
+npm ci
+npm run build
+npm start
+
+cd ../admin-dashboard
+npm ci
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
 ---
@@ -321,28 +331,28 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ┌─── Gateway HTTP Bridge ───────────────────────────────────────────┐
 │                                                                   │
 │  GatewayBridge.postToDashboard()                                 │
-│         │ HTTP POST /api/events                                  │
-│         ↓ + x-meshsetu-demo-key header                           │
+│         │ HTTP POST /api/events or /v1/gateway/objects           │
+│         ↓ + gateway secret header                                │
 └───────────────────────────────────────────────────────────────────┘
          │
          ↓
-┌─── Dashboard Backend (Python/FastAPI) ──────────────────────────┐
+┌─── Control-Room Backend (Node/Express) ─────────────────────────┐
 │                                                                  │
-│  POST /api/events                                               │
-│  ├─ Validate demo key                                           │
-│  ├─ Store in memory: latest[event_id]                           │
+│  POST /api/events or /v1/gateway/objects                        │
+│  ├─ Validate gateway key / decrypt verified objects             │
+│  ├─ Store in Postgres or memory fallback                        │
 │  └─ Broadcast to all WS clients                                 │
 │                                                                  │
-│  GET /api/events → return list(latest.values())                 │
+│  GET /v1/sos → return operator view                             │
 │                                                                  │
-│  WS /ws ↔ Browser UI                                            │
+│  WS /v1/stream or /ws ↔ Browser UI                              │
 │  ├─ Send snapshot on connect                                    │
 │  └─ Broadcast incident updates in real-time                     │
 └──────────────────────────────────────────────────────────────────┘
          │
          ↓
-    [Browser: index.html]
-    Displays incident list sorted by priority
+    [Browser: admin-dashboard]
+    Displays incident list, status workflow, and verified playback
 ```
 
 ---
@@ -395,7 +405,7 @@ final gatewayEnabledProvider = StateProvider<bool>((ref) => false);
 
 - **Unit tests** (53+): protocol codec, relay state machine, triage rules, manifest validation, SOS payload round-trip
 - **Widget tests** (6+): UI screens (join, rooms, SOS, gateway)
-- **Integration tests** (dashboard): HTTP POST/GET/WebSocket endpoints
+- **Integration tests** (control room): HTTP/WebSocket endpoints and dashboard builds
 - **No device tests:** physical BLE relay, microphone capture, model inference (requires Android device/emulator)
 
 ---
@@ -403,7 +413,7 @@ final gatewayEnabledProvider = StateProvider<bool>((ref) => false);
 ## Known Limitations & Future Work
 
 1. **STT Model Size:** Sherpa-ONNX Zipformer (200MB+) bloats APK; could optimize with quantization or serve remotely.
-2. **Dashboard Operator Workflow:** No ACK/dispatch UI; incidents are broadcast-only, not managed.
+2. **Dashboard Operator Workflow:** Basic status workflow exists, but operational escalation remains minimal.
 3. **Zone Precursor Scoring:** Not implemented (§20.5); zone is stored but not computed.
 4. **Kotlin Modules:** Not deleted; live alongside Flutter port as reference. Decision pending.
 5. **Hardware Integration:** Full BLE relay, STT inference, and microphone capture require Android device testing.
@@ -421,12 +431,16 @@ dart format lib test  # Code formatting
 flutter build apk --debug
 ```
 
-**Dashboard:**
+**Control room:**
 ```bash
-cd dashboard
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+cd backend
+npm ci
+npm run build
+npm start
+
+cd ../admin-dashboard
+npm ci
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
-Access dashboard: `http://localhost:8000` (or laptop IP if running remotely)
+Access dashboard: `http://localhost:5173` locally, or its deployed static URL in production.

@@ -9,7 +9,7 @@ links; it does not prove radio behavior.
 - Flutter/Dart compatible with `mobile/pubspec.yaml` (the verified toolchain
   uses Dart 3.12 and Flutter 3.47).
 - Android SDK platform 36 and an Android device/API 29 or newer.
-- Python 3 with `venv` support for the dashboard.
+- Node.js 22+ for the backend and admin dashboard.
 - For the mesh demo: three Android phones are preferred — source phone,
   relay phone, and gateway phone.
 - All demo phones must have Bluetooth enabled. The gateway phone and laptop
@@ -34,38 +34,37 @@ Expected result:
 - The APK is written to
   `mobile/build/app/outputs/flutter-apk/app-debug.apk`.
 
-Test the dashboard in a separate terminal:
+Test the backend and admin dashboard in separate terminals:
 
 ```bash
-cd dashboard
-python3 -m venv .venv
-source .venv/bin/activate       # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m unittest discover -s . -p 'test_*.py' -v
-python -m py_compile main.py test_main.py
+cd backend
+npm ci
+npm run build
+
+cd ../admin-dashboard
+npm ci
+npm run build
 ```
 
-## 3. Dashboard smoke test
+## 3. Control-room smoke test
 
-Start the local dashboard from the `dashboard/` directory:
+Start the local backend from the `backend/` directory:
 
 ```bash
-source .venv/bin/activate
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+npm run dev
 ```
 
-Open `http://127.0.0.1:8000/` in a browser. The default demo key is
-`change-me`; use a different key for a shared demo by setting
-`MESHSETU_DEMO_KEY` before starting the server, for example:
+The default demo key is `change-me`; use a different key for a shared demo by
+setting `MESHSETU_GATEWAY_SECRET` before starting the server, for example:
 
 ```bash
-MESHSETU_DEMO_KEY=my-demo-key python -m uvicorn main:app --host 0.0.0.0 --port 8000
+MESHSETU_GATEWAY_SECRET=my-demo-key npm run dev
 ```
 
 In another terminal, verify the HTTP contract:
 
 ```bash
-curl -i http://127.0.0.1:8000/
+curl -i http://127.0.0.1:8000/health
 curl -i http://127.0.0.1:8000/api/events
 
 curl -i -X POST http://127.0.0.1:8000/api/events \
@@ -77,10 +76,14 @@ curl -s http://127.0.0.1:8000/api/events
 ```
 
 The POST must return HTTP 200. A POST without the demo-key header must return
-HTTP 401. The browser should display the event through its WebSocket update.
+HTTP 401.
 
-Restarting the dashboard clears its in-memory event list; this is expected for
-the prototype.
+To run the dashboard UI locally:
+
+```bash
+cd admin-dashboard
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```
 
 ## 4. Install the Android build
 
@@ -133,11 +136,11 @@ Use three phones:
 - Phone B: relay.
 - Phone C: gateway and receiver.
 
-1. Start the dashboard on the laptop.
+1. Start the control-room backend on the laptop.
 2. Find the laptop's LAN address, for example `192.168.1.20`.
 3. On Phone C, open **Join event / Rooms / SOS → Gateway**.
 4. Set the dashboard URL to `http://192.168.1.20:8000`.
-5. Set the dashboard key to match `MESHSETU_DEMO_KEY` (or leave both as
+5. Set the dashboard key to match `MESHSETU_GATEWAY_SECRET` (or leave both as
    `change-me` for a local-only demo) and enable **Act as gateway**.
 6. On all three phones, start event mode and join with `DEMO01`.
 7. Disable mobile data and use an isolated local Wi-Fi/hotspot with no internet
@@ -204,8 +207,8 @@ a test failure for this build.
 
 ## 8. Resetting demo state
 
-The dashboard state is cleared by restarting its process. To clear the mobile
-database and local demo state on a test phone:
+The in-memory fallback state in the backend is cleared by restarting its
+process. To clear the mobile database and local demo state on a test phone:
 
 ```bash
 adb shell pm clear in.meshsetu.meshsetu_mobile

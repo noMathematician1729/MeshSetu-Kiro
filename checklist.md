@@ -12,7 +12,7 @@ each item lands.
 - [x] `feature/stt`: `OfflineSttEngine` contract + null stub
 - [x] `feature/triage`: deterministic safety rules
 - [x] `feature/gateway`: HTTP bridge to dashboard
-- [x] `dashboard/`: FastAPI + browser control room (tested locally: POST/GET/`/` all 200)
+- [x] `backend/` + `admin-dashboard/`: control-room API and browser UI
 - [x] Riverpod wiring + app shell integration (join -> rooms -> sos navigable flow, cross-isolate mesh bridge)
 - [x] Verify: `dart analyze` clean, `flutter test` 59/59 passing (12 Dev B tests), `dart format` applied, `flutter build apk --debug` succeeds, dashboard unit/integration test passes
 

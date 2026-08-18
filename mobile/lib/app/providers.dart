@@ -51,8 +51,12 @@ final offlineSttEngineProvider = Provider<OfflineSttEngine>(
   (ref) => SherpaOnnxEnglishSttEngine(),
 );
 
+/// Default Render deployment used by the event gateway. This can still be
+/// overridden from the Gateway screen for local development or another site.
+const productionBackendUrl = 'https://sih26-1xdevs.onrender.com';
+
 final gatewayUrlProvider = StateProvider<String>(
-  (ref) => '',
+  (ref) => productionBackendUrl,
 );
 final gatewayEnabledProvider = StateProvider<bool>((ref) => true);
 final gatewayDemoKeyProvider = StateProvider<String>((ref) => 'change-me');
