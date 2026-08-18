@@ -1,13 +1,41 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createRoot } from 'react-dom/client'
 import { authToken, getEvents, getVoice, login, openStream, setStatus, setToken } from './api'
+import MarketingApp from './marketing/App.jsx'
+import marketingStyles from './marketing/styles.css?inline'
 
 const priorityRank = { p0Critical: 0, p1High: 1, p2Normal: 2, p3Bulk: 3 }
 const statusLabels = { new: 'new', acknowledged: 'acknowledged', dispatched: 'dispatched', resolved: 'resolved' }
+const controlRoomPath = '/control-room'
+const isolatedMarketingStyles = marketingStyles
+  .replace(/:root/g, ':host')
+  .replace(/\bhtml\b/g, '.marketing-root')
+  .replace(/\bbody\b/g, '.marketing-root')
 
 function Login({ onLogin }) { const [email, setEmail] = useState('operator@meshsetu.local'); const [password, setPassword] = useState('meshsetu-demo'); const [error, setError] = useState(''); const submit = async e => { e.preventDefault(); try { await login(email, password); onLogin() } catch (err) { setError(err.message) } }; return <main className="login-shell"><div className="login-card"><div className="brand"><i /> MESHSETU</div><span className="eyebrow">AUTHORITY ACCESS / LOCAL CONTROL ROOM</span><h1>Operator<br /><em>sign in.</em></h1><form onSubmit={submit}><label>Operator email<input value={email} onChange={e => setEmail(e.target.value)} type="email" /></label><label>Access password<input value={password} onChange={e => setPassword(e.target.value)} type="password" /></label>{error && <p className="error">{error}</p>}<button className="primary">Enter control room ↗</button></form><small>Local server · no internet required</small></div></main> }
 
 function Badge({ children, tone = '' }) { return <span className={`badge ${tone}`}>{children}</span> }
-function App() { const [signedIn, setSignedIn] = useState(Boolean(authToken())); return signedIn ? <ControlRoom onLogout={() => { setToken(''); setSignedIn(false) }} /> : <Login onLogin={() => setSignedIn(true)} /> }
+
+function MarketingPage() {
+  const hostRef = useRef(null)
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = ''
+    const style = document.createElement('style')
+    style.textContent = isolatedMarketingStyles
+    const mount = document.createElement('div')
+    shadow.append(style, mount)
+    const root = createRoot(mount)
+    root.render(<div className="marketing-root"><MarketingApp /></div>)
+    return () => root.unmount()
+  }, [])
+  return <div className="marketing-shell"><a className="marketing-link" href={controlRoomPath}>Open control room</a><div ref={hostRef} /></div>
+}
+
+function ControlRoomApp() { const [signedIn, setSignedIn] = useState(Boolean(authToken())); return signedIn ? <ControlRoom onLogout={() => { setToken(''); setSignedIn(false) }} /> : <Login onLogin={() => setSignedIn(true)} /> }
+function App() { return window.location.pathname.startsWith(controlRoomPath) ? <ControlRoomApp /> : <MarketingPage /> }
 
 function ControlRoom({ onLogout }) { const [events, setEvents] = useState([]); const [selectedId, setSelectedId] = useState(''); const [connection, setConnection] = useState('connecting'); const [error, setError] = useState(''); const [filter, setFilter] = useState('all'); const [voiceUrl, setVoiceUrl] = useState('');
   const load = () => getEvents().then(next => { setEvents(next.sort((a, b) => (priorityRank[a.priority] ?? 9) - (priorityRank[b.priority] ?? 9))); setError('') }).catch(err => setError(err.message))
