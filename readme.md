@@ -27,4 +27,4 @@ Install `mobile/build/app/outputs/flutter-apk/app-debug.apk` on physical BLE-cap
 - Privacy-safe newline-delimited protocol metrics and a deterministic lossy-frame test hook.
 
 The phone implementation is an application-layer BLE overlay. It is not Bluetooth SIG Mesh certification, live voice streaming, or a production enrollment/security ceremony. Room persistence, the control-room backend, audio/Opus, STT, triage, and QR UX attach through the frozen interfaces described in `context.md`.
-+3
++4
