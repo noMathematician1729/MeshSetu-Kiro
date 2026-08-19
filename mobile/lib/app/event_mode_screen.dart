@@ -658,7 +658,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
       final (success, detail) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
-        siteId: MeshEventController.siteId,
+        siteId: MeshEventController.demoSiteId,
         originId: originId,
         sequence: sequence,
       );
