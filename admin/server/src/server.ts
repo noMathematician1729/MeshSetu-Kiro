@@ -103,7 +103,7 @@ app.get('/v1/profiles/:uid', bearer, async (req, res) => { const profile = await
 app.get('/v1/profiles', bearer, async (_req, res) => res.json(await store.allProfiles()))
 
 // CEAL-style compact SOS alert with UID→profile resolution.
-const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().optional(), origin_id: z.number().optional(), sequence: z.number().optional() })
+const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional() })
 app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const parsed = cealSosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid CEAL SOS', details: parsed.error.issues })
   const profile = await store.getProfile(parsed.data.reporter_uid)
