@@ -10,6 +10,15 @@ export class EventStore {
   async init() {
     if (!this.pool) return
     await this.pool.query(`CREATE TABLE IF NOT EXISTS sos_incidents (event_id text PRIMARY KEY, object_id text UNIQUE NOT NULL, site_id text NOT NULL, room_id text, priority text NOT NULL, incident_type text NOT NULL, transcript text, stt_confidence real, triage_confidence real, hazards jsonb NOT NULL DEFAULT '[]', rationale jsonb NOT NULL DEFAULT '[]', input_mode text, zone text, latitude double precision, longitude double precision, accuracy_m real, location_captured_at_ms bigint, hops integer NOT NULL DEFAULT 0, relay_latency_ms integer, created_at_ms bigint, expires_at_ms bigint, received_at_ms bigint NOT NULL, packet_sha256 text NOT NULL, decrypt_status text NOT NULL, voice_clip_id text, audio_state text, status text NOT NULL DEFAULT 'new', audio_bytes bytea, audio_sha256 text, audio_content_type text, reporter_uid text, reporter_name text, reporter_phone text, reporter_language text, reporter_blood_group text, reporter_primary_contact text, updated_at timestamptz NOT NULL DEFAULT now())`)
+    // Migration: add reporter columns to existing tables created before this schema version.
+    await this.pool.query(`DO $$ BEGIN
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_uid text;
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_name text;
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_phone text;
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_language text;
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_blood_group text;
+      ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_primary_contact text;
+    END $$`)
     await this.pool.query(`CREATE TABLE IF NOT EXISTS user_profiles (reporter_uid text PRIMARY KEY, name text NOT NULL, phone text NOT NULL, language text NOT NULL DEFAULT 'English', blood_group text, allergies text, conditions text, primary_contact_name text, primary_contact_phone text, emergency_contacts jsonb NOT NULL DEFAULT '[]', registered_at_ms bigint NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`)
   }
   async upsert(record: EventRecord) {

@@ -198,12 +198,13 @@ class MeshBridgeClient {
         : '';
     if (reporterUid.isEmpty) return;
     try {
-      await bridge.forwardCealSos(
+      final (success, _) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
         siteId: _siteId ?? 'demo-site',
         originId: originId,
         sequence: sequence,
       );
+      if (!success) _forwardedCompactAlerts.remove(dedupeKey);
     } catch (_) {
       // Best-effort: if connectivity is unavailable, the alert was still
       // shown locally and may be forwarded by another peer with Wi-Fi.

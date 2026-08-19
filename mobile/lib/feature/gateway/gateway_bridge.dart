@@ -129,7 +129,7 @@ class GatewayBridge {
 
   /// CEAL-style: forward a compact BLE SOS alert (UID-only) to the backend
   /// so it can resolve the reporter's profile and create an enriched event.
-  Future<bool> forwardCealSos({
+  Future<(bool, String)> forwardCealSos({
     required String reporterUid,
     required String siteId,
     int? originId,
@@ -152,9 +152,12 @@ class GatewayBridge {
             }),
           )
           .timeout(const Duration(seconds: 12));
-      return response.statusCode >= 200 && response.statusCode < 300;
-    } catch (_) {
-      return false;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return (true, 'ok');
+      }
+      return (false, 'HTTP ${response.statusCode}: ${response.body}');
+    } catch (error) {
+      return (false, '$error');
     }
   }
 }

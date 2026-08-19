@@ -800,7 +800,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final key = ref.read(gatewayDemoKeyProvider);
       if (url.isNotEmpty && key.isNotEmpty) {
         final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
-        final success = await bridge.forwardCealSos(
+        final (success, detail) = await bridge.forwardCealSos(
           reporterUid: profile.reporterUid,
           siteId: MeshEventController.siteId,
           originId: originId,
@@ -810,8 +810,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             () => _status = success
                 ? 'MeshSetu\nCEAL SOS sent to admin ✓ (UID: ${profile.reporterUid})\n'
                       'Backend resolved UID→profile for dashboard'
-                : 'MeshSetu\nCEAL BLE broadcast sent, but admin forwarding failed\n'
-                      'Another phone with Wi-Fi may relay it',
+                : 'MeshSetu\nCEAL BLE broadcast sent · admin: $detail',
           );
         }
       } else {
