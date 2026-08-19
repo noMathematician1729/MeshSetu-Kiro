@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/data/database.dart';
 import '../feature/join/join_repository.dart';
+import '../feature/gateway/gateway_bridge.dart';
 import '../feature/onboarding/onboarding_profile.dart';
 import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/rooms/room_repository.dart';
@@ -43,9 +44,15 @@ final roomRepositoryProvider = Provider.family<RoomRepository, String>(
   (ref, siteId) => RoomRepository(ref.watch(databaseProvider), siteId: siteId),
 );
 
-final onboardingRepositoryProvider = Provider<OnboardingRepository>(
-  (ref) => OnboardingRepository(),
-);
+final onboardingRepositoryProvider = Provider<OnboardingRepository>((ref) {
+  final url = ref.watch(gatewayUrlProvider);
+  final key = ref.watch(gatewayDemoKeyProvider);
+  final enabled = ref.watch(gatewayEnabledProvider);
+  final bridge = (enabled && url.isNotEmpty && key.isNotEmpty)
+      ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
+      : null;
+  return OnboardingRepository(null, bridge);
+});
 
 final onboardingProfileProvider = FutureProvider<OnboardingProfile?>((ref) {
   return ref.watch(onboardingRepositoryProvider).load();

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../gateway/gateway_bridge.dart';
 import 'onboarding_profile.dart';
 
 abstract interface class OnboardingStorage {
@@ -45,10 +46,11 @@ final class MemoryOnboardingStorage implements OnboardingStorage {
 }
 
 final class OnboardingRepository {
-  OnboardingRepository([OnboardingStorage? storage])
+  OnboardingRepository([OnboardingStorage? storage, this._gatewayBridge])
     : _storage = storage ?? SecureOnboardingStorage();
 
   final OnboardingStorage _storage;
+  final GatewayBridge? _gatewayBridge;
 
   Future<OnboardingProfile?> load() async {
     final encoded = await _storage.read();
@@ -74,6 +76,32 @@ final class OnboardingRepository {
     if (error != null) throw ArgumentError(error);
     final normalized = profile.withReporterUid(_reporterUid(profile));
     await _storage.write(jsonEncode(normalized.toJson()));
+    // Best-effort backend registration (CEAL-style). Fire-and-forget:
+    // if the user has no connectivity at onboarding time, the profile is
+    // still persisted locally and the SOS will carry identity in the
+    // encrypted GATT payload. Backend registration enables UID-only
+    // compact SOS resolution.
+    _tryRegisterWithBackend(normalized);
+  }
+
+  void _tryRegisterWithBackend(OnboardingProfile profile) {
+    final bridge = _gatewayBridge;
+    if (bridge == null) return;
+    // Fire and forget — do not block save on connectivity.
+    bridge.registerProfile({
+      'reporter_uid': profile.reporterUid,
+      'name': profile.name,
+      'phone': profile.phone,
+      'language': profile.language,
+      'blood_group': profile.medicalProfile.bloodGroup,
+      'allergies': profile.medicalProfile.allergies,
+      'conditions': profile.medicalProfile.conditions,
+      'primary_contact_name': profile.primaryContact.name,
+      'primary_contact_phone': profile.primaryContact.phone,
+      'emergency_contacts': [
+        for (final contact in profile.emergencyContacts) contact.toJson(),
+      ],
+    });
   }
 
   Future<bool> isOnboarded() async => await load() != null;
@@ -85,8 +113,8 @@ final class OnboardingRepository {
       '${profile.profileId}:${profile.phone.replaceAll(RegExp(r'[^0-9+]'), '')}',
     );
     final digest = sha256.convert(material).bytes;
-    return Uint8List.fromList(digest.take(6).toList())
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join();
+    return Uint8List.fromList(
+      digest.take(6).toList(),
+    ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
   }
 }

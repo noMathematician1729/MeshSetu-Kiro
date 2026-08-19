@@ -106,6 +106,57 @@ class GatewayBridge {
     'hops': envelope.hopCount,
     'audio_state': 'n/a',
   };
+
+  /// CEAL-style: register the onboarded user profile with the backend so
+  /// UID→profile resolution works when only a compact BLE alert is received.
+  Future<bool> registerProfile(Map<String, Object?> profile) async {
+    try {
+      final response = await http
+          .post(
+            baseUrl.resolve('/v1/profiles'),
+            headers: {
+              'content-type': 'application/json',
+              'x-meshsetu-gateway-key': demoKey,
+            },
+            body: jsonEncode(profile),
+          )
+          .timeout(const Duration(seconds: 12));
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// CEAL-style: forward a compact BLE SOS alert (UID-only) to the backend
+  /// so it can resolve the reporter's profile and create an enriched event.
+  Future<bool> forwardCealSos({
+    required String reporterUid,
+    required String siteId,
+    int? originId,
+    int? sequence,
+  }) async {
+    try {
+      final response = await http
+          .post(
+            baseUrl.resolve('/v1/gateway/ceal-sos'),
+            headers: {
+              'content-type': 'application/json',
+              'x-meshsetu-gateway-key': demoKey,
+            },
+            body: jsonEncode({
+              'reporter_uid': reporterUid,
+              'site_id': siteId,
+              'origin_id': originId,
+              'sequence': sequence,
+              'received_at_ms': DateTime.now().millisecondsSinceEpoch,
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 // The actual forwarding trigger lives in `app/mesh_bridge_client.dart`:

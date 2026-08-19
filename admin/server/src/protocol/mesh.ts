@@ -17,7 +17,12 @@ const sosSchema = z.object({
   inputMode: z.enum(['tap', 'text', 'voice']), locationHint: z.string().default(''),
   logicalZone: z.string().default(''), voiceClipId: z.string().default(''),
   lat: z.number().nullable().optional(), lon: z.number().nullable().optional(),
-  accuracyM: z.number().nullable().optional(), locationCapturedAtMs: z.number().int().nullable().optional()
+  accuracyM: z.number().nullable().optional(), locationCapturedAtMs: z.number().int().nullable().optional(),
+  reporter: z.object({
+    uid: z.string(), name: z.string(), phone: z.string(),
+    language: z.string(), bloodGroup: z.string(),
+    primaryContactName: z.string(), primaryContactPhone: z.string()
+  }).nullable().optional()
 })
 
 const voiceSchema = z.object({ version: z.literal(1), sosEventId: z.string().min(1), clipId: z.string().min(1), codec: z.literal('opus'), sampleRateHz: z.number(), channels: z.number(), bytes: z.string(), sha256: z.string().length(64) })

@@ -247,6 +247,24 @@ class _MeshEventTaskHandler extends TaskHandler {
       unawaited(_submitMeshObject(envelope));
       return;
     }
+    if (data is Map && data['broadcast_ceal_sos'] == true) {
+      final originId = data['originId'] as int?;
+      final controller = _controller;
+      if (controller != null) {
+        unawaited(
+          controller.broadcastCompactSos(isTest: false, originId: originId),
+        );
+        FlutterForegroundTask.sendDataToMain(const {
+          'status': 'ceal_sos_broadcast_ok',
+        });
+      } else {
+        FlutterForegroundTask.sendDataToMain(const {
+          'status': 'sos_failed',
+          'message': 'event mode not ready',
+        });
+      }
+      return;
+    }
     if (data != 'send_test_sos') return;
     final controller = _controller;
     if (controller == null) {
@@ -320,6 +338,16 @@ class _MeshEventTaskHandler extends TaskHandler {
   void _announceCompactSos(MeshSosAdvertisement alert) {
     _compactAlertKeys.add(alert.dedupeKey);
     unawaited(_showCompactSosNotification(alert));
+    // Forward to the UI isolate so MeshBridgeClient can relay to admin backend.
+    if (!alert.isTest) {
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'compact_sos_received',
+        'originId': alert.originId,
+        'sequence': alert.sequence,
+        'siteFingerprint': alert.siteFingerprint,
+        'dedupeKey': alert.dedupeKey,
+      });
+    }
   }
 
   Future<void> _announceReceivedSos(ReceivedObject received) async {
@@ -330,7 +358,10 @@ class _MeshEventTaskHandler extends TaskHandler {
       final location = sos.latitude == null || sos.longitude == null
           ? 'location unavailable'
           : 'GPS attached';
-      detail = 'Priority ${sos.triagePriority.name} · $location';
+      final reporter = sos.reporter?.name;
+      detail = reporter != null && reporter.isNotEmpty
+          ? 'From $reporter · ${sos.triagePriority.name} · $location'
+          : 'Priority ${sos.triagePriority.name} · $location';
     } catch (_) {
       // A random/test structured frame is not an SOS notification.
       return;
@@ -470,6 +501,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         setState(() {
           _status =
               'MeshSetu\n${data['message'] ?? 'Test SOS could not queue'}';
+        });
+      case 'compact_sos_received':
+        setState(() {
+          _status =
+              'MeshSetu\nCompact SOS alert received · forwarding to admin';
         });
       case 'mesh_test_origin_submitted':
         final envelopeJson = data['envelope'];
@@ -730,6 +766,56 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     );
   }
 
+  Future<void> _confirmAndSendCealSos() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (!mounted) return;
+    if (profile == null) {
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _SosCountdownDialog(),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(
+      () => _status = 'MeshSetu\nBroadcasting CEAL-style compact SOS alert…',
+    );
+    try {
+      // Convert the first 4 bytes of the 6-byte reporterUid hex into an int
+      // to use as the BLE advertisement originId (CEAL's pseudonymous UID).
+      final uidHex = profile.reporterUid.padRight(8, '0').substring(0, 8);
+      final originId = int.parse(uidHex, radix: 16);
+      FlutterForegroundTask.sendDataToTask({
+        'broadcast_ceal_sos': true,
+        'originId': originId,
+      });
+      // Also forward to the admin backend for UID→profile resolution.
+      final bridge = _bridgeClient?.gatewayBridge;
+      if (bridge != null) {
+        bridge.forwardCealSos(
+          reporterUid: profile.reporterUid,
+          siteId: MeshEventController.siteId,
+          originId: originId,
+        );
+      }
+      if (mounted) {
+        setState(
+          () => _status =
+              'MeshSetu\nCEAL-style SOS broadcast sent (UID-only, no payload)\n'
+              'Backend will resolve UID→profile if registered',
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nCEAL SOS broadcast failed: $error');
+      }
+    }
+  }
+
   Future<void> _openSos() async {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted) return;
@@ -923,6 +1009,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 label: Text(
                   _sosPacketSending ? 'Queuing SOS packet…' : 'Send SOS packet',
                 ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _eventModeActive ? _confirmAndSendCealSos : null,
+                icon: const Icon(Icons.cell_tower),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.deepOrange,
+                ),
+                label: const Text('Send CEAL-style SOS'),
               ),
               const SizedBox(height: 12),
               OutlinedButton.icon(

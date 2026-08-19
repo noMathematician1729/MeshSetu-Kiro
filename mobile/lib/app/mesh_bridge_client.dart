@@ -36,11 +36,13 @@ class MeshBridgeClient {
   final Set<int> _storedObjectIds = {};
   final Set<int> _forwardedObjectIds = {};
   final Set<int> _forwardingObjectIds = {};
+  final Set<String> _forwardedCompactAlerts = {};
   Timer? _inboxSyncTimer;
   bool _syncingInbox = false;
 
   /// Non-null only on the one phone acting as gateway (Bible §15.1);
   /// [feature/gateway/gateway_screen.dart] flips this on/off.
+  GatewayBridge? get gatewayBridge => _gatewayBridge;
   set gatewayBridge(GatewayBridge? bridge) {
     _gatewayBridge = bridge;
     if (bridge != null) unawaited(_syncRelayInbox());
@@ -149,9 +151,13 @@ class MeshBridgeClient {
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
         if (envelopeJson is! Map || _gatewayBridge == null) return;
-        unawaited(_forwardOriginSos(
-          MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
-        ));
+        unawaited(
+          _forwardOriginSos(
+            MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
+          ),
+        );
+      case 'compact_sos_received':
+        unawaited(_forwardCompactSos(data));
       case 'error' || 'stopped':
         _failPendingSubmissions(
           StateError(data['message'] as String? ?? 'foreground mesh stopped'),
@@ -161,12 +167,47 @@ class MeshBridgeClient {
 
   Future<void> _forwardOriginSos(MeshEnvelope envelope) async {
     final bridge = _gatewayBridge;
-    if (bridge == null || envelope.payloadType != PayloadType.structuredSos) return;
+    if (bridge == null || envelope.payloadType != PayloadType.structuredSos) {
+      return;
+    }
     try {
       final sos = StructuredSosPayload.decode(envelope.payload);
-      await bridge.postToDashboard(bridge.eventJson(envelope: envelope, sos: sos));
+      await bridge.postToDashboard(
+        bridge.eventJson(envelope: envelope, sos: sos),
+      );
     } catch (_) {
       // The durable mesh object remains available for retry through the normal gateway path.
+    }
+  }
+
+  /// Forwards a received CEAL-style compact SOS alert to the admin backend
+  /// for UID→profile resolution. Every phone with connectivity acts as a
+  /// beacon/gateway for UID-only alerts, matching CEAL's architecture.
+  Future<void> _forwardCompactSos(Map data) async {
+    final bridge = _gatewayBridge;
+    if (bridge == null) return;
+    final dedupeKey = data['dedupeKey'] as String?;
+    if (dedupeKey == null || !_forwardedCompactAlerts.add(dedupeKey)) return;
+    final originId = data['originId'] as int?;
+    final sequence = data['sequence'] as int?;
+    // Derive the reporterUid hex from originId (reverse of the 4-byte
+    // truncation used when broadcasting). This is a best-effort match;
+    // the backend will try to resolve it.
+    final reporterUid = originId != null
+        ? originId.toRadixString(16).padLeft(8, '0')
+        : '';
+    if (reporterUid.isEmpty) return;
+    try {
+      await bridge.forwardCealSos(
+        reporterUid: reporterUid,
+        siteId: _siteId ?? 'demo-site',
+        originId: originId,
+        sequence: sequence,
+      );
+    } catch (_) {
+      // Best-effort: if connectivity is unavailable, the alert was still
+      // shown locally and may be forwarded by another peer with Wi-Fi.
+      _forwardedCompactAlerts.remove(dedupeKey);
     }
   }
 
@@ -311,5 +352,6 @@ class MeshBridgeClient {
     _storedObjectIds.clear();
     _forwardedObjectIds.clear();
     _forwardingObjectIds.clear();
+    _forwardedCompactAlerts.clear();
   }
 }
