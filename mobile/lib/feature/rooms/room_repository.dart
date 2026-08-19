@@ -73,7 +73,16 @@ class RoomRepository {
         );
   }
 
-  Stream<List<RoomMessage>> watch(String roomId) {
+  Stream<List<RoomMessage>> watch({
+    required RoomPolicy policy,
+    required Set<String> userRoles,
+  }) {
+    if (!canRead(policy, userRoles)) {
+      return Stream.error(
+        StateError('not authorized to read ${policy.roomId}'),
+      );
+    }
+    final roomId = policy.roomId;
     return Stream.multi((controller) {
       var closed = false;
       var loading = false;

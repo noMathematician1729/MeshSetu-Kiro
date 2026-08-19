@@ -215,10 +215,11 @@ void main() {
     expect(manifest.siteName, 'Safety drill');
     expect(manifest.rooms.single.roomId, 'public');
     final result = await repository.parseAndValidateQr(
-      EventManifestCodec.encode(manifest),
+      EventManifestCodec.encode(manifest, roomId: 'public'),
     );
     expect(result, isA<JoinOk>());
     expect((result as JoinOk).manifest.siteId, manifest.siteId);
+    expect(result.roomId, 'public');
     expect(await repository.activeManifest(), isNotNull);
   });
 
@@ -368,7 +369,10 @@ void main() {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
     final repo = RoomRepository(db, siteId: 'site');
-    final stream = repo.watch('public');
+    final stream = repo.watch(
+      policy: policyForRole('public', 'public'),
+      userRoles: const {'public'},
+    );
     final message = expectLater(
       stream,
       emitsThrough(
@@ -392,6 +396,19 @@ void main() {
     );
     await message;
   });
+
+  test(
+    'RoomRepository does not expose a restricted room to public users',
+    () async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final stream = RoomRepository(db, siteId: 'site').watch(
+        policy: policyForRole('medical', 'medical'),
+        userRoles: const {'public'},
+      );
+      await expectLater(stream, emitsError(isA<StateError>()));
+    },
+  );
 
   test('OutboxSender recovers relaying rows after a restart', () async {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());

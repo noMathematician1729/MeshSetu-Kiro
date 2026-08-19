@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -25,9 +26,42 @@ import 'test_sos_packet.dart';
 ///
 /// The foreground task owns one instance of this controller so scanning and
 /// relay processing continue after the Activity is paused or destroyed.
+final class MeshSiteConfiguration {
+  const MeshSiteConfiguration({required this.siteId, required this.namespace});
+
+  static const demo = MeshSiteConfiguration(
+    siteId: MeshEventController.demoSiteId,
+    namespace: MeshEventController.demoSiteNamespace,
+  );
+
+  final String siteId;
+  final String namespace;
+
+  /// Keeps existing demo phones interoperable while giving every locally
+  /// created event its own BLE discovery and encryption scope.
+  factory MeshSiteConfiguration.forSite(String siteId) =>
+      siteId == MeshEventController.demoSiteId
+      ? demo
+      : MeshSiteConfiguration(siteId: siteId, namespace: 'meshsetu-event-v1');
+
+  String encode() => jsonEncode({'siteId': siteId, 'namespace': namespace});
+
+  static MeshSiteConfiguration? decode(String raw) {
+    try {
+      final map = jsonDecode(raw) as Map<String, Object?>;
+      final siteId = map['siteId'] as String;
+      final namespace = map['namespace'] as String;
+      if (siteId.trim().isEmpty || namespace.trim().isEmpty) return null;
+      return MeshSiteConfiguration(siteId: siteId, namespace: namespace);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class MeshEventController {
-  static const String siteId = 'demo-site';
-  static const String siteNamespace = 'demo';
+  static const String demoSiteId = 'demo-site';
+  static const String demoSiteNamespace = 'demo';
   static const int capabilityRelay = 1;
   static const int capabilityVoice = 1 << 3;
 
@@ -42,6 +76,7 @@ class MeshEventController {
   });
 
   MeshEventController({
+    this.configuration = MeshSiteConfiguration.demo,
     this.onPeerState,
     this.onMeshStatus,
     this.onMetrics,
@@ -51,6 +86,7 @@ class MeshEventController {
     this.onCompactSosAlert,
   });
 
+  final MeshSiteConfiguration configuration;
   final void Function(List<PeerState> peers)? onPeerState;
   final void Function(String status)? onMeshStatus;
   final void Function(List<RelayMetric> metrics)? onMetrics;
@@ -96,8 +132,8 @@ class MeshEventController {
     try {
       if (kDebugMode) await UniversalBle.setLogLevel(BleLogLevel.debug);
       final siteFingerprint = MeshGatt.siteFingerprint(
-        siteId,
-        namespace: siteNamespace,
+        configuration.siteId,
+        namespace: configuration.namespace,
       );
       _localToken = _randomNonZero32();
 
@@ -108,11 +144,11 @@ class MeshEventController {
       _jsonMetricSink = JsonLineMetricSink(metricSink);
 
       final siteKeyBytes = await DeviceKeyStore.getOrCreateSiteKey(
-        siteId,
-        SiteKeyProvisioning.demoKey(siteId),
+        configuration.siteId,
+        SiteKeyProvisioning.demoKey(configuration.siteId),
       );
       final relay = MeshRelayEngine(
-        siteId: siteId,
+        siteId: configuration.siteId,
         crypto: AeadEnvelope(siteKeyBytes),
         store: FileRelayStore(Directory('${documentsDir.path}/mesh-relay')),
         clockMs: () => DateTime.now().millisecondsSinceEpoch,
@@ -372,18 +408,18 @@ class MeshEventController {
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final envelope = MeshEnvelope(
-        objectId: _randomNonZero64(),
-        eventId: _randomUuidV4(),
-        siteId: siteId,
-        roomId: 'public',
-        createdAtMs: now,
-        expiresAtMs: now + 60000,
-        hopCount: 0,
-        hopLimit: 4,
-        priority: PriorityBand.p0Critical,
-        payloadType: PayloadType.structuredSos,
-        payload: TestSosPacket.payload,
-        originEphemeralId: _localToken,
+      objectId: _randomNonZero64(),
+      eventId: _randomUuidV4(),
+      siteId: configuration.siteId,
+      roomId: 'public',
+      createdAtMs: now,
+      expiresAtMs: now + 60000,
+      hopCount: 0,
+      hopLimit: 4,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: TestSosPacket.payload,
+      originEphemeralId: _localToken,
     );
     await coordinator.send(envelope);
     return envelope;

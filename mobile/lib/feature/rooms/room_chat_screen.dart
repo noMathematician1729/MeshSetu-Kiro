@@ -47,8 +47,23 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final userRoles = ref.watch(userRolesProvider);
+    final policy = policyForRole(widget.roomId, widget.role);
+    if (!canRead(policy, userRoles)) {
+      return Scaffold(
+        appBar: AppBar(title: Text(widget.roomName)),
+        body: const Center(
+          child: Text('You are not authorized to view this room.'),
+        ),
+      );
+    }
     final messages = ref.watch(
-      roomMessagesProvider((siteId: widget.siteId, roomId: widget.roomId)),
+      roomMessagesProvider((
+        siteId: widget.siteId,
+        roomId: widget.roomId,
+        role: widget.role,
+        userRoles: userRoles,
+      )),
     );
     return Scaffold(
       appBar: AppBar(title: Text(widget.roomName)),

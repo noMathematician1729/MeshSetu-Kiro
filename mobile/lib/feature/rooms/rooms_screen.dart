@@ -8,6 +8,7 @@ import '../join/manifest.dart';
 import '../sos/sos_screen.dart';
 import '../voice/voice_inbox_screen.dart';
 import 'room_chat_screen.dart';
+import 'room_policy.dart';
 
 String _roomIdFromName(String name) {
   final slug = name
@@ -21,12 +22,22 @@ String _roomIdFromName(String name) {
 
 /// Room list for the joined site (Bible §20.5: "Join -> Rooms -> SOS flow
 /// is understandable in under 30 seconds").
-class RoomsScreen extends ConsumerWidget {
-  const RoomsScreen({super.key});
+class RoomsScreen extends ConsumerStatefulWidget {
+  const RoomsScreen({super.key, this.initialRoomId});
+
+  final String? initialRoomId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<RoomsScreen> createState() => _RoomsScreenState();
+}
+
+class _RoomsScreenState extends ConsumerState<RoomsScreen> {
+  bool _openedInitialRoom = false;
+
+  @override
+  Widget build(BuildContext context) {
     final site = ref.watch(activeSiteProvider);
+    final userRoles = ref.watch(userRolesProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('Rooms')),
       body: site.when(
@@ -36,6 +47,19 @@ class RoomsScreen extends ConsumerWidget {
           if (manifest == null) {
             return const Center(child: Text('Join an event first.'));
           }
+          final readableRooms = [
+            for (final room in manifest.rooms)
+              if (canRead(
+                policyForRole(
+                  room.roomId,
+                  room.role,
+                  ttlSeconds: room.ttlSeconds,
+                ),
+                userRoles,
+              ))
+                room,
+          ];
+          _openInitialRoomIfAvailable(context, manifest, readableRooms);
           return ListView(
             children: [
               Padding(
@@ -84,7 +108,7 @@ class RoomsScreen extends ConsumerWidget {
                 ),
               ),
               const Divider(),
-              for (final room in manifest.rooms)
+              for (final room in readableRooms)
                 ListTile(
                   leading: const Icon(Icons.forum_outlined),
                   title: Text(room.name),
@@ -110,6 +134,32 @@ class RoomsScreen extends ConsumerWidget {
         },
       ),
     );
+  }
+
+  void _openInitialRoomIfAvailable(
+    BuildContext context,
+    EventManifest manifest,
+    List<RoomManifest> rooms,
+  ) {
+    final roomId = widget.initialRoomId;
+    if (_openedInitialRoom || roomId == null) return;
+    _openedInitialRoom = true;
+    final matches = rooms.where((room) => room.roomId == roomId);
+    if (matches.isEmpty) return;
+    final room = matches.first;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RoomChatScreen(
+            siteId: manifest.siteId,
+            roomId: room.roomId,
+            roomName: room.name,
+            role: room.role,
+          ),
+        ),
+      );
+    });
   }
 
   Future<void> _createRoom(BuildContext context, WidgetRef ref) async {

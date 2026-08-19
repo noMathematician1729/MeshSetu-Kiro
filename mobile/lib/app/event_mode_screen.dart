@@ -34,6 +34,7 @@ import 'providers.dart';
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event-v2';
 const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
+const String _meshSiteConfigurationKey = 'mesh-site-configuration';
 final FlutterLocalNotificationsPlugin _sosNotifications =
     FlutterLocalNotificationsPlugin();
 bool _sosNotificationsInitialized = false;
@@ -131,7 +132,15 @@ class _MeshEventTaskHandler extends TaskHandler {
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     DartPluginRegistrant.ensureInitialized();
     try {
+      final savedConfiguration = await FlutterForegroundTask.getData<String>(
+        key: _meshSiteConfigurationKey,
+      );
+      final configuration = savedConfiguration == null
+          ? MeshSiteConfiguration.demo
+          : MeshSiteConfiguration.decode(savedConfiguration) ??
+                MeshSiteConfiguration.demo;
       final controller = MeshEventController(
+        configuration: configuration,
         zoneResolver: MeshEventController.demoZoneResolver,
         onPeerState: (peers) => FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_peers',
@@ -239,6 +248,16 @@ class _MeshEventTaskHandler extends TaskHandler {
 
   @override
   void onReceiveData(Object data) {
+    if (data is Map && data['meshSiteConfiguration'] is String) {
+      final configuration = MeshSiteConfiguration.decode(
+        data['meshSiteConfiguration'] as String,
+      );
+      if (configuration != null &&
+          configuration.siteId != _controller?.configuration.siteId) {
+        unawaited(_restartForSite(configuration));
+      }
+      return;
+    }
     if (data is Map && data['debugLoss'] is bool) {
       _debugLossEnabled = data['debugLoss'] as bool;
       _controller?.setDebugLossInjection(_debugLossEnabled);
@@ -276,6 +295,18 @@ class _MeshEventTaskHandler extends TaskHandler {
     } else {
       unawaited(_sendTestSos(controller));
     }
+  }
+
+  Future<void> _restartForSite(MeshSiteConfiguration configuration) async {
+    await _incomingSubscription?.cancel();
+    _incomingSubscription = null;
+    await _controller?.stop();
+    _controller = null;
+    await FlutterForegroundTask.saveData(
+      key: _meshSiteConfigurationKey,
+      value: configuration.encode(),
+    );
+    await onStart(DateTime.now(), TaskStarter.developer);
   }
 
   Future<void> _sendTestSos(MeshEventController controller) async {
@@ -371,7 +402,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       return;
     }
     final compactKey =
-        '${MeshGatt.siteFingerprint(MeshEventController.siteId, namespace: MeshEventController.siteNamespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
+        '${MeshGatt.siteFingerprint(received.envelope.siteId, namespace: MeshSiteConfiguration.forSite(received.envelope.siteId).namespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
     if (_compactAlertKeys.remove(compactKey)) return;
     await _showSosNotification(received: received, detail: detail);
     try {
@@ -688,6 +719,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         throw StateError('Notification permission is required for event mode');
       }
 
+      await _saveActiveMeshConfiguration();
+
       final result = await FlutterForegroundTask.startService(
         serviceId: _notificationServiceId,
         notificationTitle: 'MeshSetu event mode active',
@@ -760,7 +793,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final repo = ref.read(sosRepositoryProvider);
       final eventId = await repo.createDraft(
         SosInput(
-          siteId: site?.siteId ?? MeshEventController.siteId,
+          siteId: site?.siteId ?? MeshEventController.demoSiteId,
           roomId: site?.rooms.isNotEmpty == true
               ? site!.rooms.first.roomId
               : 'public',
@@ -840,7 +873,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
         final (success, detail) = await bridge.forwardCealSos(
           reporterUid: profile.reporterUid,
-          siteId: MeshEventController.siteId,
+          siteId:
+              (await ref.read(joinRepositoryProvider).activeManifest())
+                  ?.siteId ??
+              MeshEventController.demoSiteId,
           originId: originId,
         );
         if (mounted) {
@@ -872,7 +908,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => SosScreen(
-          siteId: site?.siteId ?? MeshEventController.siteId,
+          siteId: site?.siteId ?? MeshEventController.demoSiteId,
           roomId: site?.rooms.isNotEmpty == true
               ? site!.rooms.first.roomId
               : 'public',
@@ -893,10 +929,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: (_) {
+          onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -908,10 +946,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: (_) {
+          onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -926,7 +966,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -939,10 +981,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   Future<void> _startBridgeForActiveSite() async {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted || !_eventModeActive) return;
+    await _configureForegroundMeshSite(site?.siteId);
     _bridgeClient ??= MeshBridgeClient(ref.read(databaseProvider));
     if (!_bridgeClientSiteStarted) {
       _bridgeClient!.start(
-        siteId: site?.siteId ?? MeshEventController.siteId,
+        siteId: site?.siteId ?? MeshEventController.demoSiteId,
         localEphemeralId: _randomEphemeralId(),
       );
       _bridgeClientSiteStarted = true;
@@ -950,6 +993,30 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _bridgeClient!.setSiteId(site.siteId);
     }
     _applyGatewaySettings();
+  }
+
+  Future<void> _saveActiveMeshConfiguration() async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    final configuration = MeshSiteConfiguration.forSite(
+      site?.siteId ?? MeshEventController.demoSiteId,
+    );
+    await FlutterForegroundTask.saveData(
+      key: _meshSiteConfigurationKey,
+      value: configuration.encode(),
+    );
+  }
+
+  Future<void> _configureForegroundMeshSite(String? siteId) async {
+    final configuration = MeshSiteConfiguration.forSite(
+      siteId ?? MeshEventController.demoSiteId,
+    );
+    await FlutterForegroundTask.saveData(
+      key: _meshSiteConfigurationKey,
+      value: configuration.encode(),
+    );
+    FlutterForegroundTask.sendDataToTask({
+      'meshSiteConfiguration': configuration.encode(),
+    });
   }
 
   void _applyGatewaySettings() {
@@ -1017,6 +1084,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     ref.listen(gatewayEnabledProvider, (_, _) => _applyGatewaySettings());
     ref.listen(gatewayUrlProvider, (_, _) => _applyGatewaySettings());
     ref.listen(gatewayDemoKeyProvider, (_, _) => _applyGatewaySettings());
+    final activeSiteId =
+        ref.watch(activeSiteProvider).valueOrNull?.siteId ??
+        MeshEventController.demoSiteId;
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -1027,9 +1097,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             children: [
               Text(_status, style: Theme.of(context).textTheme.headlineSmall),
               StreamBuilder<List<InboxEvent>>(
-                stream: ref
-                    .read(databaseProvider)
-                    .watchInboxSite(MeshEventController.siteId),
+                stream: ref.read(databaseProvider).watchInboxSite(activeSiteId),
                 builder: (context, snapshot) {
                   InboxEvent? roomMessage;
                   String? decodedText;
