@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
+import '../core/ble/device_key_store.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/data/database.dart';
@@ -214,9 +215,12 @@ class _MeshEventTaskHandler extends TaskHandler {
         unawaited(_sendTestSos(controller));
       }
     } catch (error) {
+      final message = error is DeviceKeyStoreException
+          ? error.userMessage
+          : error.toString();
       FlutterForegroundTask.sendDataToMain({
         'status': 'error',
-        'message': error.toString(),
+        'message': message,
       });
     }
   }
@@ -1105,6 +1109,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                     obscureText: true,
                     decoration: const InputDecoration(
                       labelText: 'Admin server key',
+                      helperText:
+                          'Used only for admin forwarding; it does not change '
+                          'Bluetooth or mesh encryption.',
                       border: OutlineInputBorder(),
                     ),
                     onChanged: (value) =>
