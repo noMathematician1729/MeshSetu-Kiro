@@ -42,6 +42,17 @@ export class EventStore {
     const result = await this.pool.query('SELECT * FROM user_profiles WHERE reporter_uid=$1', [uid])
     return result.rows[0]
   }
+  async getProfileByPrefix(uidPrefix: string): Promise<ProfileRecord | undefined> {
+    if (uidPrefix.length < 6) return undefined
+    if (!this.pool) {
+      for (const [key, profile] of this.profiles) {
+        if (key.startsWith(uidPrefix) || uidPrefix.startsWith(key)) return profile
+      }
+      return undefined
+    }
+    const result = await this.pool.query('SELECT * FROM user_profiles WHERE reporter_uid LIKE $1 OR $2 LIKE reporter_uid || \'%\' LIMIT 1', [uidPrefix + '%', uidPrefix])
+    return result.rows[0]
+  }
   async allProfiles(): Promise<ProfileRecord[]> {
     if (!this.pool) return [...this.profiles.values()]
     const result = await this.pool.query('SELECT * FROM user_profiles ORDER BY registered_at_ms DESC')

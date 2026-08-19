@@ -511,6 +511,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _status =
               'MeshSetu\nCompact SOS alert received · forwarding to admin';
         });
+        unawaited(_forwardReceivedCealSos(data));
       case 'mesh_test_origin_submitted':
         final envelopeJson = data['envelope'];
         if (envelopeJson is Map) {
@@ -607,6 +608,39 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     } catch (error) {
       if (mounted) {
         setState(() => _status = 'MeshSetu\nAdmin test send failed: $error');
+      }
+    }
+  }
+
+  Future<void> _forwardReceivedCealSos(Map data) async {
+    final url = ref.read(gatewayUrlProvider);
+    final key = ref.read(gatewayDemoKeyProvider);
+    if (url.isEmpty || key.isEmpty) return;
+    try {
+      final originId = data['originId'] as int?;
+      final sequence = data['sequence'] as int?;
+      // Reconstruct UID from originId: pad to 8 hex chars (4 bytes sent in advert).
+      final reporterUid = originId != null
+          ? originId.toRadixString(16).padLeft(8, '0')
+          : '';
+      if (reporterUid.isEmpty) return;
+      final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+      final (success, detail) = await bridge.forwardCealSos(
+        reporterUid: reporterUid,
+        siteId: MeshEventController.siteId,
+        originId: originId,
+        sequence: sequence,
+      );
+      if (mounted) {
+        setState(
+          () => _status = success
+              ? 'MeshSetu\nCEAL SOS relayed to admin ✓ (nearby device SOS)'
+              : 'MeshSetu\nCEAL relay to admin failed: $detail',
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nCEAL relay error: $error');
       }
     }
   }
