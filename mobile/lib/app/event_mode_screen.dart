@@ -699,8 +699,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final profile = await ref.read(onboardingRepositoryProvider).load();
     if (!mounted) return;
     if (profile == null) {
-      await Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -769,8 +770,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final profile = await ref.read(onboardingRepositoryProvider).load();
     if (!mounted) return;
     if (profile == null) {
-      await Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -792,20 +794,33 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         'originId': originId,
       });
       // Also forward to the admin backend for UID→profile resolution.
-      final bridge = _bridgeClient?.gatewayBridge;
-      if (bridge != null) {
-        bridge.forwardCealSos(
+      // Construct the bridge directly from provider state rather than relying
+      // on _bridgeClient (which may not yet be initialized).
+      final url = ref.read(gatewayUrlProvider);
+      final key = ref.read(gatewayDemoKeyProvider);
+      if (url.isNotEmpty && key.isNotEmpty) {
+        final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+        final success = await bridge.forwardCealSos(
           reporterUid: profile.reporterUid,
           siteId: MeshEventController.siteId,
           originId: originId,
         );
-      }
-      if (mounted) {
-        setState(
-          () => _status =
-              'MeshSetu\nCEAL-style SOS broadcast sent (UID-only, no payload)\n'
-              'Backend will resolve UID→profile if registered',
-        );
+        if (mounted) {
+          setState(
+            () => _status = success
+                ? 'MeshSetu\nCEAL SOS sent to admin ✓ (UID: ${profile.reporterUid})\n'
+                      'Backend resolved UID→profile for dashboard'
+                : 'MeshSetu\nCEAL BLE broadcast sent, but admin forwarding failed\n'
+                      'Another phone with Wi-Fi may relay it',
+          );
+        }
+      } else {
+        if (mounted) {
+          setState(
+            () => _status =
+                'MeshSetu\nCEAL BLE broadcast sent (no admin server configured)',
+          );
+        }
       }
     } catch (error) {
       if (mounted) {
@@ -833,8 +848,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted) return;
     if (site != null) {
-      Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
       return;
     }
     Navigator.of(context).push(
