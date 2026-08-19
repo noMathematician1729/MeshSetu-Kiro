@@ -16,7 +16,10 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [databaseProvider.overrideWithValue(db)],
-        child: const MeshSetuApp(enforcePermissions: false),
+        child: const MeshSetuApp(
+          enforcePermissions: false,
+          enforceOnboarding: false,
+        ),
       ),
     );
 

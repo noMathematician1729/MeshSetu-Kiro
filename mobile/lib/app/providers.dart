@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/data/database.dart';
 import '../feature/join/join_repository.dart';
+import '../feature/onboarding/onboarding_profile.dart';
+import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/rooms/room_repository.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/stt/sherpa_onnx_stt_engine.dart';
@@ -41,8 +43,19 @@ final roomRepositoryProvider = Provider.family<RoomRepository, String>(
   (ref, siteId) => RoomRepository(ref.watch(databaseProvider), siteId: siteId),
 );
 
+final onboardingRepositoryProvider = Provider<OnboardingRepository>(
+  (ref) => OnboardingRepository(),
+);
+
+final onboardingProfileProvider = FutureProvider<OnboardingProfile?>((ref) {
+  return ref.watch(onboardingRepositoryProvider).load();
+});
+
 final sosRepositoryProvider = Provider<SosRepository>(
-  (ref) => DriftSosRepository(ref.watch(databaseProvider)),
+  (ref) => DriftSosRepository(
+    ref.watch(databaseProvider),
+    ref.watch(onboardingRepositoryProvider),
+  ),
 );
 
 /// Real offline STT binding. A failed model load is reported to the SOS flow;
@@ -55,9 +68,7 @@ final offlineSttEngineProvider = Provider<OfflineSttEngine>(
 /// overridden from the Gateway screen for local development or another site.
 const productionBackendUrl = 'https://sih26-1xdevs.onrender.com';
 
-final gatewayUrlProvider = StateProvider<String>(
-  (ref) => productionBackendUrl,
-);
+final gatewayUrlProvider = StateProvider<String>((ref) => productionBackendUrl);
 final gatewayEnabledProvider = StateProvider<bool>((ref) => true);
 final gatewayDemoKeyProvider = StateProvider<String>((ref) => 'change-me');
 

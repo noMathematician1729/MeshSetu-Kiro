@@ -17,9 +17,12 @@ import '../core/data/database.dart';
 import '../core/model/model.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/join/join_screen.dart';
+import '../feature/location/location_capture.dart';
+import '../feature/onboarding/onboarding_screen.dart';
 import '../feature/rooms/room_message_packet.dart';
 import '../feature/rooms/rooms_screen.dart';
 import '../feature/sos/sos_payload.dart';
+import '../feature/sos/sos_repository.dart';
 import '../feature/sos/sos_screen.dart';
 import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
@@ -375,6 +378,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _zone = 'unknown';
   String _sttStatus = 'not run';
   bool _sttTesting = false;
+  bool _sosPacketSending = false;
   List<Map<String, dynamic>> _peerDebug = const [];
   final Map<String, int> _scanStats = {};
   String _lastReceived = 'none';
@@ -470,11 +474,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       case 'mesh_test_origin_submitted':
         final envelopeJson = data['envelope'];
         if (envelopeJson is Map) {
-          unawaited(_forwardTestSosToAdmin(
-            MeshBridge.envelopeFromJson(
-              envelopeJson.cast<Object?, Object?>(),
+          unawaited(
+            _forwardTestSosToAdmin(
+              MeshBridge.envelopeFromJson(
+                envelopeJson.cast<Object?, Object?>(),
+              ),
             ),
-          ));
+          );
         }
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
@@ -650,6 +656,78 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   Future<void> _sendTestSos() async {
     setState(() => _status = 'MeshSetu\nTest SOS queued');
     FlutterForegroundTask.sendDataToTask('send_test_sos');
+  }
+
+  Future<void> _confirmAndSendSosPacket() async {
+    if (_sosPacketSending) return;
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (!mounted) return;
+    if (profile == null) {
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _SosCountdownDialog(),
+    );
+    if (confirmed == true) await _sendSosPacket();
+  }
+
+  Future<void> _sendSosPacket() async {
+    setState(() {
+      _sosPacketSending = true;
+      _status = 'MeshSetu\nPreparing emergency SOS packet…';
+    });
+    try {
+      final site = await ref.read(joinRepositoryProvider).activeManifest();
+      final repo = ref.read(sosRepositoryProvider);
+      final eventId = await repo.createDraft(
+        SosInput(
+          siteId: site?.siteId ?? MeshEventController.siteId,
+          roomId: site?.rooms.isNotEmpty == true
+              ? site!.rooms.first.roomId
+              : 'public',
+          inputMode: InputMode.tap,
+          priority: PriorityBand.p0Critical,
+        ),
+      );
+      final permission = await Permission.locationWhenInUse.request();
+      final locationResult = permission.isGranted
+          ? await const LocationCapture().capture()
+          : const LocationCaptureResult.failure(
+              LocationFailureReason.permissionDenied,
+            );
+      if (locationResult.location case final location?) {
+        await repo.attachLocation(eventId, location);
+      }
+      await repo.finalizeAndEnqueue(eventId);
+      if (mounted) {
+        setState(() {
+          _status =
+              'MeshSetu\nSOS packet queued · ${locationResult.status}\n'
+              'A real BLE emergency alert will broadcast on mesh submission';
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = 'MeshSetu\nSOS packet failed: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _sosPacketSending = false);
+    }
+  }
+
+  Future<void> _editProfile() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => OnboardingScreen(initialProfile: profile),
+      ),
+    );
   }
 
   Future<void> _openSos() async {
@@ -836,6 +914,23 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 child: const Text('Stop event mode'),
               ),
               const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _eventModeActive && !_sosPacketSending
+                    ? _confirmAndSendSosPacket
+                    : null,
+                icon: const Icon(Icons.sos),
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                label: Text(
+                  _sosPacketSending ? 'Queuing SOS packet…' : 'Send SOS packet',
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _editProfile,
+                icon: const Icon(Icons.badge_outlined),
+                label: const Text('Edit emergency profile'),
+              ),
+              const SizedBox(height: 12),
               FilledButton(
                 onPressed: _eventModeActive ? _sendTestSos : null,
                 child: const Text('Send BLE SOS notification test'),
@@ -851,7 +946,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 title: const Text('Admin server forwarding'),
-                subtitle: const Text('Send this phone\'s SOS directly to the control room'),
+                subtitle: const Text(
+                  'Send this phone\'s SOS directly to the control room',
+                ),
                 children: [
                   TextField(
                     controller: _adminServerController,
@@ -861,9 +958,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       hintText: 'http://192.168.1.42:8000',
                       border: OutlineInputBorder(),
                     ),
-                    onChanged: (value) => ref
-                        .read(gatewayUrlProvider.notifier)
-                        .state = value.trim(),
+                    onChanged: (value) =>
+                        ref.read(gatewayUrlProvider.notifier).state = value
+                            .trim(),
                   ),
                   const SizedBox(height: 10),
                   TextField(
@@ -873,17 +970,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       labelText: 'Admin server key',
                       border: OutlineInputBorder(),
                     ),
-                    onChanged: (value) => ref
-                        .read(gatewayDemoKeyProvider.notifier)
-                        .state = value,
+                    onChanged: (value) =>
+                        ref.read(gatewayDemoKeyProvider.notifier).state = value,
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Forward SOS to admin server'),
                     value: ref.watch(gatewayEnabledProvider),
-                    onChanged: (value) => ref
-                        .read(gatewayEnabledProvider.notifier)
-                        .state = value,
+                    onChanged: (value) =>
+                        ref.read(gatewayEnabledProvider.notifier).state = value,
                   ),
                 ],
               ),
@@ -949,4 +1044,51 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       ),
     );
   }
+}
+
+class _SosCountdownDialog extends StatefulWidget {
+  const _SosCountdownDialog();
+
+  @override
+  State<_SosCountdownDialog> createState() => _SosCountdownDialogState();
+}
+
+class _SosCountdownDialogState extends State<_SosCountdownDialog> {
+  Timer? _timer;
+  var _secondsRemaining = 3;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_secondsRemaining <= 1) {
+        timer.cancel();
+        if (mounted) Navigator.of(context).pop(true);
+        return;
+      }
+      setState(() => _secondsRemaining--);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    icon: const Icon(Icons.warning_amber_rounded, color: Colors.red),
+    title: const Text('Send emergency SOS?'),
+    content: Text(
+      'Your identity-bound SOS packet will send in $_secondsRemaining '
+      '${_secondsRemaining == 1 ? 'second' : 'seconds'}.',
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(false),
+        child: const Text('Cancel'),
+      ),
+    ],
+  );
 }

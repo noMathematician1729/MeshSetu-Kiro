@@ -10,6 +10,7 @@ import '../../core/model/model.dart';
 import '../stt/stt_engine.dart';
 import '../triage/triage_engine.dart';
 import '../location/location_capture.dart';
+import '../onboarding/onboarding_repository.dart';
 import 'sos_payload.dart';
 
 const _uuid = Uuid();
@@ -23,12 +24,14 @@ final class SosInput {
     required this.roomId,
     required this.inputMode,
     this.rawText = '',
+    this.priority = PriorityBand.p1High,
     this.ttlMs = 15 * 60 * 1000,
   });
 
   final String siteId, roomId;
   final InputMode inputMode;
   final String rawText;
+  final PriorityBand priority;
   final int ttlMs;
 }
 
@@ -46,9 +49,10 @@ abstract interface class SosRepository {
 }
 
 class DriftSosRepository implements SosRepository {
-  DriftSosRepository(this._db);
+  DriftSosRepository(this._db, this._onboarding);
 
   final MeshDatabase _db;
+  final OnboardingRepository _onboarding;
 
   @override
   Future<String> createDraft(SosInput input) async {
@@ -71,7 +75,7 @@ class DriftSosRepository implements SosRepository {
             payloadType: PayloadType.structuredSos.name,
             inputMode: Value(input.inputMode.name),
             rawText: Value(input.rawText),
-            priority: PriorityBand.p1High.name,
+            priority: input.priority.name,
             state: const Value('created'),
             createdAtMs: now,
             updatedAtMs: now,
@@ -159,6 +163,10 @@ class DriftSosRepository implements SosRepository {
       await _db.markState(eventId, 'expired', now);
       throw StateError('SOS draft expired');
     }
+    final profile = await _onboarding.load();
+    if (profile == null) {
+      throw StateError('Complete emergency profile setup before sending SOS');
+    }
     final priority = PriorityBand.values.byName(row.priority);
     final location = _locationFrom(row.triageJson);
     final payload = StructuredSosPayload(
@@ -177,6 +185,15 @@ class DriftSosRepository implements SosRepository {
       longitude: (location?['longitude'] as num?)?.toDouble(),
       accuracyM: (location?['accuracyM'] as num?)?.toDouble(),
       locationCapturedAtMs: (location?['capturedAtMs'] as num?)?.toInt(),
+      reporter: SosReporter(
+        reporterUid: profile.reporterUid,
+        name: profile.name,
+        phone: profile.phone,
+        language: profile.language,
+        bloodGroup: profile.medicalProfile.bloodGroup,
+        primaryContactName: profile.primaryContact.name,
+        primaryContactPhone: profile.primaryContact.phone,
+      ),
     );
     await (_db.update(
       _db.outboxEvents,

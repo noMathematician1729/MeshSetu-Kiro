@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/event_mode_screen.dart';
 import 'core/ble/permission_gate.dart';
+import 'feature/onboarding/onboarding_screen.dart';
 
 /// Port of `in.meshsetu.app.MainActivity` (Kotlin `app/` module) — the
 /// runnable shell. The foreground task owns BLE discovery, relay transport,
@@ -17,20 +18,26 @@ void main() {
 }
 
 class MeshSetuApp extends StatelessWidget {
-  const MeshSetuApp({super.key, this.enforcePermissions = true});
+  const MeshSetuApp({
+    super.key,
+    this.enforcePermissions = true,
+    this.enforceOnboarding = true,
+  });
 
-  /// Test-only escape hatch for the event screen. Production construction
-  /// keeps the permission gate enabled.
+  /// Test-only escape hatches. Production construction requires both the
+  /// persisted emergency profile and runtime BLE permissions.
   final bool enforcePermissions;
+  final bool enforceOnboarding;
 
   @override
   Widget build(BuildContext context) {
+    final eventMode = enforcePermissions
+        ? const PermissionGate(child: EventModeScreen())
+        : const EventModeScreen();
     return MaterialApp(
       title: 'MeshSetu',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
-      home: enforcePermissions
-          ? const PermissionGate(child: EventModeScreen())
-          : const EventModeScreen(),
+      home: enforceOnboarding ? OnboardingGate(child: eventMode) : eventMode,
     );
   }
 }

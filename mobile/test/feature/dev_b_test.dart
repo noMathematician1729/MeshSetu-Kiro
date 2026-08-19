@@ -7,6 +7,8 @@ import 'package:meshsetu_mobile/app/mesh_bridge.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_repository.dart';
 import 'package:meshsetu_mobile/feature/join/manifest.dart';
 import 'package:meshsetu_mobile/feature/location/location_capture.dart';
+import 'package:meshsetu_mobile/feature/onboarding/onboarding_profile.dart';
+import 'package:meshsetu_mobile/feature/onboarding/onboarding_repository.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_policy.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_payload.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_repository.dart';
@@ -15,7 +17,25 @@ import 'package:meshsetu_mobile/feature/voice/voice_repository.dart';
 import 'package:meshsetu_mobile/feature/gateway/gateway_bridge.dart';
 import 'package:meshsetu_mobile/feature/join/join_repository.dart';
 import 'package:test/test.dart';
+
 import 'dart:typed_data';
+
+Future<OnboardingRepository> _onboardedRepository() async {
+  final repository = OnboardingRepository(MemoryOnboardingStorage());
+  await repository.save(
+    OnboardingProfile.create(
+      profileId: 'test-profile',
+      name: 'Test Sender',
+      phone: '+919876543210',
+      language: 'English',
+      emergencyContacts: const [
+        EmergencyContact(name: 'Test Contact', phone: '+919876543211'),
+      ],
+      medicalProfile: const MedicalProfile(),
+    ),
+  );
+  return repository;
+}
 
 void main() {
   test('SafetyRules forces P0 for a critical phrase and defers otherwise', () {
@@ -241,7 +261,7 @@ void main() {
     () async {
       final db = MeshDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final repo = DriftSosRepository(db);
+      final repo = DriftSosRepository(db, await _onboardedRepository());
 
       final eventId = await repo.createDraft(
         const SosInput(
@@ -275,7 +295,7 @@ void main() {
   test('triage rationale survives delimiters during persistence', () async {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
-    final repo = DriftSosRepository(db);
+    final repo = DriftSosRepository(db, await _onboardedRepository());
     final eventId = await repo.createDraft(
       const SosInput(
         siteId: 'site',
@@ -306,7 +326,7 @@ void main() {
   test('SOS location is persisted into the finalized BLE payload', () async {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
-    final repo = DriftSosRepository(db);
+    final repo = DriftSosRepository(db, await _onboardedRepository());
     final eventId = await repo.createDraft(
       const SosInput(
         siteId: 'site',
