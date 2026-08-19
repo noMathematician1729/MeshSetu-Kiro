@@ -699,9 +699,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final profile = await ref.read(onboardingRepositoryProvider).load();
     if (!mounted) return;
     if (profile == null) {
-      await Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      await Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -770,9 +769,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final profile = await ref.read(onboardingRepositoryProvider).load();
     if (!mounted) return;
     if (profile == null) {
-      await Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
+      await Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const OnboardingScreen()));
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -835,15 +833,44 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted) return;
     if (site != null) {
-      Navigator.of(
-        context,
-      ).push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const RoomsScreen()));
       return;
     }
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
           onJoined: (_) {
+            unawaited(_startBridgeForActiveSite());
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _createEventAndRoom() async {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => JoinScreen(
+          onJoined: (_) {
+            unawaited(_startBridgeForActiveSite());
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _joinRoomScanQr() async {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => JoinScreen(
+          onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(builder: (_) => const RoomsScreen()),
@@ -1089,9 +1116,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               const SizedBox(height: 8),
               Text('STT smoke test: $_sttStatus'),
               const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _eventModeActive ? _createEventAndRoom : null,
+                icon: const Icon(Icons.add_home_work_outlined),
+                style: FilledButton.styleFrom(backgroundColor: Colors.teal),
+                label: const Text('Create Event + Room (QR)'),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _eventModeActive ? _joinRoomScanQr : null,
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Join Room (Scan QR)'),
+              ),
+              const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: _eventModeActive ? _openJoinOrRooms : null,
-                child: const Text('Join / Rooms / Create room / SOS'),
+                child: const Text('Rooms / Chat / SOS'),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
