@@ -184,17 +184,17 @@ class MeshBridgeClient {
   /// for UID→profile resolution. Every phone with connectivity acts as a
   /// beacon/gateway for UID-only alerts, matching CEAL's architecture.
   Future<void> _forwardCompactSos(Map data) async {
-    final bridge = _gatewayBridge;
+    final bridge = _gatewayBridge ?? _fallbackBridge();
     if (bridge == null) return;
     final dedupeKey = data['dedupeKey'] as String?;
     if (dedupeKey == null || !_forwardedCompactAlerts.add(dedupeKey)) return;
     final originId = data['originId'] as int?;
     final sequence = data['sequence'] as int?;
     // Derive the reporterUid hex from originId (reverse of the 4-byte
-    // truncation used when broadcasting). This is a best-effort match;
-    // the backend will try to resolve it.
+    // truncation used when broadcasting). Pad to 12 chars with trailing zeros
+    // to match the full UID length stored in the profiles table.
     final reporterUid = originId != null
-        ? originId.toRadixString(16).padLeft(8, '0')
+        ? originId.toRadixString(16).padLeft(8, '0').padRight(12, '0')
         : '';
     if (reporterUid.isEmpty) return;
     try {
@@ -210,6 +210,13 @@ class MeshBridgeClient {
       // shown locally and may be forwarded by another peer with Wi-Fi.
       _forwardedCompactAlerts.remove(dedupeKey);
     }
+  }
+
+  GatewayBridge? _fallbackBridge() {
+    // Construct a bridge from defaults if the configured one isn't set yet.
+    const url = 'https://sih26-1xdevs.onrender.com';
+    const key = 'change-me';
+    return GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
   }
 
   void _failPendingSubmissions(Object error) {

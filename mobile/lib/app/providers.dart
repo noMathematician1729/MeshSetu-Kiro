@@ -7,6 +7,7 @@ import '../feature/onboarding/onboarding_profile.dart';
 import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/rooms/room_repository.dart';
 import '../feature/rooms/room_presence.dart';
+import '../feature/rooms/room_policy.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/stt/sherpa_onnx_stt_engine.dart';
 import '../feature/stt/stt_engine.dart';
@@ -88,9 +89,16 @@ final voiceRepositoryProvider = Provider<VoiceRepository>(
 );
 
 final roomMessagesProvider = StreamProvider.family
-    .autoDispose<List<RoomMessage>, ({String siteId, String roomId})>(
-      (ref, key) =>
-          ref.watch(roomRepositoryProvider(key.siteId)).watch(key.roomId),
+    .autoDispose<
+      List<RoomMessage>,
+      ({String siteId, String roomId, String role, Set<String> userRoles})
+    >(
+      (ref, key) => ref
+          .watch(roomRepositoryProvider(key.siteId))
+          .watch(
+            policy: policyForRole(key.roomId, key.role),
+            userRoles: key.userRoles,
+          ),
     );
 
 final roomMembersProvider = StreamProvider.family

@@ -12,3 +12,5 @@ export async function getEvents() { return (await request('/v1/sos')).json() }
 export async function setStatus(id, status) { return (await request(`/v1/sos/${encodeURIComponent(id)}/status`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status }) })).json() }
 export async function getVoice(id) { const response = await request(`/v1/sos/${encodeURIComponent(id)}/voice`); return URL.createObjectURL(await response.blob()) }
 export function openStream(onMessage, onState) { const url = new URL(`${base || window.location.origin}/v1/stream`); url.searchParams.set('token', token); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; const socket = new WebSocket(url); socket.onopen = () => onState('live'); socket.onclose = () => onState('offline'); socket.onerror = () => onState('offline'); socket.onmessage = event => { try { onMessage(JSON.parse(event.data)) } catch {} }; return socket }
+
+export async function getPublicEvent(id) { return (await request(`/v1/public/sos/${encodeURIComponent(id)}`)).json() }

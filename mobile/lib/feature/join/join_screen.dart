@@ -6,6 +6,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../app/providers.dart';
 import 'manifest.dart';
+import '../rooms/rooms_screen.dart';
 
 /// Mesh Code / QR join screen (Bible §9.3, `feature/join`). Typed code and
 /// QR scan both resolve to the same [JoinResult] path.
@@ -39,6 +40,9 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
     final result = await ref
         .read(joinRepositoryProvider)
         .parseAndValidateTypedCode(_codeController.text);
+    if (result is JoinOk) {
+      ref.read(userRolesProvider.notifier).state = const {'public'};
+    }
     await _handleResult(result);
   }
 
@@ -57,6 +61,7 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
       final manifest = await ref
           .read(joinRepositoryProvider)
           .createLocalEvent(siteName: siteName);
+      ref.read(userRolesProvider.notifier).state = const {'authority'};
       refreshActiveSite(ref);
       if (!mounted) return;
       setState(() => _submitting = false);
@@ -97,6 +102,9 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
     final result = await ref
         .read(joinRepositoryProvider)
         .parseAndValidateQr(raw);
+    if (result is JoinOk) {
+      ref.read(userRolesProvider.notifier).state = const {'public'};
+    }
     await _handleResult(result);
   }
 
@@ -111,7 +119,16 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Joined ${manifest.siteName}')));
-        widget.onJoined?.call(roomId);
+        final onJoined = widget.onJoined;
+        if (onJoined != null) {
+          onJoined(roomId);
+        } else {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => RoomsScreen(initialRoomId: roomId),
+            ),
+          );
+        }
       case JoinInvalid(:final reason):
         setState(
           () => _error = reason == 'unknown_code'

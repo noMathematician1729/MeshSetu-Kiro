@@ -93,14 +93,14 @@ class MainActivity : FlutterActivity() {
                 }
             }.maxByOrNull { it.time }
             if (lastKnown != null &&
-                System.currentTimeMillis() - lastKnown.time <= 5 * 60 * 1000
+                System.currentTimeMillis() - lastKnown.time <= 30 * 60 * 1000
             ) {
                 finish(lastKnown, "no_fix")
                 return
             }
 
             timeoutRunnable = Runnable { finish(null, "timeout") }
-            handler.postDelayed(timeoutRunnable!!, 12_000L)
+            handler.postDelayed(timeoutRunnable!!, 20_000L)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 providers.forEach { provider ->

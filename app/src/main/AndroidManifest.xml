@@ -10,8 +10,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application android:theme="@style/AppTheme" android:label="MeshSetu" android:allowBackup="false" android:supportsRtl="true">
+        <meta-data android:name="in.meshsetu.GATEWAY_URL" android:value="${meshsetuGatewayUrl}" />
+        <meta-data android:name="in.meshsetu.GATEWAY_KEY" android:value="${meshsetuGatewayKey}" />
+        <meta-data android:name="in.meshsetu.USER_UID" android:value="${meshsetuUserUid}" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

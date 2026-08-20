@@ -85,6 +85,14 @@ class GatewayBridge {
     'relay_latency_ms': relayLatencyMs,
     'voice_clip_id': sos.voiceClipId.isEmpty ? null : sos.voiceClipId,
     'audio_state': sos.voiceClipId.isEmpty ? null : 'queued',
+    'reporter_uid': sos.reporter?.reporterUid,
+    'reporter_name': sos.reporter?.name,
+    'reporter_phone': sos.reporter?.phone,
+    'reporter_language': sos.reporter?.language,
+    'reporter_blood_group': sos.reporter?.bloodGroup,
+    'reporter_primary_contact': sos.reporter == null
+        ? null
+        : '${sos.reporter!.primaryContactName} (${sos.reporter!.primaryContactPhone})',
   };
 
   Map<String, Object?> voiceCompleteJson(VoiceObjectPayload voice) => {
@@ -134,6 +142,10 @@ class GatewayBridge {
     required String siteId,
     int? originId,
     int? sequence,
+    double? latitude,
+    double? longitude,
+    double? accuracyM,
+    int? locationCapturedAtMs,
   }) async {
     try {
       final response = await http
@@ -148,6 +160,10 @@ class GatewayBridge {
               'site_id': siteId,
               'origin_id': originId,
               'sequence': sequence,
+              'latitude': latitude,
+              'longitude': longitude,
+              'accuracy_m': accuracyM,
+              'location_captured_at_ms': locationCapturedAtMs,
               'received_at_ms': DateTime.now().millisecondsSinceEpoch,
             }),
           )

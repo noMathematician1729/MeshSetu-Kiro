@@ -7,6 +7,8 @@ import '../join/manifest.dart';
 import '../sos/sos_screen.dart';
 import '../voice/voice_inbox_screen.dart';
 import 'room_lobby_screen.dart';
+import 'room_chat_screen.dart';
+import 'room_policy.dart';
 
 String _roomIdFromName(String name) {
   final slug = name
@@ -35,6 +37,7 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
   @override
   Widget build(BuildContext context) {
     final site = ref.watch(activeSiteProvider);
+    final userRoles = ref.watch(userRolesProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('Rooms')),
       body: site.when(
@@ -107,7 +110,7 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
                 ),
               ),
               const Divider(),
-              for (final room in manifest.rooms)
+              for (final room in readableRooms)
                 ListTile(
                   leading: const Icon(Icons.forum_outlined),
                   title: Text(room.name),
@@ -124,6 +127,32 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
         },
       ),
     );
+  }
+
+  void _openInitialRoomIfAvailable(
+    BuildContext context,
+    EventManifest manifest,
+    List<RoomManifest> rooms,
+  ) {
+    final roomId = widget.initialRoomId;
+    if (_openedInitialRoom || roomId == null) return;
+    _openedInitialRoom = true;
+    final matches = rooms.where((room) => room.roomId == roomId);
+    if (matches.isEmpty) return;
+    final room = matches.first;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RoomChatScreen(
+            siteId: manifest.siteId,
+            roomId: room.roomId,
+            roomName: room.name,
+            role: room.role,
+          ),
+        ),
+      );
+    });
   }
 
   Future<void> _createRoom(BuildContext context, WidgetRef ref) async {

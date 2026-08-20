@@ -33,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.File
@@ -46,9 +47,13 @@ class MeshEventService : Service() {
     private var advertiser: MeshAdvertiser? = null
     private var localToken = 0u
     private var metricWriter: FileWriter? = null
+    private lateinit var sosNotifier: SosRelayNotifier
+    private lateinit var contactNotificationPoller: EmergencyContactNotificationPoller
 
     override fun onCreate() {
         super.onCreate()
+        sosNotifier = SosRelayNotifier(this)
+        contactNotificationPoller = EmergencyContactNotificationPoller(this)
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL, "MeshSetu event mode", NotificationManager.IMPORTANCE_LOW))
         val notification = Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).setContentTitle("MeshSetu event mode active").setContentText("BLE relay is listening for nearby peers").setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).setOngoing(true).build()
@@ -84,6 +89,19 @@ class MeshEventService : Service() {
             }
             transport.start().getOrThrow()
             coordinator = transport
+            scope.launch {
+                transport.incoming.collect { received ->
+                    val online = sosNotifier.isOnline()
+                    sosNotifier.showRelay(received.envelope, online)
+                    if (online) sosNotifier.enrich(received.envelope)?.let { sosNotifier.showEnriched(received.envelope, it) }
+                }
+            }
+            scope.launch {
+                while (true) {
+                    if (sosNotifier.isOnline()) contactNotificationPoller.poll().forEach(sosNotifier::showServerDelivery)
+                    delay(CONTACT_NOTIFICATION_POLL_MS)
+                }
+            }
             advertiser = MeshAdvertiser(adapter).also { it.start(DiscoveryMetadata(siteFingerprint, localToken, 1u)) { error -> Log.e(TAG, "BLE advertising failed: $error") } }
             val scanner = checkNotNull(adapter.bluetoothLeScanner) { "BLE scanner unavailable" }
             scope.launch {
@@ -147,6 +165,7 @@ class MeshEventService : Service() {
         private const val SITE_NAMESPACE = "demo"
         private const val CAPABILITY_RELAY = 1
         private const val CAPABILITY_VOICE = 1 shl 3
+        private const val CONTACT_NOTIFICATION_POLL_MS = 15_000L
 
     }
 }

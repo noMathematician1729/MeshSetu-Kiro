@@ -158,6 +158,15 @@ void main() {
       longitude: 72.8777,
       accuracyM: 8.5,
       locationCapturedAtMs: 42,
+      reporter: SosReporter(
+        reporterUid: 'aabbccddeeff',
+        name: 'Asha Patel',
+        phone: '+919876543210',
+        language: 'English',
+        bloodGroup: 'O+',
+        primaryContactName: 'Ravi Patel',
+        primaryContactPhone: '+919876543211',
+      ),
     );
     final event = GatewayBridge(
       baseUrl: Uri.parse('https://example.test'),
@@ -167,6 +176,8 @@ void main() {
     expect(event['latitude'], 19.076);
     expect(event['longitude'], 72.8777);
     expect(event['accuracy_m'], 8.5);
+    expect(event['reporter_name'], 'Asha Patel');
+    expect(event['reporter_primary_contact'], 'Ravi Patel (+919876543211)');
   });
 
   test('JoinRepository persists a newly created room', () async {
@@ -215,10 +226,11 @@ void main() {
     expect(manifest.siteName, 'Safety drill');
     expect(manifest.rooms.single.roomId, 'public');
     final result = await repository.parseAndValidateQr(
-      EventManifestCodec.encode(manifest),
+      EventManifestCodec.encode(manifest, roomId: 'public'),
     );
     expect(result, isA<JoinOk>());
     expect((result as JoinOk).manifest.siteId, manifest.siteId);
+    expect(result.roomId, 'public');
     expect(await repository.activeManifest(), isNotNull);
   });
 
@@ -368,7 +380,10 @@ void main() {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
     final repo = RoomRepository(db, siteId: 'site');
-    final stream = repo.watch('public');
+    final stream = repo.watch(
+      policy: policyForRole('public', 'public'),
+      userRoles: const {'public'},
+    );
     final message = expectLater(
       stream,
       emitsThrough(
@@ -392,6 +407,19 @@ void main() {
     );
     await message;
   });
+
+  test(
+    'RoomRepository does not expose a restricted room to public users',
+    () async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final stream = RoomRepository(db, siteId: 'site').watch(
+        policy: policyForRole('medical', 'medical'),
+        userRoles: const {'public'},
+      );
+      await expectLater(stream, emitsError(isA<StateError>()));
+    },
+  );
 
   test('OutboxSender recovers relaying rows after a restart', () async {
     final db = MeshDatabase.forTesting(NativeDatabase.memory());
