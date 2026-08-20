@@ -417,6 +417,12 @@ class MeshTransportCoordinator implements MeshTransport {
     });
   }
 
+  /// Produces the authenticated packet representation used by an online
+  /// gateway. The mesh send path encrypts independently, so this method never
+  /// changes scheduler ownership or peer delivery.
+  Future<EncryptedObject> encryptForGateway(MeshEnvelope value) =>
+      relay.crypto.encrypt(value);
+
   /// Requests missing chunks from each attached peer, drains any newly
   /// queued outbound objects, and forwards accumulated metrics. Meant to be
   /// called periodically (the Kotlin source's `MeshEventService` calls this

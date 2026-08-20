@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
@@ -12,6 +13,7 @@ import '../core/protocol/envelope_codec.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
+import 'debug_runtime_log.dart';
 import 'mesh_bridge.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
@@ -71,6 +73,14 @@ class MeshBridgeClient {
   GatewayBridge? get gatewayBridge => _gatewayBridge;
   set gatewayBridge(GatewayBridge? bridge) {
     _gatewayBridge = bridge;
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H3',
+      location: 'mesh_bridge_client.dart:gatewayBridge',
+      message: 'Gateway forwarding configuration applied',
+      data: {'configured': bridge != null},
+    );
+    // #endregion
     if (bridge != null) unawaited(_syncRelayInbox());
   }
 
@@ -81,6 +91,14 @@ class MeshBridgeClient {
     }
     _siteId = siteId;
     _localEphemeralId = localEphemeralId;
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H1',
+      location: 'mesh_bridge_client.dart:start',
+      message: 'Mesh bridge started',
+      data: {'siteId': siteId, 'hasLocalEphemeralId': localEphemeralId != 0},
+    );
+    // #endregion
     unawaited(_restartOutbox());
     unawaited(_syncRelayInbox());
     _inboxSyncTimer ??= Timer.periodic(
@@ -145,6 +163,18 @@ class MeshBridgeClient {
       case 'mesh_submit_result':
         final objectId = data['objectId'];
         if (objectId is! int) return;
+        // #region agent log
+        DebugRuntimeLog.write(
+          hypothesisId: 'H1',
+          location: 'mesh_bridge_client.dart:mesh_submit_result',
+          message: 'Foreground mesh submission result',
+          data: {
+            'objectId': objectId,
+            'accepted': data['accepted'] == true,
+            'reason': data['reason']?.toString(),
+          },
+        );
+        // #endregion
         final pending = _pendingSubmissions[objectId];
         if (pending == null || pending.isCompleted) return;
         if (data['accepted'] == true) {
@@ -159,6 +189,39 @@ class MeshBridgeClient {
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
+        final transportMetrics = metrics
+            .whereType<Map>()
+            .map((metric) => Map<String, Object?>.from(metric))
+            .where(
+              (metric) => const {
+                'scheduler_selected_peer',
+                'frames_sent',
+                'ack',
+                'send_failed',
+                'deferred_mtu',
+                'gatt_connection_failed',
+              }.contains(metric['kind']),
+            )
+            .map(
+              (metric) => {
+                'kind': metric['kind'],
+                'objectId': metric['objectId'],
+                'peerId': metric['peerId'],
+                'detail': metric['detail'],
+                'value': metric['value'],
+              },
+            )
+            .toList();
+        if (transportMetrics.isNotEmpty) {
+          // #region agent log
+          DebugRuntimeLog.write(
+            hypothesisId: 'H1',
+            location: 'mesh_bridge_client.dart:mesh_metric',
+            message: 'GATT transport metrics reached UI bridge',
+            data: {'metrics': transportMetrics},
+          );
+          // #endregion
+        }
         unawaited(
           _outbox?.onMetrics([
                 for (final m in metrics)
@@ -176,10 +239,28 @@ class MeshBridgeClient {
         unawaited(_storeReceived(received));
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
-        if (envelopeJson is! Map || _gatewayBridge == null) return;
+        final encryptedBytes = data['encryptedBytes'];
+        if (envelopeJson is! Map ||
+            encryptedBytes is! String ||
+            _gatewayBridge == null) {
+          // #region agent log
+          DebugRuntimeLog.write(
+            hypothesisId: 'H3',
+            location: 'mesh_bridge_client.dart:mesh_origin_submitted',
+            message: 'Origin object was not eligible for gateway forwarding',
+            data: {
+              'hasEnvelope': envelopeJson is Map,
+              'hasEncryptedBytes': encryptedBytes is String,
+              'gatewayConfigured': _gatewayBridge != null,
+            },
+          );
+          // #endregion
+          return;
+        }
         unawaited(
           _forwardOriginSos(
             MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
+            base64Decode(encryptedBytes),
           ),
         );
       case 'error' || 'stopped':
@@ -189,18 +270,54 @@ class MeshBridgeClient {
     }
   }
 
-  Future<void> _forwardOriginSos(MeshEnvelope envelope) async {
+  Future<void> _forwardOriginSos(
+    MeshEnvelope envelope,
+    List<int> encryptedBytes,
+  ) async {
     final bridge = _gatewayBridge;
-    if (bridge == null || envelope.payloadType != PayloadType.structuredSos) {
+    if (bridge == null ||
+        (envelope.payloadType != PayloadType.structuredSos &&
+            envelope.payloadType != PayloadType.voiceObject)) {
       return;
     }
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H3',
+      location: 'mesh_bridge_client.dart:_forwardOriginSos',
+      message: 'Starting origin encrypted-object gateway upload',
+      data: {
+        'objectId': envelope.objectId,
+        'payloadType': envelope.payloadType.name,
+        'packetBytes': encryptedBytes.length,
+      },
+    );
+    // #endregion
     try {
-      final sos = StructuredSosPayload.decode(envelope.payload);
-      await bridge.postToDashboard(
-        bridge.eventJson(envelope: envelope, sos: sos),
+      await bridge.postEncryptedObject(
+        siteId: envelope.siteId,
+        objectId: envelope.objectId,
+        packet: encryptedBytes,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        peerId: 'origin',
       );
-    } catch (_) {
-      // The durable mesh object remains available for retry through the normal gateway path.
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_forwardOriginSos',
+        message: 'Origin encrypted-object gateway upload succeeded',
+        data: {'objectId': envelope.objectId},
+      );
+      // #endregion
+    } catch (error) {
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_forwardOriginSos',
+        message: 'Origin encrypted-object gateway upload failed',
+        data: {'objectId': envelope.objectId, 'error': '$error'},
+      );
+      // #endregion
+      // Relay delivery can still carry this object to another gateway.
     }
   }
 
@@ -240,6 +357,54 @@ class MeshBridgeClient {
       // Connectivity failures retry on the next poll tick.
     } finally {
       _pollingContactNotifications = false;
+    }
+  }
+
+  /// Forwards a received CEAL-style compact SOS alert to the admin backend
+  /// for UID→profile resolution. Every phone with connectivity acts as a
+  /// beacon/gateway for UID-only alerts, matching CEAL's architecture.
+  Future<void> _forwardCompactSos(Map data) async {
+    final bridge = _gatewayBridge ?? _fallbackBridge();
+    if (bridge == null) return;
+    final dedupeKey = data['dedupeKey'] as String?;
+    if (dedupeKey == null || !_forwardedCompactAlerts.add(dedupeKey)) return;
+    final originId = data['originId'] as int?;
+    final sequence = data['sequence'] as int?;
+    // Derive the reporterUid hex from originId (reverse of the 4-byte
+    // truncation used when broadcasting). Pad to 12 chars with trailing zeros
+    // to match the full UID length stored in the profiles table.
+    final reporterUid = originId != null
+        ? originId.toRadixString(16).padLeft(8, '0').padRight(12, '0')
+        : '';
+    if (reporterUid.isEmpty) return;
+    try {
+      final (success, _) = await bridge.forwardCealSos(
+        reporterUid: reporterUid,
+        siteId: _siteId ?? 'demo-site',
+        originId: originId,
+        sequence: sequence,
+      );
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_forwardCompactSos',
+        message: 'Compact SOS gateway upload completed',
+        data: {'success': success, 'originIdPresent': originId != null},
+      );
+      // #endregion
+      if (!success) _forwardedCompactAlerts.remove(dedupeKey);
+    } catch (error) {
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_forwardCompactSos',
+        message: 'Compact SOS gateway upload failed',
+        data: {'error': '$error'},
+      );
+      // #endregion
+      // Best-effort: if connectivity is unavailable, the alert was still
+      // shown locally and may be forwarded by another peer with Wi-Fi.
+      _forwardedCompactAlerts.remove(dedupeKey);
     }
   }
 
@@ -326,12 +491,41 @@ class MeshBridgeClient {
             received.envelope.payloadType != PayloadType.voiceObject) ||
         _forwardedObjectIds.contains(objectId) ||
         !_forwardingObjectIds.add(objectId)) {
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_storeReceived',
+        message: 'Received rich object not forwarded to gateway',
+        data: {
+          'objectId': objectId,
+          'gatewayConfigured': bridge != null,
+          'payloadType': received.envelope.payloadType.name,
+          'alreadyForwarded': _forwardedObjectIds.contains(objectId),
+        },
+      );
+      // #endregion
       return;
     }
     try {
       await _forwardToGateway(bridge, received);
       _forwardedObjectIds.add(objectId);
-    } catch (_) {
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_storeReceived',
+        message: 'Received rich object gateway upload succeeded',
+        data: {'objectId': objectId},
+      );
+      // #endregion
+    } catch (error) {
+      // #region agent log
+      DebugRuntimeLog.write(
+        hypothesisId: 'H3',
+        location: 'mesh_bridge_client.dart:_storeReceived',
+        message: 'Received rich object gateway upload failed',
+        data: {'objectId': objectId, 'error': '$error'},
+      );
+      // #endregion
       // Keep the object eligible for the next durable-inbox retry.
     } finally {
       _forwardingObjectIds.remove(objectId);

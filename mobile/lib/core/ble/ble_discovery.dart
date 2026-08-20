@@ -54,7 +54,7 @@ abstract final class MeshAdvertiser {
   static Future<void> broadcastSos(
     MeshSosAdvertisement alert,
     DiscoveryMetadata discovery, {
-    Duration duration = const Duration(seconds: 12),
+    Duration duration = const Duration(seconds: 2),
   }) => _advertisingLock.synchronized(() async {
     final generation = ++_advertisingGeneration;
     await UniversalBlePeripheral.stopAdvertising();

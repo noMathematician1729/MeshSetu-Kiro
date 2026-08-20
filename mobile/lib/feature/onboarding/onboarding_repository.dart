@@ -46,11 +46,17 @@ final class MemoryOnboardingStorage implements OnboardingStorage {
 }
 
 final class OnboardingRepository {
-  OnboardingRepository([OnboardingStorage? storage, this._gatewayBridge])
-    : _storage = storage ?? SecureOnboardingStorage();
+  OnboardingRepository([
+    OnboardingStorage? storage,
+    GatewayBridge? gatewayBridge,
+    GatewayBridge? Function()? resolveGatewayBridge,
+  ]) : _storage = storage ?? SecureOnboardingStorage(),
+       _gatewayBridge = gatewayBridge,
+       _resolveGatewayBridge = resolveGatewayBridge;
 
   final OnboardingStorage _storage;
   final GatewayBridge? _gatewayBridge;
+  final GatewayBridge? Function()? _resolveGatewayBridge;
 
   Future<OnboardingProfile?> load() async {
     final encoded = await _storage.read();
@@ -85,7 +91,7 @@ final class OnboardingRepository {
   }
 
   void _tryRegisterWithBackend(OnboardingProfile profile) {
-    final bridge = _gatewayBridge;
+    final bridge = _gatewayBridge ?? _resolveGatewayBridge?.call();
     if (bridge == null) return;
     // Fire and forget — do not block save on connectivity.
     bridge.registerProfile({

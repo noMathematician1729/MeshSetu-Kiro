@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:convert';
 import 'dart:ui';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart'
+    hide NotificationVisibility;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -23,44 +24,136 @@ import '../feature/rooms/rooms_screen.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/sos/sos_screen.dart';
+import '../feature/sos/incident_detail_screen.dart';
 import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
 import 'incident_summary.dart';
+import 'notification_router.dart';
+import 'debug_runtime_log.dart';
 import 'providers.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event-v2';
+const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
 const String _meshSiteConfigurationKey = 'mesh-site-configuration';
+final FlutterLocalNotificationsPlugin _sosNotifications =
+    FlutterLocalNotificationsPlugin();
+bool _sosNotificationsInitialized = false;
 
 Future<void> _showSosNotification({
   required ReceivedObject received,
   required String detail,
   int? notificationId,
 }) async {
-  var id =
-      notificationId ?? (received.envelope.objectId & 0x7fffffff);
-  if (id == 0) id = 1;
-  await SosAlertNotifications.show(
-    id: id,
-    title: 'SOS RECEIVED',
-    body: detail,
-    payload: SosIncidentNavigator.payloadForEvent(received.envelope.eventId),
-  );
+  try {
+    if (!_sosNotificationsInitialized) {
+      await NotificationRouter.configure(_sosNotifications);
+      _sosNotificationsInitialized = true;
+    }
+    var id = notificationId ?? (received.envelope.objectId & 0x7fffffff);
+    if (id == 0) id = 1;
+    await _sosNotifications.show(
+      id: id,
+      title: 'SOS RECEIVED',
+      body: detail,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Nearby MeshSetu emergency signals',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          ticker: 'SOS received',
+          category: AndroidNotificationCategory.alarm,
+          visibility: NotificationVisibility.public,
+          onlyAlertOnce: false,
+        ),
+      ),
+      payload: NotificationRouter.incidentPayload(
+        siteId: received.envelope.siteId,
+        eventId: received.envelope.eventId,
+        objectId: received.envelope.objectId,
+      ),
+    );
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H2',
+      location: 'event_mode_screen.dart:_showSosNotification',
+      message: 'Rich GATT SOS notification displayed with incident payload',
+      data: {
+        'objectId': received.envelope.objectId,
+        'payloadType': received.envelope.payloadType.name,
+      },
+    );
+    // #endregion
+  } catch (error) {
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H2',
+      location: 'event_mode_screen.dart:_showSosNotification',
+      message: 'Rich GATT SOS notification failed to display',
+      data: {'error': '$error'},
+    );
+    // #endregion
+    // A notification failure must not stop BLE relaying.
+  }
 }
 
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  await SosAlertNotifications.show(
-    id: SosAlertNotifications.idForKey(alert.dedupeKey),
-    title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
-    body: alert.isTest
-        ? 'Nearby BLE transport test received.'
-        : 'You are relaying a nearby emergency alert. '
-              'Fetching full details…',
-  );
+  try {
+    if (!_sosNotificationsInitialized) {
+      await NotificationRouter.configure(_sosNotifications);
+      _sosNotificationsInitialized = true;
+    }
+    final id = Object.hash(alert.originId, alert.sequence) & 0x7fffffff;
+    await _sosNotifications.show(
+      id: id == 0 ? 1 : id,
+      title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
+      body: alert.isTest
+          ? 'Nearby BLE transport test received.'
+          : 'Nearby emergency alert received. Details may follow.',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _sosNotificationChannelId,
+          'SOS alerts',
+          channelDescription: 'Nearby MeshSetu emergency signals',
+          importance: Importance.max,
+          priority: Priority.max,
+          playSound: true,
+          enableVibration: true,
+          category: AndroidNotificationCategory.alarm,
+          visibility: NotificationVisibility.public,
+        ),
+      ),
+    );
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H2',
+      location: 'event_mode_screen.dart:_showCompactSosNotification',
+      message: 'Compact advert notification displayed without incident payload',
+      data: {
+        'originIdPresent': alert.originId != 0,
+        'isTest': alert.isTest,
+      },
+    );
+    // #endregion
+  } catch (error) {
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H2',
+      location: 'event_mode_screen.dart:_showCompactSosNotification',
+      message: 'Compact advert notification failed to display',
+      data: {'error': '$error'},
+    );
+    // #endregion
+    // BLE relaying must remain live if Android rejects an alert.
+  }
 }
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
@@ -168,7 +261,10 @@ class _MeshEventTaskHandler extends TaskHandler {
         }
       });
       controller.setDebugLossInjection(_debugLossEnabled);
-      FlutterForegroundTask.sendDataToMain(const {'status': 'started'});
+      FlutterForegroundTask.sendDataToMain({
+        'status': 'started',
+        'localEphemeralId': controller.localEphemeralId,
+      });
       if (_sosPending) {
         _sosPending = false;
         unawaited(_sendTestSos(controller));
@@ -295,6 +391,9 @@ class _MeshEventTaskHandler extends TaskHandler {
       return;
     }
     try {
+      final gatewayPacket = await controller.coordinator!.encryptForGateway(
+        envelope,
+      );
       if (envelope.payloadType == PayloadType.structuredSos) {
         String reporterUid = '';
         try {
@@ -318,10 +417,12 @@ class _MeshEventTaskHandler extends TaskHandler {
         'objectId': envelope.objectId,
         'accepted': true,
       });
-      if (envelope.payloadType == PayloadType.structuredSos) {
+      if (envelope.payloadType == PayloadType.structuredSos ||
+          envelope.payloadType == PayloadType.voiceObject) {
         FlutterForegroundTask.sendDataToMain({
           'status': 'mesh_origin_submitted',
           'envelope': MeshBridge.envelopeToJson(envelope),
+          'encryptedBytes': base64Encode(gatewayPacket.bytes),
         });
       }
     } catch (error) {
@@ -335,6 +436,18 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 
   void _announceCompactSos(MeshSosAdvertisement alert) {
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H1',
+      location: 'event_mode_screen.dart:_announceCompactSos',
+      message: 'Receiver processed compact SOS advert',
+      data: {
+        'originIdPresent': alert.originId != 0,
+        'sequence': alert.sequence,
+        'isTest': alert.isTest,
+      },
+    );
+    // #endregion
     _compactAlertKeys.add(alert.dedupeKey);
     unawaited(_showCompactSosNotification(alert));
     // Forward to the UI isolate so MeshBridgeClient can relay to admin backend.
@@ -351,6 +464,18 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 
   Future<void> _announceReceivedSos(ReceivedObject received) async {
+    // #region agent log
+    DebugRuntimeLog.write(
+      hypothesisId: 'H1',
+      location: 'event_mode_screen.dart:_announceReceivedSos',
+      message: 'Receiver obtained reassembled rich GATT object',
+      data: {
+        'objectId': received.envelope.objectId,
+        'payloadType': received.envelope.payloadType.name,
+        'peerIdPresent': received.peerId.isNotEmpty,
+      },
+    );
+    // #endregion
     final generation = ++_notificationGeneration;
     late final String detail;
     try {
@@ -426,6 +551,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String? _receivedSosPeer;
   int? _receivedSosHopCount;
   int? _receivedSosHopLimit;
+  String? _receivedSosEventId;
+  int? _receivedSosObjectId;
+  String? _receivedSosSiteId;
+  int? _foregroundEphemeralId;
   MeshBridgeClient? _bridgeClient;
   late final TextEditingController _adminServerController;
   late final TextEditingController _gatewayKeyController;
@@ -482,6 +611,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     if (!mounted || data is! Map) return;
     switch (data['status']) {
       case 'started':
+        _foregroundEphemeralId = data['localEphemeralId'] as int?;
         setState(() {
           _eventModeActive = true;
           _status = 'MeshSetu\nEvent mode active\nBLE relay service running';
@@ -625,6 +755,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         _receivedSosPeer = received.peerId;
         _receivedSosHopCount = received.envelope.hopCount;
         _receivedSosHopLimit = received.envelope.hopLimit;
+        _receivedSosEventId = received.envelope.eventId;
+        _receivedSosObjectId = received.envelope.objectId;
+        _receivedSosSiteId = received.envelope.siteId;
       });
     } catch (_) {
       // Only complete authenticated structured SOS payloads are displayed.
@@ -1068,9 +1201,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     await _configureForegroundMeshSite(site?.siteId);
     _bridgeClient ??= MeshBridgeClient(ref.read(databaseProvider));
     if (!_bridgeClientSiteStarted) {
+      final localEphemeralId = _foregroundEphemeralId;
+      if (localEphemeralId == null) return;
       _bridgeClient!.start(
         siteId: site?.siteId ?? MeshEventController.demoSiteId,
-        localEphemeralId: _randomEphemeralId(),
+        localEphemeralId: localEphemeralId,
       );
       _bridgeClientSiteStarted = true;
     } else if (site != null) {
@@ -1127,14 +1262,6 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     } catch (_) {
       // Without a stored profile this device is not an emergency contact.
     }
-  }
-
-  int _randomEphemeralId() {
-    final random = Random.secure();
-    final high = random.nextInt(1 << 31);
-    final low = random.nextInt(1 << 32);
-    final value = (high << 32) | low;
-    return value == 0 ? 1 : value;
   }
 
   @override
@@ -1211,6 +1338,20 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       '${_receivedSosPeer ?? 'unknown peer'}',
                     ),
                     isThreeLine: true,
+                    onTap:
+                        _receivedSosEventId == null ||
+                            _receivedSosObjectId == null ||
+                            _receivedSosSiteId == null
+                        ? null
+                        : () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => IncidentDetailScreen(
+                                siteId: _receivedSosSiteId!,
+                                eventId: _receivedSosEventId!,
+                                objectId: _receivedSosObjectId!,
+                              ),
+                            ),
+                          ),
                   ),
                 ),
               StreamBuilder<List<InboxEvent>>(

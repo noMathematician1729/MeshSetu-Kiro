@@ -47,13 +47,17 @@ final roomRepositoryProvider = Provider.family<RoomRepository, String>(
 );
 
 final onboardingRepositoryProvider = Provider<OnboardingRepository>((ref) {
-  final url = ref.watch(gatewayUrlProvider);
-  final key = ref.watch(gatewayDemoKeyProvider);
-  final enabled = ref.watch(gatewayEnabledProvider);
-  final bridge = (enabled && url.isNotEmpty && key.isNotEmpty)
-      ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
-      : null;
-  return OnboardingRepository(null, bridge);
+  return OnboardingRepository(
+    null,
+    null,
+    () {
+      final url = ref.read(gatewayUrlProvider);
+      final key = ref.read(gatewayDemoKeyProvider);
+      final enabled = ref.read(gatewayEnabledProvider);
+      if (!enabled || url.isEmpty || key.isEmpty) return null;
+      return GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+    },
+  );
 });
 
 final onboardingProfileProvider = FutureProvider<OnboardingProfile?>((ref) {

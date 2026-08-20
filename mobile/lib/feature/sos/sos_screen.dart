@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/providers.dart';
+import '../../core/data/database.dart';
 import '../../core/model/model.dart';
 import '../location/location_capture.dart';
 import '../triage/triage_engine.dart';
@@ -27,6 +28,7 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   final _voiceRecorder = VoiceRecorder.withCap(const Duration(seconds: 10));
   bool _sending = false;
   String? _status;
+  String? _eventId;
 
   @override
   void dispose() {
@@ -67,23 +69,22 @@ class _SosScreenState extends ConsumerState<SosScreen> {
             );
       _setStatus('SOS draft saved · recording voice for up to 10 seconds…');
       String transcript = rawText;
-      var sttStatus = 'voice unavailable';
+      var voiceStatus = 'voice unavailable';
       try {
-        final pcm = await _voiceRecorder.recordPcmClip();
-        _setStatus('Voice captured · transcribing offline…');
-        final engine = ref.read(offlineSttEngineProvider);
-        await engine.warmUp();
-        final stt = await engine.transcribe(pcm);
-        transcript = stt.text.trim().isEmpty ? rawText : stt.text.trim();
-        if (stt.text.trim().isNotEmpty) {
-          await repo.attachTranscript(eventId, stt);
-        }
-        sttStatus = stt.text.trim().isEmpty
-            ? 'no words detected'
-            : 'voice transcribed';
+        final opus = await _voiceRecorder.recordOpusClip();
+        _setStatus('Voice captured · attaching encrypted evidence…');
+        await ref
+            .read(voiceRepositoryProvider)
+            .attachToSos(
+              sosEventId: eventId,
+              siteId: widget.siteId,
+              roomId: widget.roomId,
+              encoded: opus,
+            );
+        voiceStatus = 'voice evidence queued';
       } catch (_) {
-        sttStatus = 'voice unavailable';
-        _setStatus('Voice/STT unavailable · sending available SOS data…');
+        voiceStatus = 'voice unavailable';
+        _setStatus('Voice unavailable · sending available SOS data…');
       }
 
       final locationResult = await locationFuture;
@@ -96,7 +97,10 @@ class _SosScreenState extends ConsumerState<SosScreen> {
       if (!mounted) return;
       setState(() {
         _sending = false;
-        _status = 'SOS queued for BLE · ${locationResult.status} · $sttStatus';
+        _eventId = eventId;
+        _status =
+            'SOS stored locally · awaiting foreground mesh · '
+            '${locationResult.status} · $voiceStatus';
         _textController.clear();
       });
     } catch (error) {
@@ -115,6 +119,7 @@ class _SosScreenState extends ConsumerState<SosScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final db = ref.watch(databaseProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('Send SOS')),
       body: Padding(
@@ -152,9 +157,30 @@ class _SosScreenState extends ConsumerState<SosScreen> {
               const SizedBox(height: 16),
               Text(_status!),
             ],
+            if (_eventId case final eventId?) ...[
+              const SizedBox(height: 8),
+              StreamBuilder<OutboxEvent?>(
+                stream: (db.select(
+                  db.outboxEvents,
+                )..where((t) => t.eventId.equals(eventId))).watchSingleOrNull(),
+                builder: (context, snapshot) => Text(
+                  _deliveryLabel(snapshot.data?.state),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+
+  String _deliveryLabel(String? state) => switch (state) {
+    'ready' => 'Delivery: queued locally, waiting for the mesh service.',
+    'relaying' => 'Delivery: accepted by mesh, waiting for a GATT peer.',
+    'acked' => 'Delivery: received and acknowledged by a peer.',
+    'expired' => 'Delivery: expired before peer acknowledgement.',
+    'failed' => 'Delivery: failed locally; retry event mode.',
+    _ => 'Delivery: preparing SOS.',
+  };
 }
