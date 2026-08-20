@@ -1352,7 +1352,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 onPressed: _eventModeActive ? _createEventAndRoom : null,
                 icon: const Icon(Icons.add_home_work_outlined),
                 style: FilledButton.styleFrom(backgroundColor: Colors.teal),
-                label: const Text('Create Event + Room (QR)'),
+                label: const Text('Create Room (Share QR)'),
               ),
               const SizedBox(height: 12),
               FilledButton.icon(

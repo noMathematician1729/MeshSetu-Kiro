@@ -9,17 +9,20 @@ import '../../core/data/database.dart';
 import '../../core/model/model.dart';
 import 'room_message_packet.dart';
 import 'room_policy.dart';
+import 'room_presence.dart';
 
 const _uuid = Uuid();
 
 class RoomMessage {
   const RoomMessage({
+    required this.eventId,
     required this.text,
     required this.fromPeerId,
     required this.atMs,
     required this.mine,
   });
 
+  final String eventId;
   final String text;
   final String? fromPeerId;
   final int atMs;
@@ -35,7 +38,7 @@ class RoomRepository {
   final MeshDatabase _db;
   final String siteId;
 
-  Future<void> sendMessage({
+  Future<String> sendMessage({
     required RoomPolicy policy,
     required Set<String> userRoles,
     required String text,
@@ -69,6 +72,43 @@ class RoomRepository {
             createdAtMs: now,
             updatedAtMs: now,
             expiresAtMs: now + policy.ttlSeconds * 1000,
+          ),
+        );
+    return eventId;
+  }
+
+  Future<void> announceMember({
+    required String roomId,
+    required String memberId,
+    required String displayName,
+  }) async {
+    if (roomId.trim().isEmpty ||
+        memberId.trim().isEmpty ||
+        displayName.trim().isEmpty) {
+      throw ArgumentError('room and member identity must not be blank');
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final member = RoomMember(
+      memberId: memberId,
+      displayName: displayName.trim(),
+      joinedAtMs: now,
+    );
+    await _db
+        .into(_db.outboxEvents)
+        .insert(
+          OutboxEventsCompanion.insert(
+            eventId: _uuid.v4(),
+            objectId: Value(_randomObjectId()),
+            siteId: siteId,
+            roomId: roomId,
+            payloadType: PayloadType.responderUpdate.name,
+            rawText: Value(member.displayName),
+            priority: PriorityBand.p1High.name,
+            payload: Value(RoomPresenceCodec.encode(member)),
+            state: const Value('ready'),
+            createdAtMs: now,
+            updatedAtMs: now,
+            expiresAtMs: now + const Duration(hours: 24).inMilliseconds,
           ),
         );
   }
@@ -110,6 +150,7 @@ class RoomRepository {
             for (final r in sentRows)
               if (r.payloadType == PayloadType.roomMessage.name)
                 RoomMessage(
+                  eventId: r.eventId,
                   text: r.rawText ?? '',
                   fromPeerId: null,
                   atMs: r.createdAtMs,
@@ -120,6 +161,71 @@ class RoomRepository {
                 if (_decodeMessage(r) case final message?) message,
           ]..sort((a, b) => a.atMs.compareTo(b.atMs));
           if (!closed) controller.add(messages);
+        } finally {
+          loading = false;
+          if (refreshQueued) {
+            refreshQueued = false;
+            unawaited(refresh());
+          }
+        }
+      }
+
+      final sentSub = _db.watchRoom(siteId, roomId).listen((_) {
+        unawaited(refresh());
+      });
+      final receivedSub = _db.watchInboxRoom(siteId, roomId).listen((_) {
+        unawaited(refresh());
+      });
+      controller.onCancel = () async {
+        closed = true;
+        await sentSub.cancel();
+        await receivedSub.cancel();
+      };
+      unawaited(refresh());
+    });
+  }
+
+  Stream<List<RoomMember>> watchMembers(String roomId) {
+    return Stream.multi((controller) {
+      var closed = false;
+      var loading = false;
+      var refreshQueued = false;
+
+      Future<void> refresh() async {
+        if (closed) return;
+        if (loading) {
+          refreshQueued = true;
+          return;
+        }
+        loading = true;
+        try {
+          final sentRows =
+              await (_db.select(_db.outboxEvents)..where(
+                    (t) => t.siteId.equals(siteId) & t.roomId.equals(roomId),
+                  ))
+                  .get();
+          final receivedRows =
+              await (_db.select(_db.inboxEvents)..where(
+                    (t) => t.siteId.equals(siteId) & t.roomId.equals(roomId),
+                  ))
+                  .get();
+          final members = <String, RoomMember>{};
+          for (final row in sentRows) {
+            if (row.payloadType != PayloadType.responderUpdate.name ||
+                row.payload == null) {
+              continue;
+            }
+            final member = RoomPresenceCodec.decode(row.payload!);
+            if (member != null) members[member.memberId] = member;
+          }
+          for (final row in receivedRows) {
+            if (row.payloadType != PayloadType.responderUpdate.name) continue;
+            final member = RoomPresenceCodec.decode(row.payload);
+            if (member != null) members[member.memberId] = member;
+          }
+          final values = members.values.toList()
+            ..sort((a, b) => a.joinedAtMs.compareTo(b.joinedAtMs));
+          if (!closed) controller.add(values);
         } finally {
           loading = false;
           if (refreshQueued) {
@@ -163,6 +269,7 @@ class RoomRepository {
             )
           : utf8.decode(row.payload, allowMalformed: false);
       return RoomMessage(
+        eventId: row.eventId,
         text: text,
         fromPeerId: row.peerId,
         atMs: row.receivedAtMs,

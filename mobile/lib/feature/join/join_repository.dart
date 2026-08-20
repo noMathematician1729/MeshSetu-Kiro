@@ -74,10 +74,10 @@ class JoinRepository {
       validFromMs: now,
       validUntilMs: now + const Duration(days: 1).inMilliseconds,
       gatewayHint: '',
-      rooms: const [
+      rooms: [
         RoomManifest(
           roomId: 'public',
-          name: 'Public Alerts',
+          name: name,
           role: 'public',
           ttlSeconds: 86400,
         ),

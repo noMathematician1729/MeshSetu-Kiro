@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import 'room_policy.dart';
+import 'room_presence_socket.dart';
+import 'room_repository.dart';
 
 class RoomChatScreen extends ConsumerStatefulWidget {
   const RoomChatScreen({
@@ -21,11 +25,59 @@ class RoomChatScreen extends ConsumerStatefulWidget {
 
 class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
   final _textController = TextEditingController();
+  RoomPresenceSocket? _messageSocket;
+  final Map<String, RoomMessage> _liveMessages = {};
+  final Map<String, String> _pendingLiveMessages = {};
+  String _liveStatus = 'Connecting to live chat…';
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_connectLiveMessages());
+  }
+
+  Future<void> _connectLiveMessages() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (!mounted || profile == null) return;
+    final rawUrl = ref.read(gatewayUrlProvider).trim();
+    final baseUrl = Uri.tryParse(rawUrl);
+    if (baseUrl == null || !baseUrl.hasScheme) return;
+    final socket = RoomPresenceSocket(
+      baseUrl: baseUrl,
+      gatewayKey: ref.read(gatewayDemoKeyProvider),
+      siteId: widget.siteId,
+      roomId: widget.roomId,
+      memberId: profile.profileId,
+      displayName: profile.name,
+    );
+    _messageSocket = socket;
+    for (final entry in _pendingLiveMessages.entries) {
+      socket.sendRoomMessage(messageId: entry.key, text: entry.value);
+    }
+    _pendingLiveMessages.clear();
+    socket.debug.listen((status) {
+      if (mounted) setState(() => _liveStatus = status);
+    });
+    socket.messages.listen((message) {
+      if (!mounted) return;
+      setState(() {
+        _liveMessages[message.messageId] = RoomMessage(
+          eventId: message.messageId,
+          text: message.text,
+          fromPeerId: message.displayName,
+          atMs: message.sentAtMs,
+          mine: message.memberId == profile.profileId,
+        );
+      });
+    });
+    socket.start();
+  }
 
   @override
   void dispose() {
     _textController.dispose();
+    unawaited(_messageSocket?.dispose());
     super.dispose();
   }
 
@@ -35,9 +87,15 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
     final policy = policyForRole(widget.roomId, widget.role);
     final userRoles = ref.read(userRolesProvider);
     try {
-      await ref
+      final eventId = await ref
           .read(roomRepositoryProvider(widget.siteId))
           .sendMessage(policy: policy, userRoles: userRoles, text: text);
+      final socket = _messageSocket;
+      if (socket == null) {
+        _pendingLiveMessages[eventId] = text;
+      } else {
+        socket.sendRoomMessage(messageId: eventId, text: text);
+      }
       _textController.clear();
       setState(() => _error = null);
     } on StateError catch (e) {
@@ -73,18 +131,33 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
             child: messages.when(
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) => Center(child: Text('$e')),
-              data: (items) => ListView.builder(
-                reverse: true,
-                itemCount: items.length,
-                itemBuilder: (context, i) {
-                  final m = items[items.length - 1 - i];
-                  return ListTile(
-                    dense: true,
-                    title: Text(m.text),
-                    subtitle: Text(m.mine ? 'you' : (m.fromPeerId ?? 'peer')),
-                  );
-                },
-              ),
+              data: (items) {
+                final merged = <String, RoomMessage>{
+                  for (final message in items) message.eventId: message,
+                  ..._liveMessages,
+                };
+                final visible = merged.values.toList()
+                  ..sort((a, b) => a.atMs.compareTo(b.atMs));
+                return ListView.builder(
+                  reverse: true,
+                  itemCount: visible.length,
+                  itemBuilder: (context, i) {
+                    final m = visible[visible.length - 1 - i];
+                    return ListTile(
+                      dense: true,
+                      title: Text(m.text),
+                      subtitle: Text(m.mine ? 'you' : (m.fromPeerId ?? 'peer')),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Text(
+              'Live chat: $_liveStatus',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
           if (_error != null)
