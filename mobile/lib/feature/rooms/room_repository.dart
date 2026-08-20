@@ -15,12 +15,14 @@ const _uuid = Uuid();
 
 class RoomMessage {
   const RoomMessage({
+    required this.eventId,
     required this.text,
     required this.fromPeerId,
     required this.atMs,
     required this.mine,
   });
 
+  final String eventId;
   final String text;
   final String? fromPeerId;
   final int atMs;
@@ -36,7 +38,7 @@ class RoomRepository {
   final MeshDatabase _db;
   final String siteId;
 
-  Future<void> sendMessage({
+  Future<String> sendMessage({
     required RoomPolicy policy,
     required Set<String> userRoles,
     required String text,
@@ -72,6 +74,7 @@ class RoomRepository {
             expiresAtMs: now + policy.ttlSeconds * 1000,
           ),
         );
+    return eventId;
   }
 
   Future<void> announceMember({
@@ -138,6 +141,7 @@ class RoomRepository {
             for (final r in sentRows)
               if (r.payloadType == PayloadType.roomMessage.name)
                 RoomMessage(
+                  eventId: r.eventId,
                   text: r.rawText ?? '',
                   fromPeerId: null,
                   atMs: r.createdAtMs,
@@ -256,6 +260,7 @@ class RoomRepository {
             )
           : utf8.decode(row.payload, allowMalformed: false);
       return RoomMessage(
+        eventId: row.eventId,
         text: text,
         fromPeerId: row.peerId,
         atMs: row.receivedAtMs,

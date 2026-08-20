@@ -48,6 +48,7 @@ const emitRoomMembers = (key: string) => {
   }
 }
 const roomJoinSchema = z.object({ type: z.literal('join-room'), siteId: z.string().min(1).max(100), roomId: z.string().min(1).max(100), memberId: z.string().min(1).max(200), displayName: z.string().min(1).max(100), gatewayKey: z.string().min(1) })
+const roomMessageSchema = z.object({ type: z.literal('room-message'), messageId: z.string().min(1).max(200), text: z.string().trim().min(1).max(2000), sentAtMs: z.number().int().positive() })
 function bearer(req: express.Request, res: express.Response, next: express.NextFunction) { const token = req.headers.authorization?.replace(/^Bearer\s+/i, ''); if (!token) return res.status(401).json({ error: 'authentication required' }); try { (req as any).operator = jwt.verify(token, jwtSecret()); next() } catch { res.status(401).json({ error: 'invalid token' }) } }
 function gateway(req: express.Request, res: express.Response, next: express.NextFunction) { if (req.header('x-meshsetu-gateway-key') !== gatewaySecret() && req.header('x-meshsetu-demo-key') !== gatewaySecret()) return res.status(401).json({ error: 'bad gateway key' }); next() }
 
@@ -159,18 +160,32 @@ wss.on('connection', (socket, request) => {
   if (url.pathname === '/v1/rooms/stream') {
     let joined = false
     socket.on('message', (raw: Buffer) => {
-      if (joined) return
       let payload: unknown
       try { payload = JSON.parse(raw.toString()) } catch { socket.close(1008, 'invalid room join request'); return }
-      const parsed = roomJoinSchema.safeParse(payload)
-      if (!parsed.success || parsed.data.gatewayKey !== gatewaySecret()) { socket.close(1008, 'authentication required'); return }
-      joined = true
-      const key = roomKey(parsed.data.siteId, parsed.data.roomId)
-      roomConnections.set(socket, { roomKey: key, memberId: parsed.data.memberId })
-      const members = roomMembers.get(key) ?? new Map<string, RoomMember>()
-      roomMembers.set(key, members)
-      members.set(parsed.data.memberId, { memberId: parsed.data.memberId, displayName: parsed.data.displayName.trim(), joinedAtMs: Date.now() })
-      emitRoomMembers(key)
+      if (!joined) {
+        const parsed = roomJoinSchema.safeParse(payload)
+        if (!parsed.success || parsed.data.gatewayKey !== gatewaySecret()) { socket.close(1008, 'authentication required'); return }
+        joined = true
+        const key = roomKey(parsed.data.siteId, parsed.data.roomId)
+        roomConnections.set(socket, { roomKey: key, memberId: parsed.data.memberId })
+        const members = roomMembers.get(key) ?? new Map<string, RoomMember>()
+        roomMembers.set(key, members)
+        members.set(parsed.data.memberId, { memberId: parsed.data.memberId, displayName: parsed.data.displayName.trim(), joinedAtMs: Date.now() })
+        socket.send(JSON.stringify({ type: 'room-joined', data: { siteId: parsed.data.siteId, roomId: parsed.data.roomId } }))
+        console.log(`[room-chat] ${parsed.data.siteId}/${parsed.data.roomId}: ${parsed.data.displayName.trim()} joined`)
+        emitRoomMembers(key)
+        return
+      }
+      const message = roomMessageSchema.safeParse(payload)
+      const connection = roomConnections.get(socket)
+      const member = connection == null ? undefined : roomMembers.get(connection.roomKey)?.get(connection.memberId)
+      if (!message.success || connection == null || member == null) return
+      const outbound = JSON.stringify({ type: 'room-message', data: { messageId: message.data.messageId, text: message.data.text, memberId: member.memberId, displayName: member.displayName, sentAtMs: message.data.sentAtMs } })
+      let recipients = 0
+      for (const [client, clientConnection] of roomConnections) {
+        if (clientConnection.roomKey === connection.roomKey && client.readyState === 1) { client.send(outbound); recipients++ }
+      }
+      console.log(`[room-chat] ${member.displayName}: broadcast to ${recipients} connection(s)`)
     })
     socket.on('close', () => {
       const connection = roomConnections.get(socket)
