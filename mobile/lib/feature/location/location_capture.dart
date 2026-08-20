@@ -68,7 +68,7 @@ final class LocationCapture {
   static const _channel = MethodChannel('meshsetu/location');
 
   Future<LocationCaptureResult> capture({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 25),
   }) async {
     try {
       final raw = await _channel
