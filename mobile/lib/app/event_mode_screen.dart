@@ -448,6 +448,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   List<Map<String, dynamic>> _peerDebug = const [];
   final Map<String, int> _scanStats = {};
   String _lastReceived = 'none';
+  String? _receivedSosReporter;
+  String? _receivedSosLocation;
+  String? _receivedSosContact;
+  String? _receivedSosPeer;
+  int? _receivedSosHopCount;
+  int? _receivedSosHopLimit;
   MeshBridgeClient? _bridgeClient;
   late final TextEditingController _adminServerController;
   late final TextEditingController _gatewayKeyController;
@@ -554,6 +560,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             ),
           );
         }
+      case 'mesh_received':
+        final receivedJson = data['received'];
+        if (receivedJson is Map) {
+          _recordReceivedSos(
+            MeshBridge.receivedFromJson(receivedJson.cast<Object?, Object?>()),
+          );
+        }
       case 'mesh_status':
         setState(() => _meshStatus = '${data['value'] ?? 'unknown'}');
       case 'mesh_metric':
@@ -620,6 +633,32 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
+  void _recordReceivedSos(ReceivedObject received) {
+    if (received.envelope.payloadType != PayloadType.structuredSos) return;
+    try {
+      final sos = StructuredSosPayload.decode(received.envelope.payload);
+      final reporter = sos.reporter;
+      final location = sos.latitude == null || sos.longitude == null
+          ? 'Location unavailable'
+          : '${sos.latitude!.toStringAsFixed(5)}, '
+                '${sos.longitude!.toStringAsFixed(5)}'
+                '${sos.accuracyM == null ? '' : ' · ±${sos.accuracyM!.round()} m'}';
+      setState(() {
+        _receivedSosReporter = reporter?.name ?? 'Unknown sender';
+        _receivedSosLocation = location;
+        _receivedSosContact = reporter == null
+            ? null
+            : '${reporter.primaryContactName} · ${reporter.primaryContactPhone}'
+                  '${reporter.bloodGroup.isEmpty ? '' : ' · ${reporter.bloodGroup}'}';
+        _receivedSosPeer = received.peerId;
+        _receivedSosHopCount = received.envelope.hopCount;
+        _receivedSosHopLimit = received.envelope.hopLimit;
+      });
+    } catch (_) {
+      // Only complete authenticated structured SOS payloads are displayed.
+    }
+  }
+
   Future<void> _forwardTestSosToAdmin(MeshEnvelope envelope) async {
     if (!ref.read(gatewayEnabledProvider)) {
       if (mounted) {
@@ -656,9 +695,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           : '';
       if (reporterUid.isEmpty) return;
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+      final site = await ref.read(joinRepositoryProvider).activeManifest();
       final (success, detail) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
-        siteId: MeshEventController.demoSiteId,
+        siteId: site?.siteId ?? MeshEventController.demoSiteId,
         originId: originId,
         sequence: sequence,
       );
@@ -756,6 +796,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _scanStats.clear();
       _lastConnection = 'none';
       _lastReceived = 'none';
+      _receivedSosReporter = null;
+      _receivedSosLocation = null;
+      _receivedSosContact = null;
+      _receivedSosPeer = null;
+      _receivedSosHopCount = null;
+      _receivedSosHopLimit = null;
       _status = 'MeshSetu\nEvent mode is off';
     });
   }
@@ -852,10 +898,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       builder: (_) => const _SosCountdownDialog(),
     );
     if (confirmed != true || !mounted) return;
-    setState(
-      () => _status = 'MeshSetu\nBroadcasting CEAL-style compact SOS alert…',
-    );
+    setState(() => _status = 'MeshSetu\nPreparing identity SOS details…');
     try {
+      final locationResult = await _queueIdentitySosDetails();
+      final location = locationResult.location;
       // Convert the first 4 bytes of the 6-byte reporterUid hex into an int
       // to use as the BLE advertisement originId (CEAL's pseudonymous UID).
       final uidHex = profile.reporterUid.padRight(8, '0').substring(0, 8);
@@ -878,20 +924,27 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   ?.siteId ??
               MeshEventController.demoSiteId,
           originId: originId,
+          latitude: location?.latitude,
+          longitude: location?.longitude,
+          accuracyM: location?.accuracyM,
+          locationCapturedAtMs: location?.capturedAtMs,
         );
         if (mounted) {
           setState(
             () => _status = success
-                ? 'MeshSetu\nCEAL SOS sent to admin ✓ (UID: ${profile.reporterUid})\n'
-                      'Backend resolved UID→profile for dashboard'
-                : 'MeshSetu\nCEAL BLE broadcast sent · admin: $detail',
+                ? 'MeshSetu\nIdentity SOS broadcast ✓\n'
+                      'Encrypted identity details queued · ${locationResult.status}\n'
+                      'Dashboard resolved UID ${profile.reporterUid}'
+                : 'MeshSetu\nIdentity SOS broadcast · details queued '
+                      '(${locationResult.status}) · admin: $detail',
           );
         }
       } else {
         if (mounted) {
           setState(
             () => _status =
-                'MeshSetu\nCEAL BLE broadcast sent (no admin server configured)',
+                'MeshSetu\nIdentity SOS broadcast · encrypted details queued '
+                '(${locationResult.status})',
           );
         }
       }
@@ -900,6 +953,33 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         setState(() => _status = 'MeshSetu\nCEAL SOS broadcast failed: $error');
       }
     }
+  }
+
+  Future<LocationCaptureResult> _queueIdentitySosDetails() async {
+    final site = await ref.read(joinRepositoryProvider).activeManifest();
+    final repo = ref.read(sosRepositoryProvider);
+    final eventId = await repo.createDraft(
+      SosInput(
+        siteId: site?.siteId ?? MeshEventController.demoSiteId,
+        roomId: site?.rooms.isNotEmpty == true
+            ? site!.rooms.first.roomId
+            : 'public',
+        inputMode: InputMode.tap,
+        rawText: 'Identity SOS',
+        priority: PriorityBand.p0Critical,
+      ),
+    );
+    final permission = await Permission.locationWhenInUse.request();
+    final locationResult = permission.isGranted
+        ? await const LocationCapture().capture()
+        : const LocationCaptureResult.failure(
+            LocationFailureReason.permissionDenied,
+          );
+    if (locationResult.location case final location?) {
+      await repo.attachLocation(eventId, location);
+    }
+    await repo.finalizeAndEnqueue(eventId);
+    return locationResult;
   }
 
   Future<void> _openSos() async {
@@ -1096,6 +1176,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(_status, style: Theme.of(context).textTheme.headlineSmall),
+              if (_receivedSosReporter != null)
+                Card(
+                  color: Colors.red.shade50,
+                  child: ListTile(
+                    leading: const Icon(Icons.sos, color: Colors.red),
+                    title: Text('Identity SOS · $_receivedSosReporter'),
+                    subtitle: Text(
+                      '${_receivedSosLocation ?? 'Location unavailable'}\n'
+                      '${_receivedSosContact ?? 'Emergency contact unavailable'}\n'
+                      'Hop ${_receivedSosHopCount ?? '—'} of '
+                      '${_receivedSosHopLimit ?? '—'} · via '
+                      '${_receivedSosPeer ?? 'unknown peer'}',
+                    ),
+                    isThreeLine: true,
+                  ),
+                ),
               StreamBuilder<List<InboxEvent>>(
                 stream: ref.read(databaseProvider).watchInboxSite(activeSiteId),
                 builder: (context, snapshot) {

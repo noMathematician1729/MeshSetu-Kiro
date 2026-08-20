@@ -158,6 +158,15 @@ void main() {
       longitude: 72.8777,
       accuracyM: 8.5,
       locationCapturedAtMs: 42,
+      reporter: SosReporter(
+        reporterUid: 'aabbccddeeff',
+        name: 'Asha Patel',
+        phone: '+919876543210',
+        language: 'English',
+        bloodGroup: 'O+',
+        primaryContactName: 'Ravi Patel',
+        primaryContactPhone: '+919876543211',
+      ),
     );
     final event = GatewayBridge(
       baseUrl: Uri.parse('https://example.test'),
@@ -167,6 +176,8 @@ void main() {
     expect(event['latitude'], 19.076);
     expect(event['longitude'], 72.8777);
     expect(event['accuracy_m'], 8.5);
+    expect(event['reporter_name'], 'Asha Patel');
+    expect(event['reporter_primary_contact'], 'Ravi Patel (+919876543211)');
   });
 
   test('JoinRepository persists a newly created room', () async {

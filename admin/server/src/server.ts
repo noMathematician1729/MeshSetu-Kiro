@@ -103,7 +103,7 @@ app.get('/v1/profiles/:uid', bearer, async (req, res) => { const profile = await
 app.get('/v1/profiles', bearer, async (_req, res) => res.json(await store.allProfiles()))
 
 // CEAL-style compact SOS alert with UID→profile resolution.
-const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional() })
+const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional() })
 app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const parsed = cealSosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid CEAL SOS', details: parsed.error.issues })
   const profile = await store.getProfile(parsed.data.reporter_uid) ?? await store.getProfileByPrefix(parsed.data.reporter_uid)
@@ -117,6 +117,10 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     priority: 'p0Critical',
     incident_type: 'ceal_compact_sos',
     transcript: profile ? `CEAL SOS from ${profile.name} (${profile.phone})` : `CEAL SOS from UID ${parsed.data.reporter_uid} (unregistered)`,
+    latitude: parsed.data.latitude ?? null,
+    longitude: parsed.data.longitude ?? null,
+    accuracy_m: parsed.data.accuracy_m ?? null,
+    location_captured_at_ms: parsed.data.location_captured_at_ms ?? null,
     hops: 0,
     relay_latency_ms: 0,
     created_at_ms: now,
