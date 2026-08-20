@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -5,8 +7,10 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../../app/providers.dart';
 import '../join/manifest.dart';
 import 'room_chat_screen.dart';
+import 'room_presence.dart';
+import 'room_presence_socket.dart';
 
-class RoomLobbyScreen extends ConsumerWidget {
+class RoomLobbyScreen extends ConsumerStatefulWidget {
   const RoomLobbyScreen({
     super.key,
     required this.manifest,
@@ -17,10 +21,66 @@ class RoomLobbyScreen extends ConsumerWidget {
   final RoomManifest room;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final members = ref.watch(
-      roomMembersProvider((siteId: manifest.siteId, roomId: room.roomId)),
+  ConsumerState<RoomLobbyScreen> createState() => _RoomLobbyScreenState();
+}
+
+class _RoomLobbyScreenState extends ConsumerState<RoomLobbyScreen> {
+  StreamSubscription<List<RoomMember>>? _meshMembersSubscription;
+  RoomPresenceSocket? _presenceSocket;
+  List<RoomMember> _meshMembers = const [];
+  List<RoomMember> _liveMembers = const [];
+  var _receivedLiveSnapshot = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _meshMembersSubscription = ref
+        .read(roomRepositoryProvider(widget.manifest.siteId))
+        .watchMembers(widget.room.roomId)
+        .listen((members) {
+          if (mounted) setState(() => _meshMembers = members);
+        });
+    unawaited(_connectLivePresence());
+  }
+
+  Future<void> _connectLivePresence() async {
+    final profile = await ref.read(onboardingRepositoryProvider).load();
+    if (!mounted || profile == null) return;
+    final rawUrl = ref.read(gatewayUrlProvider).trim();
+    if (rawUrl.isEmpty) return;
+    final baseUrl = Uri.tryParse(rawUrl);
+    if (baseUrl == null || !baseUrl.hasScheme) return;
+    final presence = RoomPresenceSocket(
+      baseUrl: baseUrl,
+      gatewayKey: ref.read(gatewayDemoKeyProvider),
+      siteId: widget.manifest.siteId,
+      roomId: widget.room.roomId,
+      memberId: profile.profileId,
+      displayName: profile.name,
     );
+    _presenceSocket = presence;
+    presence.members.listen((members) {
+      if (!mounted) return;
+      setState(() {
+        _receivedLiveSnapshot = true;
+        _liveMembers = members;
+      });
+    });
+    presence.start();
+  }
+
+  @override
+  void dispose() {
+    unawaited(_meshMembersSubscription?.cancel());
+    unawaited(_presenceSocket?.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final members = _receivedLiveSnapshot ? _liveMembers : _meshMembers;
+    final manifest = widget.manifest;
+    final room = widget.room;
     final invite = EventManifestCodec.encode(manifest, roomId: room.roomId);
     return Scaffold(
       appBar: AppBar(title: Text(room.name)),
@@ -72,33 +132,28 @@ class RoomLobbyScreen extends ConsumerWidget {
             style: Theme.of(context).textTheme.labelLarge,
           ),
           const SizedBox(height: 8),
-          members.when(
-            loading: () => const ListTile(
-              leading: Icon(Icons.people_outline),
-              title: Text('Checking room members…'),
-            ),
-            error: (error, _) => Text('Could not load members: $error'),
-            data: (items) => items.isEmpty
-                ? const ListTile(
-                    leading: Icon(Icons.person_outline),
-                    title: Text('Waiting for people to join'),
-                    subtitle: Text('Members appear after they scan the QR.'),
-                  )
-                : Column(
-                    children: [
-                      for (final member in items)
-                        ListTile(
-                          leading: CircleAvatar(
-                            child: Text(
-                              member.displayName.characters.first.toUpperCase(),
-                            ),
+          members.isEmpty
+              ? const ListTile(
+                  leading: Icon(Icons.person_outline),
+                  title: Text('Waiting for people to join'),
+                  subtitle: Text('Members appear live after they scan the QR.'),
+                )
+              : Column(
+                  children: [
+                    for (final member in members)
+                      ListTile(
+                        leading: CircleAvatar(
+                          child: Text(
+                            member.displayName.characters.first.toUpperCase(),
                           ),
-                          title: Text(member.displayName),
-                          subtitle: const Text('Joined room'),
                         ),
-                    ],
-                  ),
-          ),
+                        title: Text(member.displayName),
+                        subtitle: Text(
+                          _receivedLiveSnapshot ? 'Active now' : 'Joined room',
+                        ),
+                      ),
+                  ],
+                ),
         ],
       ),
     );

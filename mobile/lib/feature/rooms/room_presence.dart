@@ -29,23 +29,32 @@ abstract final class RoomPresenceCodec {
 
   static RoomMember? decode(Uint8List payload) {
     try {
-      final map = jsonDecode(utf8.decode(payload)) as Map<String, Object?>;
-      final memberId = map['memberId'] as String? ?? '';
-      final displayName = map['displayName'] as String? ?? '';
-      final joinedAtMs = map['joinedAtMs'] as int? ?? 0;
-      if (map['v'] != 1 ||
-          memberId.trim().isEmpty ||
-          displayName.trim().isEmpty ||
-          joinedAtMs <= 0) {
-        return null;
-      }
-      return RoomMember(
-        memberId: memberId,
-        displayName: displayName,
-        joinedAtMs: joinedAtMs,
-      );
+      final map = jsonDecode(utf8.decode(payload));
+      return map is Map
+          ? fromJson(map.cast<String, Object?>(), requireVersion: true)
+          : null;
     } catch (_) {
       return null;
     }
+  }
+
+  static RoomMember? fromJson(
+    Map<String, Object?> map, {
+    bool requireVersion = false,
+  }) {
+    final memberId = map['memberId'] as String? ?? '';
+    final displayName = map['displayName'] as String? ?? '';
+    final joinedAtMs = (map['joinedAtMs'] as num?)?.toInt() ?? 0;
+    if ((requireVersion && map['v'] != 1) ||
+        memberId.trim().isEmpty ||
+        displayName.trim().isEmpty ||
+        joinedAtMs <= 0) {
+      return null;
+    }
+    return RoomMember(
+      memberId: memberId,
+      displayName: displayName,
+      joinedAtMs: joinedAtMs,
+    );
   }
 }

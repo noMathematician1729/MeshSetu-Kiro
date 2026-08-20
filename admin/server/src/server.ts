@@ -30,11 +30,24 @@ app.use((req, res, next) => {
 })
 app.use(express.json({ limit: '12mb' }))
 const clients = new Set<any>()
+type RoomMember = { memberId: string, displayName: string, joinedAtMs: number }
+type RoomConnection = { roomKey: string, memberId: string }
+const roomConnections = new Map<any, RoomConnection>()
+const roomMembers = new Map<string, Map<string, RoomMember>>()
 const jwtSecret = () => process.env.JWT_SECRET || 'meshsetu-local-jwt-change-me'
 const gatewaySecret = () => process.env.MESHSETU_GATEWAY_SECRET || process.env.MESHSETU_DEMO_KEY || 'change-me'
 const adminEmail = () => process.env.MESHSETU_ADMIN_EMAIL || 'operator@meshsetu.local'
 const adminPassword = () => process.env.MESHSETU_ADMIN_PASSWORD || 'meshsetu-demo'
 const emit = (type: string, data: any) => { const message = JSON.stringify({ type, data }); for (const client of clients) if (client.readyState === 1) client.send(message) }
+const roomKey = (siteId: string, roomId: string) => `${siteId}\u0000${roomId}`
+const emitRoomMembers = (key: string) => {
+  const members = [...(roomMembers.get(key)?.values() ?? [])].sort((a, b) => a.joinedAtMs - b.joinedAtMs)
+  const message = JSON.stringify({ type: 'room-members', data: members })
+  for (const [socket, connection] of roomConnections) {
+    if (connection.roomKey === key && socket.readyState === 1) socket.send(message)
+  }
+}
+const roomJoinSchema = z.object({ type: z.literal('join-room'), siteId: z.string().min(1).max(100), roomId: z.string().min(1).max(100), memberId: z.string().min(1).max(200), displayName: z.string().min(1).max(100), gatewayKey: z.string().min(1) })
 function bearer(req: express.Request, res: express.Response, next: express.NextFunction) { const token = req.headers.authorization?.replace(/^Bearer\s+/i, ''); if (!token) return res.status(401).json({ error: 'authentication required' }); try { (req as any).operator = jwt.verify(token, jwtSecret()); next() } catch { res.status(401).json({ error: 'invalid token' }) } }
 function gateway(req: express.Request, res: express.Response, next: express.NextFunction) { if (req.header('x-meshsetu-gateway-key') !== gatewaySecret() && req.header('x-meshsetu-demo-key') !== gatewaySecret()) return res.status(401).json({ error: 'bad gateway key' }); next() }
 
@@ -143,8 +156,35 @@ wss.on('connection', (socket, request) => {
   if (url.pathname === '/v1/stream') {
     try { jwt.verify(url.searchParams.get('token') || '', jwtSecret()) } catch { socket.close(1008, 'authentication required'); return }
   }
+  if (url.pathname === '/v1/rooms/stream') {
+    let joined = false
+    socket.on('message', (raw: Buffer) => {
+      if (joined) return
+      let payload: unknown
+      try { payload = JSON.parse(raw.toString()) } catch { socket.close(1008, 'invalid room join request'); return }
+      const parsed = roomJoinSchema.safeParse(payload)
+      if (!parsed.success || parsed.data.gatewayKey !== gatewaySecret()) { socket.close(1008, 'authentication required'); return }
+      joined = true
+      const key = roomKey(parsed.data.siteId, parsed.data.roomId)
+      roomConnections.set(socket, { roomKey: key, memberId: parsed.data.memberId })
+      const members = roomMembers.get(key) ?? new Map<string, RoomMember>()
+      roomMembers.set(key, members)
+      members.set(parsed.data.memberId, { memberId: parsed.data.memberId, displayName: parsed.data.displayName.trim(), joinedAtMs: Date.now() })
+      emitRoomMembers(key)
+    })
+    socket.on('close', () => {
+      const connection = roomConnections.get(socket)
+      if (!connection) return
+      roomConnections.delete(socket)
+      const memberStillConnected = [...roomConnections.values()].some((item) => item.roomKey === connection.roomKey && item.memberId === connection.memberId)
+      if (!memberStillConnected) roomMembers.get(connection.roomKey)?.delete(connection.memberId)
+      if (roomMembers.get(connection.roomKey)?.size === 0) roomMembers.delete(connection.roomKey)
+      emitRoomMembers(connection.roomKey)
+    })
+    return
+  }
   clients.add(socket); store.all().then(events => socket.send(JSON.stringify({ type: 'snapshot', data: events }))); socket.on('close', () => clients.delete(socket))
 })
-server.on('upgrade', (request, socket, head) => { if (request.url?.startsWith('/ws') || request.url?.startsWith('/v1/stream')) wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, request)); else socket.destroy() })
+server.on('upgrade', (request, socket, head) => { if (request.url?.startsWith('/ws') || request.url?.startsWith('/v1/stream') || request.url?.startsWith('/v1/rooms/stream')) wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, request)); else socket.destroy() })
 
 if (process.env.NODE_ENV !== 'test') { await store.init(); server.listen(Number(process.env.PORT || 8000), '0.0.0.0', () => console.log(`MeshSetu control room listening on ${process.env.PORT || 8000}`)) }
