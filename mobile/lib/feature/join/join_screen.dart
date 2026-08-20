@@ -10,9 +10,10 @@ import 'manifest.dart';
 /// Mesh Code / QR join screen (Bible §9.3, `feature/join`). Typed code and
 /// QR scan both resolve to the same [JoinResult] path.
 class JoinScreen extends ConsumerStatefulWidget {
-  const JoinScreen({super.key, this.onJoined});
+  const JoinScreen({super.key, this.onJoined, this.createRoomOnly = false});
 
   final ValueChanged<String?>? onJoined;
+  final bool createRoomOnly;
 
   @override
   ConsumerState<JoinScreen> createState() => _JoinScreenState();
@@ -43,33 +44,10 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
 
   Future<void> _createLocalEvent() async {
     if (_scanning) setState(() => _scanning = false);
-    final nameController = TextEditingController();
     final siteName = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Create event'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Event name',
-            hintText: 'e.g. Campus Safety Drill',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(context).pop(nameController.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
+      builder: (_) => const _CreateEventDialog(),
     );
-    nameController.dispose();
     if (siteName == null || siteName.isEmpty || !mounted) return;
     setState(() {
       _submitting = true;
@@ -82,16 +60,34 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
       refreshActiveSite(ref);
       if (!mounted) return;
       setState(() => _submitting = false);
+      await _announceRoomJoin(manifest, manifest.rooms.first.roomId);
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Created ${manifest.siteName}')));
-      widget.onJoined?.call(null);
+      widget.onJoined?.call(manifest.rooms.first.roomId);
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _submitting = false;
         _error = 'Could not create event: $error';
       });
+    }
+  }
+
+  Future<void> _announceRoomJoin(EventManifest manifest, String roomId) async {
+    try {
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      if (profile == null) return;
+      await ref
+          .read(roomRepositoryProvider(manifest.siteId))
+          .announceMember(
+            roomId: roomId,
+            memberId: profile.profileId,
+            displayName: profile.name,
+          );
+    } catch (_) {
+      // Joining remains available when an optional presence update cannot queue.
     }
   }
 
@@ -110,6 +106,7 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
     switch (result) {
       case JoinOk(:final manifest, :final roomId):
         refreshActiveSite(ref);
+        if (roomId != null) unawaited(_announceRoomJoin(manifest, roomId));
         if (!mounted) return;
         ScaffoldMessenger.of(
           context,
@@ -127,44 +124,56 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Join event')),
+      appBar: AppBar(
+        title: Text(widget.createRoomOnly ? 'Create room' : 'Join room'),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            Text(
-              'Enter the Mesh Code the site organizer shared, or scan its QR.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _codeController,
-              textCapitalization: TextCapitalization.characters,
-              decoration: const InputDecoration(
-                labelText: 'Mesh Code',
-                border: OutlineInputBorder(),
+            if (!widget.createRoomOnly) ...[
+              Text(
+                'Enter the room code the organizer shared, or scan its QR.',
+                style: Theme.of(context).textTheme.bodyMedium,
               ),
-            ),
-            const SizedBox(height: 8),
-            FilledButton(
-              onPressed: _submitting ? null : _submitCode,
-              child: const Text('Join with code'),
-            ),
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              icon: const Icon(Icons.qr_code_scanner),
-              label: Text(_scanning ? 'Scanning…' : 'Scan QR instead'),
-              onPressed: () => setState(() => _scanning = !_scanning),
-            ),
-            const SizedBox(height: 12),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _codeController,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(
+                  labelText: 'Room code',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              FilledButton(
+                onPressed: _submitting ? null : _submitCode,
+                child: const Text('Join with code'),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.qr_code_scanner),
+                label: Text(_scanning ? 'Scanning…' : 'Scan QR instead'),
+                onPressed: () => setState(() => _scanning = !_scanning),
+              ),
+              const SizedBox(height: 12),
+            ] else ...[
+              Text(
+                'Create a room lobby, then share its QR with the people you want to join.',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 16),
+            ],
             FilledButton.tonalIcon(
               icon: const Icon(Icons.add_home_work_outlined),
-              label: const Text('Create event & rooms'),
+              label: Text(
+                widget.createRoomOnly ? 'Name and create room' : 'Create room',
+              ),
               onPressed: _submitting ? null : _createLocalEvent,
             ),
             const SizedBox(height: 8),
             const Text(
-              'Create an event here, then add rooms and share each room QR.',
+              'This creates a room lobby and its join QR. Add more rooms later if needed.',
               textAlign: TextAlign.center,
             ),
             if (_error != null) ...[
@@ -189,4 +198,44 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
       ),
     );
   }
+}
+
+class _CreateEventDialog extends StatefulWidget {
+  const _CreateEventDialog();
+
+  @override
+  State<_CreateEventDialog> createState() => _CreateEventDialogState();
+}
+
+class _CreateEventDialogState extends State<_CreateEventDialog> {
+  final _nameController = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Create room'),
+    content: TextField(
+      controller: _nameController,
+      autofocus: true,
+      decoration: const InputDecoration(
+        labelText: 'Room name',
+        hintText: 'e.g. Campus Safety Drill',
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.of(context).pop(_nameController.text.trim()),
+        child: const Text('Create'),
+      ),
+    ],
+  );
 }

@@ -859,10 +859,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: (_) {
+          onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -874,10 +876,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => JoinScreen(
-          onJoined: (_) {
+          createRoomOnly: true,
+          onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -892,7 +897,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           onJoined: (roomId) {
             unawaited(_startBridgeForActiveSite());
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RoomsScreen()),
+              MaterialPageRoute(
+                builder: (_) => RoomsScreen(initialRoomId: roomId),
+              ),
             );
           },
         ),
@@ -1142,7 +1149,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 onPressed: _eventModeActive ? _createEventAndRoom : null,
                 icon: const Icon(Icons.add_home_work_outlined),
                 style: FilledButton.styleFrom(backgroundColor: Colors.teal),
-                label: const Text('Create Event + Room (QR)'),
+                label: const Text('Create Room (Share QR)'),
               ),
               const SizedBox(height: 12),
               FilledButton.icon(

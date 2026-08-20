@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:meshsetu_mobile/feature/rooms/room_message_packet.dart';
+import 'package:meshsetu_mobile/feature/rooms/room_presence.dart';
 
 void main() {
   test('room message packet round trips with HMAC authentication', () {
@@ -50,5 +51,20 @@ void main() {
       ),
       throwsFormatException,
     );
+  });
+
+  test('room presence round trips for the lobby member list', () {
+    final packet = RoomPresenceCodec.encode(
+      const RoomMember(
+        memberId: 'member-1',
+        displayName: 'Asha',
+        joinedAtMs: 42,
+      ),
+    );
+
+    final member = RoomPresenceCodec.decode(packet);
+    expect(member?.memberId, 'member-1');
+    expect(member?.displayName, 'Asha');
+    expect(member?.joinedAtMs, 42);
   });
 }

@@ -6,6 +6,7 @@ import '../feature/gateway/gateway_bridge.dart';
 import '../feature/onboarding/onboarding_profile.dart';
 import '../feature/onboarding/onboarding_repository.dart';
 import '../feature/rooms/room_repository.dart';
+import '../feature/rooms/room_presence.dart';
 import '../feature/sos/sos_repository.dart';
 import '../feature/stt/sherpa_onnx_stt_engine.dart';
 import '../feature/stt/stt_engine.dart';
@@ -90,4 +91,11 @@ final roomMessagesProvider = StreamProvider.family
     .autoDispose<List<RoomMessage>, ({String siteId, String roomId})>(
       (ref, key) =>
           ref.watch(roomRepositoryProvider(key.siteId)).watch(key.roomId),
+    );
+
+final roomMembersProvider = StreamProvider.family
+    .autoDispose<List<RoomMember>, ({String siteId, String roomId})>(
+      (ref, key) => ref
+          .watch(roomRepositoryProvider(key.siteId))
+          .watchMembers(key.roomId),
     );
