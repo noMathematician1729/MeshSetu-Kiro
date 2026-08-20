@@ -12,6 +12,7 @@ const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
 const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173']
 const configuredOrigins = [
   process.env.MESHSETU_ADMIN_ORIGIN,
+  process.env.MESHSETU_PUBLIC_APP_ORIGIN,
   ...(process.env.CORS_ALLOWED_ORIGINS || '').split(','),
 ].map(normalizeOrigin).filter(Boolean) as string[]
 const allowedOrigins = new Set([...localOrigins, ...configuredOrigins])
@@ -38,6 +39,39 @@ const emit = (type: string, data: any) => { const message = JSON.stringify({ typ
 function bearer(req: express.Request, res: express.Response, next: express.NextFunction) { const token = req.headers.authorization?.replace(/^Bearer\s+/i, ''); if (!token) return res.status(401).json({ error: 'authentication required' }); try { (req as any).operator = jwt.verify(token, jwtSecret()); next() } catch { res.status(401).json({ error: 'invalid token' }) } }
 function gateway(req: express.Request, res: express.Response, next: express.NextFunction) { if (req.header('x-meshsetu-gateway-key') !== gatewaySecret() && req.header('x-meshsetu-demo-key') !== gatewaySecret()) return res.status(401).json({ error: 'bad gateway key' }); next() }
 
+const publicAppOrigin = () => normalizeOrigin(process.env.MESHSETU_PUBLIC_APP_ORIGIN || process.env.MESHSETU_ADMIN_ORIGIN || 'http://localhost:5173')!
+const publicIncidentUrl = (eventId: string) => `${publicAppOrigin()}/sos/${encodeURIComponent(eventId)}`
+async function fanOutIncident(record: any, updateType: string, relayDeviceId?: string) {
+  const existingRecipients = await store.recipientKeysForEvent(record.event_id)
+  const recipients = new Map<string, { recipient_type: 'admin' | 'emergency_contact' | 'relay'; recipient_key: string }>()
+  recipients.set('admin:all', { recipient_type: 'admin', recipient_key: 'admin:all' })
+  if (record.reporter_uid) {
+    const profile = await store.getProfile(record.reporter_uid)
+    for (const contact of profile?.emergency_contacts ?? []) {
+      if (!contact?.phone) continue
+      for (const account of await store.profilesForPhone(String(contact.phone))) recipients.set(`contact:${account.reporter_uid}`, { recipient_type: 'emergency_contact', recipient_key: `contact:${account.reporter_uid}` })
+    }
+  }
+  for (const recipient of existingRecipients) recipients.set(`${recipient.recipient_type}:${recipient.recipient_key}`, recipient)
+  if (relayDeviceId) recipients.set(`relay:${relayDeviceId}`, { recipient_type: 'relay', recipient_key: `relay:${relayDeviceId}` })
+  const reporter = record.reporter_name || (record.reporter_uid ? `UID ${record.reporter_uid}` : 'Unknown sender')
+  const updateLabel = updateType === 'new' ? 'SOS received' : updateType === 'status:dispatched' ? 'SOS escalated' : `SOS update: ${updateType.replace(/^status:/, '')}`
+  const body = `${reporter} · ${record.incident_type || 'emergency'}${record.zone ? ` · ${record.zone}` : ''}`
+  const notifications = await store.createNotifications([...recipients.values()].map(recipient => ({
+    notification_id: `${record.event_id}:${recipient.recipient_key}:${updateType}`,
+    event_id: record.event_id,
+    recipient_type: recipient.recipient_type,
+    recipient_key: recipient.recipient_key,
+    update_type: updateType,
+    title: updateLabel,
+    body,
+    public_url: publicIncidentUrl(record.event_id),
+    created_at_ms: Date.now(),
+  })))
+  notifications.forEach(notification => emit('notification', notification))
+  return notifications
+}
+
 async function healthPayload() {
   let database = 'memory'
   if (store.pool) {
@@ -63,6 +97,29 @@ app.get('/v1/health', async (_req, res) => {
 })
 app.post('/v1/auth/token', (req, res) => { const body = z.object({ email: z.string().email(), password: z.string().min(1) }).safeParse(req.body); if (!body.success || body.data.email !== adminEmail() || body.data.password !== adminPassword()) return res.status(401).json({ error: 'invalid credentials' }); const token = jwt.sign({ sub: body.data.email, role: 'operator' }, jwtSecret(), { expiresIn: '12h' }); res.json({ access_token: token, token_type: 'Bearer', expires_in: 43200, operator: { email: body.data.email, role: 'operator' } }) })
 
+// Notification recipients open a dedicated, indefinitely-addressable incident page.
+app.get('/v1/public/sos/:eventId', async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event) return res.status(404).json({ error: 'not found' }); res.json(event) })
+app.get('/v1/notifications/:recipientUid', async (req, res) => res.json(await store.notificationsFor(`contact:${String(req.params.recipientUid)}`)))
+
+const relaySosSchema = z.object({
+  relay_device_id: z.string().min(1).max(128),
+  event: z.object({
+    event_id: z.string().min(1), object_id: z.string().min(1), site_id: z.string().min(1), room_id: z.string().default('public'),
+    priority: z.string().default('p0Critical'), incident_type: z.string().default('compact_sos'), transcript: z.string().nullable().optional(),
+    zone: z.string().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional(),
+    hops: z.number().int().nonnegative().default(0), relay_latency_ms: z.number().int().nonnegative().default(0), created_at_ms: z.number(), expires_at_ms: z.number(), reporter_uid: z.string().nullable().optional(),
+  }),
+})
+app.post('/v1/gateway/relay-sos', gateway, async (req, res) => {
+  const parsed = relaySosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid relay SOS', details: parsed.error.issues })
+  const source = parsed.data.event
+  const profile = source.reporter_uid ? await store.getProfile(source.reporter_uid) ?? await store.getProfileByPrefix(source.reporter_uid) : undefined
+  const record = await store.upsert({ ...source, received_at_ms: Date.now(), packet_sha256: `relay:${source.object_id}`, decrypt_status: 'relay-decrypted', status: 'new', reporter_uid: source.reporter_uid ?? null, reporter_name: profile?.name ?? null, reporter_phone: profile?.phone ?? null, reporter_language: profile?.language ?? null, reporter_blood_group: profile?.blood_group ?? null, reporter_primary_contact: profile ? `${profile.primary_contact_name} (${profile.primary_contact_phone})` : null })
+  await fanOutIncident(record, 'new', parsed.data.relay_device_id)
+  emit('incident', record)
+  res.json({ ok: true, event: record, public_url: publicIncidentUrl(source.event_id) })
+})
+
 const packetSchema = z.object({ site_id: z.string().min(1), object_id: z.union([z.string(), z.number()]).transform(String), packet_b64: z.string().min(1), peer_id: z.string().optional(), received_at_ms: z.number().optional() })
 app.post('/v1/gateway/objects', gateway, async (req, res) => {
   const parsed = packetSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid packet request', details: parsed.error.issues })
@@ -74,12 +131,14 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
     if (decoded.envelope.payloadType === 'structuredSos') {
       const s = decoded.payload
       const record = await store.upsert({ event_id: decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null })
+      await fanOutIncident(record, 'new')
       emit('incident', record); return res.json({ ok: true, verified: true, event: record })
     }
     if (decoded.envelope.payloadType === 'voiceObject') {
       const voice = decoded.payload
       const current = await store.get(voice.sosEventId)
       const record = await store.upsert({ ...(current ?? { event_id: voice.sosEventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: decoded.envelope.priority, incident_type: 'unknown', status: 'new' }), voice_clip_id: voice.clipId, audio_state: 'complete', audio_bytes: voice.bytes, audio_sha256: voice.sha256, audio_content_type: 'audio/ogg; codecs=opus', packet_sha256: decoded.packetSha256, decrypt_status: 'verified', received_at_ms: now, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs) })
+      await fanOutIncident(record, 'voice:complete')
       emit('voice', record); return res.json({ ok: true, verified: true, event: record })
     }
     return res.json({ ok: true, verified: true, ignored: decoded.envelope.payloadType })
@@ -88,7 +147,7 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
 
 app.get('/v1/sos', bearer, async (_req, res) => res.json(await store.all()))
 app.get('/v1/sos/:eventId', bearer, async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event) return res.status(404).json({ error: 'not found' }); res.json(event) })
-app.patch('/v1/sos/:eventId/status', bearer, async (req, res) => { const body = z.object({ status: z.enum(['new', 'acknowledged', 'dispatched', 'resolved']) }).safeParse(req.body); if (!body.success) return res.status(400).json({ error: 'invalid status' }); const event = await store.status(String(req.params.eventId), body.data.status); if (!event) return res.status(404).json({ error: 'not found' }); emit('incident', event); res.json(event) })
+app.patch('/v1/sos/:eventId/status', bearer, async (req, res) => { const body = z.object({ status: z.enum(['new', 'acknowledged', 'dispatched', 'resolved']) }).safeParse(req.body); if (!body.success) return res.status(400).json({ error: 'invalid status' }); const event = await store.status(String(req.params.eventId), body.data.status); if (!event) return res.status(404).json({ error: 'not found' }); await fanOutIncident(event, `status:${body.data.status}`); emit('incident', event); res.json(event) })
 app.get('/v1/sos/:eventId/voice', bearer, async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event?.audio_bytes) return res.status(404).end(); res.type(event.audio_content_type || 'audio/ogg'); res.send(event.audio_bytes) })
 
 // Compatibility surface for the existing Flutter gateway and dashboard.
@@ -136,6 +195,7 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     reporter_blood_group: profile?.blood_group ?? null,
     reporter_primary_contact: profile ? `${profile.primary_contact_name} (${profile.primary_contact_phone})` : null,
   })
+  await fanOutIncident(record, 'new')
   emit('incident', record)
   res.json({ ok: true, resolved: !!profile, event: record, profile: profile ?? null })
 })

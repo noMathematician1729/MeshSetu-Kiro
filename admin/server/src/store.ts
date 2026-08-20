@@ -2,10 +2,12 @@ import { Pool } from 'pg'
 
 export type EventRecord = Record<string, any>
 export type ProfileRecord = { reporter_uid: string; name: string; phone: string; language: string; blood_group: string; allergies: string; conditions: string; primary_contact_name: string; primary_contact_phone: string; emergency_contacts: any[]; registered_at_ms: number; updated_at?: string }
+export type NotificationRecord = { notification_id: string; event_id: string; recipient_type: 'admin' | 'emergency_contact' | 'relay'; recipient_key: string; update_type: string; title: string; body: string; public_url: string; created_at_ms: number }
 export class EventStore {
   pool?: Pool
   memory = new Map<string, EventRecord>()
   profiles = new Map<string, ProfileRecord>()
+  notifications = new Map<string, NotificationRecord>()
   constructor() { if (process.env.DATABASE_URL) this.pool = new Pool({ connectionString: process.env.DATABASE_URL }) }
   async init() {
     if (!this.pool) return
@@ -20,6 +22,8 @@ export class EventStore {
       ALTER TABLE sos_incidents ADD COLUMN IF NOT EXISTS reporter_primary_contact text;
     END $$`)
     await this.pool.query(`CREATE TABLE IF NOT EXISTS user_profiles (reporter_uid text PRIMARY KEY, name text NOT NULL, phone text NOT NULL, language text NOT NULL DEFAULT 'English', blood_group text, allergies text, conditions text, primary_contact_name text, primary_contact_phone text, emergency_contacts jsonb NOT NULL DEFAULT '[]', registered_at_ms bigint NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`)
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS sos_notification_deliveries (notification_id text PRIMARY KEY, event_id text NOT NULL REFERENCES sos_incidents(event_id) ON DELETE CASCADE, recipient_type text NOT NULL, recipient_key text NOT NULL, update_type text NOT NULL, title text NOT NULL, body text NOT NULL, public_url text NOT NULL, created_at_ms bigint NOT NULL)`)
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS sos_notification_deliveries_recipient_idx ON sos_notification_deliveries (recipient_key, created_at_ms DESC)`)
   }
   async upsert(record: EventRecord) {
     const existing = this.memory.get(record.event_id)
@@ -56,6 +60,34 @@ export class EventStore {
   async allProfiles(): Promise<ProfileRecord[]> {
     if (!this.pool) return [...this.profiles.values()]
     const result = await this.pool.query('SELECT * FROM user_profiles ORDER BY registered_at_ms DESC')
+    return result.rows
+  }
+  async profilesForPhone(phone: string): Promise<ProfileRecord[]> {
+    if (!this.pool) return [...this.profiles.values()].filter(profile => profile.phone === phone)
+    const result = await this.pool.query('SELECT * FROM user_profiles WHERE phone=$1', [phone])
+    return result.rows
+  }
+  async createNotifications(records: NotificationRecord[]): Promise<NotificationRecord[]> {
+    const created: NotificationRecord[] = []
+    for (const record of records) {
+      if (this.notifications.has(record.notification_id)) continue
+      if (this.pool) {
+        const result = await this.pool.query(`INSERT INTO sos_notification_deliveries (notification_id, event_id, recipient_type, recipient_key, update_type, title, body, public_url, created_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (notification_id) DO NOTHING RETURNING *`, [record.notification_id, record.event_id, record.recipient_type, record.recipient_key, record.update_type, record.title, record.body, record.public_url, record.created_at_ms])
+        if (!result.rows[0]) continue
+      }
+      this.notifications.set(record.notification_id, record)
+      created.push(record)
+    }
+    return created
+  }
+  async notificationsFor(recipientKey: string): Promise<NotificationRecord[]> {
+    if (!this.pool) return [...this.notifications.values()].filter(record => record.recipient_key === recipientKey).sort((a, b) => b.created_at_ms - a.created_at_ms)
+    const result = await this.pool.query('SELECT * FROM sos_notification_deliveries WHERE recipient_key=$1 ORDER BY created_at_ms DESC', [recipientKey])
+    return result.rows
+  }
+  async recipientKeysForEvent(eventId: string): Promise<{ recipient_type: NotificationRecord['recipient_type']; recipient_key: string }[]> {
+    if (!this.pool) return [...this.notifications.values()].filter(record => record.event_id === eventId).map(record => ({ recipient_type: record.recipient_type, recipient_key: record.recipient_key }))
+    const result = await this.pool.query('SELECT DISTINCT recipient_type, recipient_key FROM sos_notification_deliveries WHERE event_id=$1', [eventId])
     return result.rows
   }
 }

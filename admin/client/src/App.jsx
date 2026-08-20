@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { authToken, getEvents, getVoice, login, openStream, setStatus, setToken } from './api'
+import { authToken, getEvents, getPublicEvent, getVoice, login, openStream, setStatus, setToken } from './api'
 import MarketingApp from './marketing/App.jsx'
 import marketingStyles from './marketing/styles.css?inline'
 
@@ -44,7 +44,15 @@ function MarketingPage() {
 }
 
 function ControlRoomApp() { const [signedIn, setSignedIn] = useState(Boolean(authToken())); return signedIn ? <ControlRoom onLogout={() => { setToken(''); setSignedIn(false) }} /> : <Login onLogin={() => setSignedIn(true)} /> }
-function App() { return window.location.pathname.startsWith(controlRoomPath) ? <ControlRoomApp /> : <MarketingPage /> }
+function PublicIncidentPage({ eventId }) {
+  const [event, setEvent] = useState(null); const [error, setError] = useState('');
+  useEffect(() => { getPublicEvent(eventId).then(setEvent).catch(err => setError(err.message)) }, [eventId])
+  if (error) return <main className="public-incident"><span className="eyebrow">MESHSETU / SOS DETAIL</span><h1>Incident unavailable</h1><p>{error}</p></main>
+  if (!event) return <main className="public-incident"><span className="eyebrow">MESHSETU / SOS DETAIL</span><h1>Loading emergency details…</h1></main>
+  const coordinates = event.latitude != null && event.longitude != null ? `${Number(event.latitude).toFixed(5)}, ${Number(event.longitude).toFixed(5)}` : 'Unavailable'
+  return <main className="public-incident"><header><div><span className="crumb">MESHSETU <b>/</b> LIVE SOS</span><h2>{event.incident_type || 'Emergency SOS'}</h2></div><Badge tone={event.status === 'resolved' ? '' : 'critical'}>{event.status || 'new'}</Badge></header><section className="public-incident-card"><span className="eyebrow">LIVE INCIDENT / {event.event_id}</span><p className="public-transcript">“{event.transcript || 'No transcript attached to this SOS.'}”</p><div className="public-facts"><Fact label="Reporter" value={event.reporter_name || event.reporter_uid || 'Unavailable'} /><Fact label="Phone" value={event.reporter_phone || 'Unavailable'} /><Fact label="Priority" value={event.priority || 'Unavailable'} /><Fact label="Zone" value={event.zone || 'Unavailable'} /><Fact label="Location" value={coordinates} /><Fact label="Relay hops" value={event.hops ?? 'Unavailable'} /><Fact label="Received" value={formatTimestamp(event.received_at_ms || event.created_at_ms)} /><Fact label="Response status" value={event.status || 'new'} /><Fact label="Blood group" value={event.reporter_blood_group || 'Unavailable'} /><Fact label="Emergency contact" value={event.reporter_primary_contact || 'Unavailable'} /></div><IncidentMap latitude={event.latitude} longitude={event.longitude} /><p className="public-note">This is the live SOS detail page linked from your emergency notification.</p></section></main>
+}
+function App() { const path = window.location.pathname; if (path.startsWith('/sos/')) return <PublicIncidentPage eventId={decodeURIComponent(path.slice('/sos/'.length))} />; return path.startsWith(controlRoomPath) ? <ControlRoomApp /> : <MarketingPage /> }
 
 function ControlRoom({ onLogout }) { const [events, setEvents] = useState([]); const [selectedId, setSelectedId] = useState(''); const [connection, setConnection] = useState('connecting'); const [error, setError] = useState(''); const [filter, setFilter] = useState('all'); const [voiceUrl, setVoiceUrl] = useState(''); const [alertQueue, setAlertQueue] = useState([]);
   const dismissAlert = () => setAlertQueue(q => q.slice(1));
