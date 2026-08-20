@@ -7,7 +7,6 @@ import '../join/manifest.dart';
 import '../sos/sos_screen.dart';
 import '../voice/voice_inbox_screen.dart';
 import 'room_lobby_screen.dart';
-import 'room_chat_screen.dart';
 import 'room_policy.dart';
 
 String _roomIdFromName(String name) {
@@ -47,10 +46,16 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
           if (manifest == null) {
             return const Center(child: Text('Join an event first.'));
           }
+          final readableRooms = manifest.rooms
+              .where(
+                (room) =>
+                    canRead(policyForRole(room.roomId, room.role), userRoles),
+              )
+              .toList();
           final initialRoomId = widget.initialRoomId;
           final matchingRooms = initialRoomId == null
               ? const <RoomManifest>[]
-              : manifest.rooms
+              : readableRooms
                     .where((room) => room.roomId == initialRoomId)
                     .toList();
           final initialRoom = matchingRooms.isEmpty
@@ -127,32 +132,6 @@ class _RoomsScreenState extends ConsumerState<RoomsScreen> {
         },
       ),
     );
-  }
-
-  void _openInitialRoomIfAvailable(
-    BuildContext context,
-    EventManifest manifest,
-    List<RoomManifest> rooms,
-  ) {
-    final roomId = widget.initialRoomId;
-    if (_openedInitialRoom || roomId == null) return;
-    _openedInitialRoom = true;
-    final matches = rooms.where((room) => room.roomId == roomId);
-    if (matches.isEmpty) return;
-    final room = matches.first;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => RoomChatScreen(
-            siteId: manifest.siteId,
-            roomId: room.roomId,
-            roomName: room.name,
-            role: room.role,
-          ),
-        ),
-      );
-    });
   }
 
   Future<void> _createRoom(BuildContext context, WidgetRef ref) async {
