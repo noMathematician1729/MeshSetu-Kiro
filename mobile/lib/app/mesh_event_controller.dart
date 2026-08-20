@@ -469,6 +469,31 @@ class MeshEventController {
       ),
     ]);
     onCompactSosAlert?.call(alert);
+    if (alert.ttl > 1) unawaited(_relayCompactSos(alert));
+  }
+
+  Future<void> _relayCompactSos(MeshSosAdvertisement alert) async {
+    final metadata = _discoveryMetadata;
+    if (!_looping || metadata == null) return;
+    final relayed = MeshSosAdvertisement(
+      siteFingerprint: alert.siteFingerprint,
+      originId: alert.originId,
+      sequence: alert.sequence,
+      flags: alert.flags,
+      ttl: alert.ttl - 1,
+    );
+    _reportMetrics([
+      RelayMetric(
+        'sos_alert_relayed',
+        value: relayed.sequence,
+        detail: 'ttl ${relayed.ttl}',
+      ),
+    ]);
+    try {
+      await MeshAdvertiser.broadcastSos(relayed, metadata);
+    } catch (error) {
+      _reportMetrics([RelayMetric('sos_alert_failed', detail: '$error')]);
+    }
   }
 
   Future<void> stop() async {

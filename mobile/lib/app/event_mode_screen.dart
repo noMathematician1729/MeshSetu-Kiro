@@ -42,6 +42,7 @@ bool _sosNotificationsInitialized = false;
 Future<void> _showSosNotification({
   required ReceivedObject received,
   required String detail,
+  int? notificationId,
 }) async {
   try {
     if (!_sosNotificationsInitialized) {
@@ -51,10 +52,10 @@ Future<void> _showSosNotification({
       await _sosNotifications.initialize(settings: settings);
       _sosNotificationsInitialized = true;
     }
-    var notificationId = received.envelope.objectId & 0x7fffffff;
-    if (notificationId == 0) notificationId = 1;
+    var id = notificationId ?? (received.envelope.objectId & 0x7fffffff);
+    if (id == 0) id = 1;
     await _sosNotifications.show(
-      id: notificationId,
+      id: id,
       title: 'SOS RECEIVED',
       body: detail,
       notificationDetails: const NotificationDetails(
@@ -392,7 +393,8 @@ class _MeshEventTaskHandler extends TaskHandler {
       final sos = StructuredSosPayload.decode(received.envelope.payload);
       final location = sos.latitude == null || sos.longitude == null
           ? 'location unavailable'
-          : 'GPS attached';
+          : 'GPS ${sos.latitude!.toStringAsFixed(5)}, '
+                '${sos.longitude!.toStringAsFixed(5)}';
       final reporter = sos.reporter?.name;
       detail = reporter != null && reporter.isNotEmpty
           ? 'From $reporter · ${sos.triagePriority.name} · $location'
@@ -403,8 +405,18 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     final compactKey =
         '${MeshGatt.siteFingerprint(received.envelope.siteId, namespace: MeshSiteConfiguration.forSite(received.envelope.siteId).namespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
-    if (_compactAlertKeys.remove(compactKey)) return;
-    await _showSosNotification(received: received, detail: detail);
+    final updatesCompactAlert = _compactAlertKeys.remove(compactKey);
+    await _showSosNotification(
+      received: received,
+      detail: detail,
+      notificationId: updatesCompactAlert
+          ? Object.hash(
+                  received.envelope.originEphemeralId & 0xffffffff,
+                  received.envelope.objectId & 0xffff,
+                ) &
+                0x7fffffff
+          : null,
+    );
     try {
       await FlutterForegroundTask.updateService(
         notificationTitle: 'SOS RECEIVED',
