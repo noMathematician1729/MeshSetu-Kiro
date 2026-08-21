@@ -5,7 +5,9 @@ import jwt from 'jsonwebtoken'
 import { WebSocketServer } from 'ws'
 import { z } from 'zod'
 import { decryptPacket } from './protocol/mesh.js'
+import { createHash } from 'node:crypto'
 import { store } from './store.js'
+import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
 
 const app = express()
 const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
@@ -55,12 +57,46 @@ function gateway(req: express.Request, res: express.Response, next: express.Next
 
 const publicAppOrigin = () => normalizeOrigin(process.env.MESHSETU_PUBLIC_APP_ORIGIN || process.env.MESHSETU_ADMIN_ORIGIN || 'http://localhost:5173')!
 const publicIncidentUrl = (eventId: string) => `${publicAppOrigin()}/sos/${encodeURIComponent(eventId)}`
+
+/**
+ * Sends exactly one SMS to each configured contact for an initial SOS. A
+ * durable reservation is created before calling Twilio, so re-forwarded BLE
+ * packets and gateway retries cannot produce duplicate texts.
+ */
+async function dispatchEmergencySms(record: any, updateType: string) {
+  if (updateType !== 'new' || !twilioSmsConfigured()) return
+  const profileResolved = record.decrypt_status === 'verified'
+    || record.decrypt_status === 'relay-decrypted'
+    || (record.decrypt_status === 'ceal-uid-only' && Boolean(record.reporter_name))
+  if (!profileResolved || !record.reporter_uid) return
+
+  const profile = await store.getProfile(record.reporter_uid) ?? await store.getProfileByPrefix(record.reporter_uid)
+  if (!profile) return
+  const contacts = new Map<string, string | undefined>()
+  for (const contact of profile.emergency_contacts ?? []) {
+    const phone = normalizeE164(contact?.phone)
+    if (phone) contacts.set(phone, contact?.name)
+  }
+  for (const [phone, name] of contacts) {
+    const deliveryId = createHash('sha256').update(`${record.event_id}\u0000${phone}`).digest('hex')
+    const reserved = await store.reserveSmsDelivery({
+      sms_delivery_id: deliveryId, event_id: record.event_id, recipient_phone: phone,
+      recipient_name: name ?? null, state: 'reserved', provider_message_sid: null,
+      failure_reason: null, created_at_ms: Date.now(), completed_at_ms: null,
+    })
+    if (!reserved) continue
+    const result = await sendEmergencySms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
+    if (result.state === 'sent') await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: result.providerMessageSid })
+    else await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
+  }
+}
+
 async function fanOutIncident(record: any, updateType: string, relayDeviceId?: string) {
   const existingRecipients = await store.recipientKeysForEvent(record.event_id)
   const recipients = new Map<string, { recipient_type: 'admin' | 'emergency_contact' | 'relay'; recipient_key: string }>()
   recipients.set('admin:all', { recipient_type: 'admin', recipient_key: 'admin:all' })
   if (record.reporter_uid) {
-    const profile = await store.getProfile(record.reporter_uid)
+    const profile = await store.getProfile(record.reporter_uid) ?? await store.getProfileByPrefix(record.reporter_uid)
     for (const contact of profile?.emergency_contacts ?? []) {
       if (!contact?.phone) continue
       for (const account of await store.profilesForPhone(String(contact.phone))) recipients.set(`contact:${account.reporter_uid}`, { recipient_type: 'emergency_contact', recipient_key: `contact:${account.reporter_uid}` })
@@ -83,6 +119,7 @@ async function fanOutIncident(record: any, updateType: string, relayDeviceId?: s
     created_at_ms: Date.now(),
   })))
   notifications.forEach(notification => emit('notification', notification))
+  await dispatchEmergencySms(record, updateType)
   return notifications
 }
 

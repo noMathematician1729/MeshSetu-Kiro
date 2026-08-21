@@ -3,11 +3,13 @@ import { Pool } from 'pg'
 export type EventRecord = Record<string, any>
 export type ProfileRecord = { reporter_uid: string; name: string; phone: string; language: string; blood_group: string; allergies: string; conditions: string; primary_contact_name: string; primary_contact_phone: string; emergency_contacts: any[]; registered_at_ms: number; updated_at?: string }
 export type NotificationRecord = { notification_id: string; event_id: string; recipient_type: 'admin' | 'emergency_contact' | 'relay'; recipient_key: string; update_type: string; title: string; body: string; public_url: string; created_at_ms: number }
+export type SmsDeliveryRecord = { sms_delivery_id: string; event_id: string; recipient_phone: string; recipient_name: string | null; state: 'reserved' | 'sent' | 'failed'; provider_message_sid: string | null; failure_reason: string | null; created_at_ms: number; completed_at_ms: number | null }
 export class EventStore {
   pool?: Pool
   memory = new Map<string, EventRecord>()
   profiles = new Map<string, ProfileRecord>()
   notifications = new Map<string, NotificationRecord>()
+  smsDeliveries = new Map<string, SmsDeliveryRecord>()
   constructor() { if (process.env.DATABASE_URL) this.pool = new Pool({ connectionString: process.env.DATABASE_URL }) }
   async init() {
     if (!this.pool) return
@@ -25,6 +27,10 @@ export class EventStore {
     await this.pool.query(`CREATE TABLE IF NOT EXISTS user_profiles (reporter_uid text PRIMARY KEY, name text NOT NULL, phone text NOT NULL, language text NOT NULL DEFAULT 'English', blood_group text, allergies text, conditions text, primary_contact_name text, primary_contact_phone text, emergency_contacts jsonb NOT NULL DEFAULT '[]', registered_at_ms bigint NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`)
     await this.pool.query(`CREATE TABLE IF NOT EXISTS sos_notification_deliveries (notification_id text PRIMARY KEY, event_id text NOT NULL REFERENCES sos_incidents(event_id) ON DELETE CASCADE, recipient_type text NOT NULL, recipient_key text NOT NULL, update_type text NOT NULL, title text NOT NULL, body text NOT NULL, public_url text NOT NULL, created_at_ms bigint NOT NULL)`)
     await this.pool.query(`CREATE INDEX IF NOT EXISTS sos_notification_deliveries_recipient_idx ON sos_notification_deliveries (recipient_key, created_at_ms DESC)`)
+    // The primary key is the idempotency boundary: duplicate BLE relays cannot
+    // create a second carrier submission for one SOS and contact.
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS sos_sms_deliveries (sms_delivery_id text PRIMARY KEY, event_id text NOT NULL REFERENCES sos_incidents(event_id) ON DELETE CASCADE, recipient_phone text NOT NULL, recipient_name text, state text NOT NULL, provider_message_sid text, failure_reason text, created_at_ms bigint NOT NULL, completed_at_ms bigint)`)
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS sos_sms_deliveries_event_idx ON sos_sms_deliveries (event_id, created_at_ms DESC)`)
   }
   async upsert(record: EventRecord) {
     const existing = this.memory.get(record.event_id)
@@ -95,6 +101,28 @@ export class EventStore {
       created.push(record)
     }
     return created
+  }
+  async reserveSmsDelivery(record: SmsDeliveryRecord): Promise<SmsDeliveryRecord | undefined> {
+    if (this.smsDeliveries.has(record.sms_delivery_id)) return undefined
+    if (this.pool) {
+      const result = await this.pool.query(`INSERT INTO sos_sms_deliveries (sms_delivery_id, event_id, recipient_phone, recipient_name, state, provider_message_sid, failure_reason, created_at_ms, completed_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (sms_delivery_id) DO NOTHING RETURNING *`, [record.sms_delivery_id, record.event_id, record.recipient_phone, record.recipient_name, record.state, record.provider_message_sid, record.failure_reason, record.created_at_ms, record.completed_at_ms])
+      if (!result.rows[0]) return undefined
+    }
+    this.smsDeliveries.set(record.sms_delivery_id, record)
+    return record
+  }
+  async completeSmsDelivery(id: string, result: { state: 'sent' | 'failed'; providerMessageSid?: string; failureReason?: string }) {
+    const current = this.smsDeliveries.get(id)
+    if (!current) return undefined
+    const next: SmsDeliveryRecord = { ...current, state: result.state, provider_message_sid: result.providerMessageSid ?? null, failure_reason: result.failureReason ?? null, completed_at_ms: Date.now() }
+    this.smsDeliveries.set(id, next)
+    if (this.pool) await this.pool.query('UPDATE sos_sms_deliveries SET state=$2, provider_message_sid=$3, failure_reason=$4, completed_at_ms=$5 WHERE sms_delivery_id=$1', [id, next.state, next.provider_message_sid, next.failure_reason, next.completed_at_ms])
+    return next
+  }
+  async smsDeliveriesForEvent(eventId: string): Promise<SmsDeliveryRecord[]> {
+    if (!this.pool) return [...this.smsDeliveries.values()].filter(record => record.event_id === eventId).sort((a, b) => a.created_at_ms - b.created_at_ms)
+    const result = await this.pool.query('SELECT * FROM sos_sms_deliveries WHERE event_id=$1 ORDER BY created_at_ms ASC', [eventId])
+    return result.rows
   }
   async notificationsFor(recipientKey: string): Promise<NotificationRecord[]> {
     if (!this.pool) return [...this.notifications.values()].filter(record => record.recipient_key === recipientKey).sort((a, b) => b.created_at_ms - a.created_at_ms)

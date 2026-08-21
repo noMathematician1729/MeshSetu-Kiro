@@ -2,7 +2,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 process.env.NODE_ENV = 'test'
 process.env.DATABASE_URL = ''
-const { server } = await import('./server.js')
+process.env.TWILIO_SMS_ENABLED = 'true'
+process.env.TWILIO_ACCOUNT_SID = 'test-account'
+process.env.TWILIO_AUTH_TOKEN = 'test-token'
+process.env.TWILIO_FROM_NUMBER = '+15550009999'
+const nativeFetch = globalThis.fetch
+const twilioRequests: Array<{ url: string; body: string }> = []
+globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const url = String(input)
+  if (url.startsWith('https://api.twilio.com/')) {
+    twilioRequests.push({ url, body: String(init?.body ?? '') })
+    return new Response(JSON.stringify({ sid: `SM-test-${twilioRequests.length}` }), { status: 201, headers: { 'content-type': 'application/json' } })
+  }
+  return nativeFetch(input, init)
+}
+const [{ server }, { store }] = await Promise.all([import('./server.js'), import('./store.js')])
 let base = ''
 let eventId = ''
 const gatewayHeaders = { 'content-type': 'application/json', 'x-meshsetu-gateway-key': 'change-me' }
@@ -17,7 +31,10 @@ beforeAll(async () => {
   await fetch(`${base}/v1/profiles`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ reporter_uid: 'a1b2c3d4e5f6', name: 'Priya Sharma', phone: '+91 98765 43210', blood_group: 'O+', emergency_contacts: [{ name: 'Ravi', phone: '(555) 000-3333' }] }) })
   await fetch(`${base}/v1/profiles`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ reporter_uid: 'ravi-uid', name: 'Ravi Sharma', phone: '+15550003333' }) })
 })
-afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) })
+afterAll(async () => {
+  globalThis.fetch = nativeFetch
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+})
 
 describe('SOS recipient notifications', () => {
   it('fans out a compact SOS to registered emergency contacts and exposes its full incident page', async () => {
@@ -33,6 +50,15 @@ describe('SOS recipient notifications', () => {
     const detail: any = await (await fetch(`${base}/v1/public/sos/${encodeURIComponent(eventId)}`)).json()
     expect(detail.reporter_name).toBe('SOS Sender')
     expect(detail.incident_type).toBe('ceal_compact_sos')
+    const smsDeliveries = await store.smsDeliveriesForEvent(eventId)
+    expect(smsDeliveries).toMatchObject([{ recipient_phone: '+15550002', state: 'sent', provider_message_sid: 'SM-test-1' }])
+    expect(twilioRequests).toHaveLength(1)
+    expect(new URLSearchParams(twilioRequests[0].body).get('Body')).toContain('Reporter: SOS Sender')
+    // Several connected relays may forward this exact alert. It stays one SMS.
+    const duplicate = await fetch(`${base}/v1/gateway/ceal-sos`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ reporter_uid: 'sender-uid', sequence: 8, site_id: 'demo-site' }) })
+    const duplicatePayload: any = await duplicate.json()
+    expect(duplicatePayload.event.event_id).toBe(eventId)
+    expect(twilioRequests).toHaveLength(1)
   })
 
   it('adds a new notification when the SOS is escalated', async () => {
