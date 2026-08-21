@@ -301,7 +301,11 @@ wss.on('connection', (socket, request) => {
       const outbound = JSON.stringify({ type: 'room-message', data: { messageId: message.data.messageId, text: message.data.text, memberId: member.memberId, displayName: member.displayName, sentAtMs: message.data.sentAtMs } })
       let recipients = 0
       for (const [client, clientConnection] of roomConnections) {
+        if (client === socket) continue
         if (clientConnection.roomKey === connection.roomKey && client.readyState === 1) { client.send(outbound); recipients++ }
+      }
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'room-message-accepted', data: { messageId: message.data.messageId, recipientCount: recipients } }))
       }
       console.log(`[room-chat] ${member.displayName}: broadcast to ${recipients} connection(s)`)
     })

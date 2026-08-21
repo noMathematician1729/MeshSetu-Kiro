@@ -12,6 +12,7 @@ class _DelayedPeripheral extends UniversalBlePeripheralUnsupported {
   OnPeripheralWriteRequest? writeRequestHandler;
   Completer<void>? notificationGate;
   bool emitNotificationCallback = true;
+  bool throwOnClearServices = false;
 
   @override
   void setWriteRequestHandler(OnPeripheralWriteRequest? handler) {
@@ -28,7 +29,9 @@ class _DelayedPeripheral extends UniversalBlePeripheralUnsupported {
   }
 
   @override
-  Future<void> clearServices() async {}
+  Future<void> clearServices() async {
+    if (throwOnClearServices) throw StateError('gatt_server_already_closed');
+  }
 
   @override
   Future<void> updateCharacteristicValueWithId({
@@ -117,6 +120,27 @@ void main() {
     peripheral.completeService('gatt_service_registration_failed');
     await expectLater(start, throwsA(isA<StateError>()));
     await server.stop();
+  });
+
+  test('server teardown survives a native clearServices failure', () async {
+    final peripheral = _DelayedPeripheral()..throwOnClearServices = true;
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+
+    final diagnostics = <String>[];
+    final server = MeshGattServer(
+      onDiagnostic: (kind, _, {detail, value}) {
+        diagnostics.add(kind);
+      },
+    );
+    await _startServer(server, peripheral);
+
+    await expectLater(server.stop(), completes);
+    expect(diagnostics, contains('gatt_server_clear_failed'));
   });
 
   test('RX requires admission and enforces length and queue bounds', () async {

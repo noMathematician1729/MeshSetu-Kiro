@@ -50,7 +50,13 @@ class GattPeerSession {
           bytes,
         ) {
           _emit('client_tx_notification_received', value: bytes.length);
-          _incomingController.add(bytes);
+          // Native callbacks can be queued while disconnect/close is
+          // cancelling the subscription. Do not add into a closed Dart
+          // controller; that turns a normal teardown race into an unhandled
+          // foreground-isolate error.
+          if (!_closed && !_incomingController.isClosed) {
+            _incomingController.add(bytes);
+          }
         });
   }
 

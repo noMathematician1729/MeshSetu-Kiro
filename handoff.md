@@ -1,6 +1,6 @@
 # MeshSetu session handoff
 
-**Date:** 2026-08-21  
+**Date:** 2026-08-22
 **Repository:** `SIH26_-1xDevs`  
 **Branch:** `fix/gatt-sos`  
 **Purpose:** Preserve the BLE/GATT audit, implementation history, ACK investigation, validation evidence, and the remaining device-test work so another agent can continue without reconstructing this session.
@@ -280,3 +280,75 @@ The subagent audit also identified secondary hardening opportunities (queued
 site-configuration updates during `onStart`, rapid duplicate Start taps, and
 uncaught asynchronous restart/callback futures). They were not the reproduced
 crash and remain separate follow-up work unless a device log points to them.
+
+## 12. GATT depth audit pass (2026-08-22)
+
+The remaining GATT path was traced end-to-end: discovery/advertising, client
+connect → MTU → service discovery → CCCD subscription, server admission and RX
+queueing, notification completion, relay frame processing, ACK control frames,
+and teardown. Four Dart lifecycle defects and two native hardening defects were
+confirmed and patched.
+
+### Confirmed findings and fixes
+
+1. **Late client notifications could write to a closed stream (low/medium).**
+   A native notification can already be queued while `GattPeerSession.close()`
+   cancels the subscription and closes its controller. The callback now drops
+   notifications after `_closed`/controller closure instead of raising an
+   unhandled `add after close` error.
+
+2. **Server RX callback could race `stop()` (medium).** The native write
+   callback could pass its running check while `stop()` closed `_frames`. The
+   event insertion is now guarded; a close race decrements the pending count,
+   returns GATT failure, and emits `gatt_rx_rejected` rather than leaking an
+   exception.
+
+3. **Native GATT teardown could fail the whole Event Mode shutdown (medium).**
+   `MeshGattServer.stop()` now treats `clearServices()` as best-effort and
+   emits `gatt_server_clear_failed`. The vendored Android plugin's
+   `clearServices()` no longer calls `requireGattServer()` and therefore cannot
+   lazily create a new GATT server after disposal.
+
+4. **Unawaited frame/scheduler futures could terminate the isolate (medium).**
+   Server-frame processing, client-link frame processing, and scheduler wakeups
+   now catch asynchronous failures and emit `frame_processing_failed` or
+   `scheduler_failed`. ACK/queue cleanup remains in `finally` for server RX.
+
+5. **Advertising Handler exceptions were outside the Dart Future boundary
+   (medium).** Android can throw while building or starting an advertisement
+   (data-size, adapter state, or OEM stack failures). The Handler body now
+   catches the exception, restores the adapter name, and reports the normal
+   advertising `ERROR` state. Native server reconnect calls are also contained
+   so a stale callback cannot crash Event Mode.
+
+### Regression coverage
+
+Added tests cover native `clearServices()` failure during server teardown and a
+metrics/listener exception raised during asynchronous frame processing. The
+existing GATT server, client-session, and transport suites now pass **42 tests**
+after this pass.
+
+### Verification boundary
+
+`flutter analyze` still reports only the pre-existing informational lint in
+`test/feature/room_repository_mesh_test.dart`. The focused GATT suite passes 42
+tests. A full `flutter test` run reaches the unrelated untracked
+`test/feature/room_mesh_ui_test.dart` and currently fails its `Remote volunteer`
+widget expectation; that failure is outside this GATT patch. The debug APK build
+was attempted but is currently blocked before native compilation by an unrelated
+working-tree change in `mobile/lib/app/mesh_bridge_client.dart`: `dispose()`
+references a missing `_onTaskData`. Resolve those separate Dart issues, then
+rerun the APK build to compile and install the native GATT changes. The working
+tree also contains unrelated user edits and an untracked `Ceal/` directory;
+preserve them.
+
+### Remaining physical audit work
+
+- Install the rebuilt APK on two Android phones and exercise a fragmented SOS,
+  reverse custody ACK, disconnect during notify, reconnect, and Event Mode
+  stop/start.
+- Capture `adb logcat` for `gatt_server_clear_failed`, `frame_processing_failed`,
+  `scheduler_failed`, notification callback status, and the matching object ID.
+- Repeat on an OEM device with advertising-size limits and on a phone that
+  toggles Bluetooth off during teardown. Automated tests do not prove those
+  platform behaviors.

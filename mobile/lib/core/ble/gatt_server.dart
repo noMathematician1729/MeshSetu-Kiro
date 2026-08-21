@@ -159,9 +159,21 @@ class MeshGattServer {
       }
       _pendingFrames++;
       _diagnostic('gatt_rx_frame', deviceId, value: value.length);
-      _frames.add(
-        IncomingGattFrame(deviceId: deviceId, bytes: Uint8List.fromList(value)),
-      );
+      try {
+        _frames.add(
+          IncomingGattFrame(
+            deviceId: deviceId,
+            bytes: Uint8List.fromList(value),
+          ),
+        );
+      } catch (error) {
+        // A platform write callback can race stop(), which closes this
+        // controller. Answer the native request instead of leaking a Dart
+        // "add after close" exception into the event-mode isolate.
+        _pendingFrames--;
+        _diagnostic('gatt_rx_rejected', deviceId, detail: 'server_stopped');
+        return PeripheralWriteRequestResult(status: _gattFailure);
+      }
       return null;
     });
 
@@ -412,7 +424,14 @@ class MeshGattServer {
     UniversalBlePeripheral.setWriteRequestHandlers(null);
     await _cancelPlatformSubscriptions();
     await _notifyLock.idle;
-    await UniversalBlePeripheral.clearServices();
+    try {
+      await UniversalBlePeripheral.clearServices();
+    } catch (error) {
+      // Bluetooth can be disabled or the native GATT server can already be
+      // disposed during app/service teardown. Cleanup is best effort; state
+      // must still be released locally.
+      _diagnostic('gatt_server_clear_failed', null, detail: '$error');
+    }
     _subscribers.clear();
     _knownSubscribers.clear();
     _rejectedPeers.clear();

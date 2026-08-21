@@ -228,6 +228,8 @@ MeshTransportCoordinator _coordinator({
 );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('relays an object end-to-end through the pump loop', () async {
     final coordinatorA = _coordinator();
     final coordinatorB = _coordinator();
@@ -633,6 +635,53 @@ void main() {
 
     expect(coordinator.relay.nextOutbound(), isNotNull);
   });
+
+  test(
+    'async frame processing errors do not escape the transport isolate',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      var throwFromMetrics = false;
+      final coordinator = _coordinator(
+        onMetrics: (_) {
+          if (throwFromMetrics) throw StateError('metrics_listener_failed');
+        },
+      );
+      final link = _FakeLink()..peer = _FakeLink();
+      coordinator.attach('peer-b', link, siteFingerprint: 1);
+      throwFromMetrics = true;
+
+      link.deliver(
+        FrameCodec.encode(
+          MeshFrame(
+            type: FrameType.hello,
+            priority: 0,
+            flags: 0,
+            objectId: 1,
+            sequence: 0,
+            count: 1,
+            payload: HelloCodec.encode(
+              const Hello(
+                siteFingerprint: 1,
+                ephemeralNodeId: 2,
+                capabilities: 1,
+                nowEpochSec: 0,
+              ),
+            ),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(coordinator.hasPeer('peer-b'), isTrue);
+      await coordinator.stop();
+    },
+  );
 
   test('voice deferral waits until every peer rejects its MTU', () async {
     final peripheral = _FakePeripheral();
@@ -1134,6 +1183,39 @@ void main() {
       expect(result, isNull);
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(metrics.any((metric) => metric.kind == 'frame_rx'), isTrue);
+      await coordinator.stop();
+    },
+  );
+
+  test(
+    'defers an unfragmentable room message instead of requeueing it',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      final store = _RecordingStore();
+      final coordinator = _coordinator(store: store);
+      final lowMtuPeer = _FakeLink(mtu: 23)..peer = _FakeLink();
+      coordinator.attach('low-mtu', lowMtuPeer, siteFingerprint: 1);
+
+      await coordinator.send(
+        _envelope(
+          objectId: 92,
+          priority: PriorityBand.p2Normal,
+          payloadType: PayloadType.roomMessage,
+          // At MTU 23 only four encrypted-object bytes fit in a frame. The
+          // encrypted payload needs >512 chunks, so fragment() rejects it.
+          payloadSize: 3000,
+        ),
+      );
+
+      expect(lowMtuPeer.sentFrames, isEmpty);
+      expect(store.deferred.single.objectId, 92);
+      expect(coordinator.relay.nextOutbound(), isNull);
       await coordinator.stop();
     },
   );

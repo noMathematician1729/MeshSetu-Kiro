@@ -10,12 +10,22 @@ final class RoomPolicy {
     required this.readRoles,
     required this.trafficClass,
     required this.ttlSeconds,
+    this.maxMessageBytes = 512,
   });
 
   final String roomId;
   final Set<String> sendRoles, readRoles;
   final TrafficClass trafficClass;
   final int ttlSeconds;
+
+  /// Bible §10.2: caps UTF-8 message size well under the mesh's worst-case
+  /// fragmentation budget. At the ATT default MTU of 23 bytes,
+  /// `maxFragmentPayload` yields 4 bytes/frame and `maxChunks` is 512, so an
+  /// unbounded room message can throw `ArgumentError` out of `fragment()`
+  /// and wedge the outbound pump. 512 bytes stays inside that budget at any
+  /// negotiated MTU, matching the encoded-packet ceiling checked in
+  /// [RoomMessagePacketCodec].
+  final int maxMessageBytes;
 }
 
 bool canSend(RoomPolicy room, Set<String> userRoles) =>

@@ -108,7 +108,9 @@ class UniversalBlePeripheralPlugin(
     }
 
     override fun clearServices() {
-        requireGattServer().clearServices()
+        // Teardown must not lazily open a brand-new GATT server after the
+        // plugin has already been disposed.
+        gattServer?.clearServices()
     }
 
     override fun getServices(): List<String> =
@@ -140,52 +142,65 @@ class UniversalBlePeripheralPlugin(
         callback.onAdvertisingStateChange(PeripheralAdvertisingState.STARTING, null) {}
 
         handler.post {
-            val adapter = bluetoothManager.adapter
-            if (localName != null && adapter != null && adapter.name != localName) {
-                if (!adapterNameOverridden) {
-                    originalAdapterName = adapter.name
+            try {
+                val adapter = bluetoothManager.adapter
+                if (localName != null && adapter != null && adapter.name != localName) {
+                    if (!adapterNameOverridden) {
+                        originalAdapterName = adapter.name
+                    }
+                    adapter.name = localName
+                    adapterNameOverridden = true
                 }
-                adapter.name = localName
-                adapterNameOverridden = true
-            }
-            val advertiseSettings = AdvertiseSettings.Builder()
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setConnectable(true)
-                .setTimeout(timeout?.toInt() ?: 0)
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .build()
+                val advertiseSettings = AdvertiseSettings.Builder()
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                    .setConnectable(true)
+                    .setTimeout(timeout?.toInt() ?: 0)
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                    .build()
 
-            val addServicesInScanResponse =
-                platformConfig?.android?.addServicesInScanResponse == true
-            val addManufacturerDataInScanResponse =
-                platformConfig?.android?.addManufacturerDataInScanResponse == true
+                val addServicesInScanResponse =
+                    platformConfig?.android?.addServicesInScanResponse == true
+                val addManufacturerDataInScanResponse =
+                    platformConfig?.android?.addManufacturerDataInScanResponse == true
 
-            val advertiseDataBuilder = AdvertiseData.Builder()
-                .setIncludeTxPowerLevel(false)
-                .setIncludeDeviceName(localName != null)
-            val scanResponseBuilder = AdvertiseData.Builder()
-                .setIncludeTxPowerLevel(false)
-                .setIncludeDeviceName(false)
+                val advertiseDataBuilder = AdvertiseData.Builder()
+                    .setIncludeTxPowerLevel(false)
+                    .setIncludeDeviceName(localName != null)
+                val scanResponseBuilder = AdvertiseData.Builder()
+                    .setIncludeTxPowerLevel(false)
+                    .setIncludeDeviceName(false)
 
-            val msdBuilder =
-                if (addManufacturerDataInScanResponse) scanResponseBuilder else advertiseDataBuilder
-            manufacturerData?.let {
-                msdBuilder.addManufacturerData(
-                    it.companyIdentifier.toInt(),
-                    it.data,
+                val msdBuilder =
+                    if (addManufacturerDataInScanResponse) scanResponseBuilder else advertiseDataBuilder
+                manufacturerData?.let {
+                    msdBuilder.addManufacturerData(
+                        it.companyIdentifier.toInt(),
+                        it.data,
+                    )
+                }
+
+                val servicesBuilder =
+                    if (addServicesInScanResponse) scanResponseBuilder else advertiseDataBuilder
+                services.forEach { servicesBuilder.addServiceUuid(ParcelUuid.fromString(it)) }
+
+                bluetoothLeAdvertiser?.startAdvertising(
+                    advertiseSettings,
+                    advertiseDataBuilder.build(),
+                    scanResponseBuilder.build(),
+                    advertiseCallback,
                 )
+            } catch (error: Exception) {
+                // The Handler callback is outside Flutter's Future boundary.
+                // Convert Android advertisement validation/state failures into
+                // the normal plugin state callback instead of crashing the app.
+                Log.w(TAG, "startAdvertising failed", error)
+                restoreAdapterNameIfNeeded()
+                advertisingState = PeripheralAdvertisingState.ERROR
+                callback.onAdvertisingStateChange(
+                    PeripheralAdvertisingState.ERROR,
+                    error.message ?: "Failed to start advertising",
+                ) {}
             }
-
-            val servicesBuilder =
-                if (addServicesInScanResponse) scanResponseBuilder else advertiseDataBuilder
-            services.forEach { servicesBuilder.addServiceUuid(ParcelUuid.fromString(it)) }
-
-            bluetoothLeAdvertiser?.startAdvertising(
-                advertiseSettings,
-                advertiseDataBuilder.build(),
-                scanResponseBuilder.build(),
-                advertiseCallback,
-            )
         }
     }
 
@@ -426,7 +441,13 @@ class UniversalBlePeripheralPlugin(
                         synchronized(knownBluetoothDevicesMap) {
                             knownBluetoothDevicesMap[device.address] = device
                         }
-                        handler.post { gattServer?.connect(device, true) }
+                        handler.post {
+                            try {
+                                gattServer?.connect(device, true)
+                            } catch (error: Exception) {
+                                Log.w(TAG, "GATT server reconnect failed", error)
+                            }
+                        }
                     } else {
                         synchronized(bluetoothDevicesMap) {
                             bluetoothDevicesMap.remove(device.address)

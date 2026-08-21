@@ -44,6 +44,31 @@ Bluetooth SIG Company Identifier, run the documented two/three-phone transfer
 and churn scenarios, and repeat capacity saturation with four active peers plus
 a fifth waiting peer on a 4-5 phone fleet.
 
+### Depth audit follow-up — August 22, 2026
+
+The post-remediation GATT trace covered client setup, server admission, RX
+queueing, notification completion, relay processing, custody ACK return, and
+teardown. The following lifecycle defects were confirmed and fixed:
+
+| Finding | Fix | Verification |
+|---|---|---|
+| Late TX notification callback could add to a closed client stream | Drop native callbacks after session/controller closure | GATT client lifecycle suite |
+| RX write callback could race server stream closure | Guard frame insertion, release pending slot, return GATT failure | GATT server suite |
+| Native `clearServices()` could fail or lazily reopen a disposed server | Make Android clear best-effort and keep Dart teardown local-state safe | Teardown failure regression |
+| Unawaited frame/scheduler futures could escape into the Event Mode isolate | Contain async processing and scheduler errors; retain ACK cleanup in `finally` | Transport async-error regression |
+| Android advertising/reconnect Handler callbacks could throw outside Dart's Future boundary | Catch, restore adapter name, report advertising error, and log reconnect failure | APK build/device validation pending |
+
+The focused GATT suites pass 42 tests. `flutter analyze` has no new findings;
+the only reported item is an existing informational lint in
+`test/feature/room_repository_mesh_test.dart`. A debug APK build is blocked by
+an unrelated working-tree Dart error (`MeshBridgeClient.dispose()` references a
+missing `_onTaskData`) before native compilation. Physical two-phone validation
+of the new lifecycle guards remains required.
+
+The full mobile test run also reaches an unrelated untracked room UI test and
+currently fails its `Remote volunteer` widget expectation. This does not involve
+the GATT files or the focused GATT suite.
+
 ---
 
 ## Executive Summary

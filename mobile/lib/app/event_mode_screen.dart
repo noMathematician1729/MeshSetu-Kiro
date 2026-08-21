@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
 
-import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart'
     hide NotificationVisibility;
@@ -10,7 +9,6 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/ble/ble_permissions.dart';
 import '../core/ble/device_key_store.dart';
 import '../core/ble/mesh_gatt.dart';
 import '../core/ble/sos_advertisement.dart';
@@ -30,16 +28,14 @@ import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
+import 'event_mode_launcher.dart';
 import 'incident_summary.dart';
 import 'notification_router.dart';
 import 'providers.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
 
-const int _notificationServiceId = 1001;
-const String _notificationChannelId = 'meshsetu-event-v2';
 const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
-const String _meshSiteConfigurationKey = 'mesh-site-configuration';
 final FlutterLocalNotificationsPlugin _sosNotifications =
     FlutterLocalNotificationsPlugin();
 bool _sosNotificationsInitialized = false;
@@ -138,7 +134,7 @@ class _MeshEventTaskHandler extends TaskHandler {
     DartPluginRegistrant.ensureInitialized();
     try {
       final savedConfiguration = await FlutterForegroundTask.getData<String>(
-        key: _meshSiteConfigurationKey,
+        key: meshSiteConfigurationKey,
       );
       final configuration = savedConfiguration == null
           ? MeshSiteConfiguration.demo
@@ -266,6 +262,16 @@ class _MeshEventTaskHandler extends TaskHandler {
       }
       return;
     }
+    if (data is Map && data['mesh_identity_request'] == true) {
+      final controller = _controller;
+      if (controller != null) {
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'started',
+          'localEphemeralId': controller.localEphemeralId,
+        });
+      }
+      return;
+    }
     if (data is Map && data['debugLoss'] is bool) {
       _debugLossEnabled = data['debugLoss'] as bool;
       _controller?.setDebugLossInjection(_debugLossEnabled);
@@ -316,7 +322,7 @@ class _MeshEventTaskHandler extends TaskHandler {
     await _controller?.stop();
     _controller = null;
     await FlutterForegroundTask.saveData(
-      key: _meshSiteConfigurationKey,
+      key: meshSiteConfigurationKey,
       value: configuration.encode(),
     );
     await onStart(DateTime.now(), TaskStarter.developer);
@@ -360,7 +366,9 @@ class _MeshEventTaskHandler extends TaskHandler {
         String reporterUid = '';
         try {
           reporterUid =
-              StructuredSosPayload.decode(envelope.payload).reporter?.reporterUid ??
+              StructuredSosPayload.decode(
+                envelope.payload,
+              ).reporter?.reporterUid ??
               '';
         } catch (_) {
           // A non-identity structured payload still broadcasts a routing alert.
@@ -510,29 +518,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       text: ref.read(gatewayDemoKeyProvider),
     );
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: _notificationChannelId,
-        channelName: 'MeshSetu event mode',
-        channelDescription: 'BLE relay and emergency SOS alerts',
-        channelImportance: NotificationChannelImportance.HIGH,
-        priority: NotificationPriority.HIGH,
-        enableVibration: true,
-        playSound: true,
-        showWhen: true,
-        showBadge: true,
-        onlyAlertOnce: false,
-      ),
-      // iOS isn't a deployment target for this project (Bible §4.1), but the
-      // plugin's init call requires this regardless of platform.
-      iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false,
-        playSound: false,
-      ),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.nothing(),
-      ),
-    );
+    unawaited(EventModeLauncher.initialize());
     unawaited(_restoreServiceState());
   }
 
@@ -571,6 +557,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         unawaited(_bridgeClient?.dispose());
         _bridgeClient = null;
         _bridgeClientSiteStarted = false;
+        ref.read(meshBridgeClientProvider.notifier).state = null;
       case 'error':
         setState(() {
           _eventModeActive = false;
@@ -827,60 +814,26 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       }
       return;
     }
-    var startedHere = false;
-    try {
-      final bluetoothMessage = await BlePermissions.availabilityMessage();
-      if (bluetoothMessage != null) {
-        if (mounted) setState(() => _status = 'MeshSetu\n$bluetoothMessage');
-        return;
-      }
-      final androidInfo = await DeviceInfoPlugin().androidInfo;
-      final permissions = await BlePermissions.request(
-        sdkInt: androidInfo.version.sdkInt,
-      );
-      if (permissions.values.any(
-        (status) => status != PermissionStatus.granted,
-      )) {
-        if (mounted) {
-          setState(
-            () => _status =
-                'MeshSetu\nNearby devices permission is required. '
-                'Allow Bluetooth access in Settings, then try again.',
-          );
-        }
-        return;
-      }
-
-      if (await FlutterForegroundTask.checkNotificationPermission() !=
-          NotificationPermission.granted) {
-        await FlutterForegroundTask.requestNotificationPermission();
-      }
-      if (await FlutterForegroundTask.checkNotificationPermission() !=
-          NotificationPermission.granted) {
-        throw StateError('Notification permission is required for event mode');
-      }
-
-      await _saveActiveMeshConfiguration();
-
-      final result = await FlutterForegroundTask.startService(
-        serviceId: _notificationServiceId,
-        notificationTitle: 'MeshSetu event mode active',
-        notificationText: 'BLE relay is listening for nearby peers',
-        callback: meshEventTaskCallback,
-      );
-      if (result is! ServiceRequestSuccess) {
-        throw StateError('Unable to start the foreground service');
-      }
-      startedHere = true;
-
-      if (!mounted) return;
-      setState(() {
-        _eventModeActive = true;
-        _status = 'MeshSetu\nStarting BLE relay service';
-      });
-    } catch (error) {
-      if (startedHere) await FlutterForegroundTask.stopService();
-      if (mounted) setState(() => _status = 'MeshSetu\n$error');
+    if (mounted) {
+      setState(() => _status = 'MeshSetu\nStarting BLE relay service');
+    }
+    final result = await EventModeLauncher.start(
+      taskCallback: meshEventTaskCallback,
+      onStatus: (message) {
+        if (mounted) setState(() => _status = 'MeshSetu\n$message');
+      },
+      onMeshSiteConfigurationNeeded: _saveActiveMeshConfiguration,
+    );
+    if (!mounted) return;
+    switch (result) {
+      case EventModeLaunchResult.alreadyRunning:
+      case EventModeLaunchResult.started:
+        setState(() {
+          _eventModeActive = true;
+          _status = 'MeshSetu\nStarting BLE relay service';
+        });
+      case EventModeLaunchResult.failure:
+        break;
     }
   }
 
@@ -1164,7 +1117,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final site = await ref.read(joinRepositoryProvider).activeManifest();
     if (!mounted || !_eventModeActive) return;
     await _configureForegroundMeshSite(site?.siteId);
-    _bridgeClient ??= MeshBridgeClient(ref.read(databaseProvider));
+    _bridgeClient ??=
+        ref.read(meshBridgeClientProvider) ??
+        MeshBridgeClient(ref.read(databaseProvider));
+    ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
     if (!_bridgeClientSiteStarted) {
       final localEphemeralId = _foregroundEphemeralId;
       if (localEphemeralId == null) return;
@@ -1185,7 +1141,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       site?.siteId ?? MeshEventController.demoSiteId,
     );
     await FlutterForegroundTask.saveData(
-      key: _meshSiteConfigurationKey,
+      key: meshSiteConfigurationKey,
       value: configuration.encode(),
     );
   }
@@ -1195,7 +1151,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       siteId ?? MeshEventController.demoSiteId,
     );
     await FlutterForegroundTask.saveData(
-      key: _meshSiteConfigurationKey,
+      key: meshSiteConfigurationKey,
       value: configuration.encode(),
     );
     FlutterForegroundTask.sendDataToTask({
