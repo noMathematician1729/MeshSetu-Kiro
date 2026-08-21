@@ -98,6 +98,7 @@ class MeshEventController {
 
   MeshTransportCoordinator? _coordinator;
   int _localToken = 0;
+  int get localEphemeralId => _localToken;
   IOSink? _metricSink;
   JsonLineMetricSink? _jsonMetricSink;
   bool _looping = false;
@@ -458,10 +459,11 @@ class MeshEventController {
   }
 
   void _onCompactSosAlert(MeshSosAdvertisement alert, String deviceId) {
-    if (alert.originId == (_localToken & 0xffffffff)) return;
+    final isOwnAlert = alert.originId == (_localToken & 0xffffffff);
     final now = DateTime.now().millisecondsSinceEpoch;
     _seenCompactAlerts.removeWhere((_, expiresAt) => expiresAt <= now);
-    if (_seenCompactAlerts.containsKey(alert.dedupeKey)) return;
+    final isDuplicate = _seenCompactAlerts.containsKey(alert.dedupeKey);
+    if (isOwnAlert || isDuplicate) return;
     _seenCompactAlerts[alert.dedupeKey] =
         now + const Duration(minutes: 5).inMilliseconds;
     _reportMetrics([

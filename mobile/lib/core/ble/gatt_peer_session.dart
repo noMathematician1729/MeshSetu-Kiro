@@ -37,7 +37,7 @@ enum PeerSessionState {
 /// writes cannot overlap even if the plugin queue is changed to `none` by a
 /// caller. Each operation also has its own timeout and phase.
 class GattPeerSession {
-  GattPeerSession._(this.deviceId, this._onLifecycle)
+  GattPeerSession._(this.deviceId, this._onLifecycle, this._mtuTimeout)
     : _queueId = 'mesh-gatt-${deviceId.toLowerCase()}' {
     _incomingController = StreamController<Uint8List>(
       onListen: () => _incomingStreamWasListened = true,
@@ -50,18 +50,25 @@ class GattPeerSession {
           bytes,
         ) {
           _emit('client_tx_notification_received', value: bytes.length);
-          _incomingController.add(bytes);
+          // Native callbacks can be queued while disconnect/close is
+          // cancelling the subscription. Do not add into a closed Dart
+          // controller; that turns a normal teardown race into an unhandled
+          // foreground-isolate error.
+          if (!_closed && !_incomingController.isClosed) {
+            _incomingController.add(bytes);
+          }
         });
   }
 
   static const _connectTimeout = Duration(seconds: 15);
-  static const _mtuTimeout = Duration(seconds: 5);
+  static const _defaultMtuTimeout = Duration(seconds: 5);
   static const _discoveryTimeout = Duration(seconds: 8);
   static const _subscriptionTimeout = Duration(seconds: 8);
   static const _writeTimeout = Duration(seconds: 5);
 
   final String deviceId;
   final GattLifecycleListener? _onLifecycle;
+  final Duration _mtuTimeout;
   final String _queueId;
   int mtu = 23;
 
@@ -91,8 +98,9 @@ class GattPeerSession {
   static GattPeerSession open(
     String deviceId, {
     GattLifecycleListener? onLifecycle,
+    Duration mtuTimeout = _defaultMtuTimeout,
   }) {
-    final session = GattPeerSession._(deviceId, onLifecycle);
+    final session = GattPeerSession._(deviceId, onLifecycle, mtuTimeout);
     unawaited(session._connect());
     return session;
   }

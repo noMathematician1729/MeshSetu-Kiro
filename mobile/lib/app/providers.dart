@@ -12,6 +12,7 @@ import '../feature/sos/sos_repository.dart';
 import '../feature/stt/sherpa_onnx_stt_engine.dart';
 import '../feature/stt/stt_engine.dart';
 import '../feature/voice/voice_repository.dart';
+import 'mesh_bridge_client.dart';
 
 /// Application-boundary Riverpod bindings (Bible §4.2): feature screens
 /// depend on these repositories, never directly on `core/ble`/`core/data`.
@@ -47,13 +48,17 @@ final roomRepositoryProvider = Provider.family<RoomRepository, String>(
 );
 
 final onboardingRepositoryProvider = Provider<OnboardingRepository>((ref) {
-  final url = ref.watch(gatewayUrlProvider);
-  final key = ref.watch(gatewayDemoKeyProvider);
-  final enabled = ref.watch(gatewayEnabledProvider);
-  final bridge = (enabled && url.isNotEmpty && key.isNotEmpty)
-      ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
-      : null;
-  return OnboardingRepository(null, bridge);
+  return OnboardingRepository(
+    null,
+    null,
+    () {
+      final url = ref.read(gatewayUrlProvider);
+      final key = ref.read(gatewayDemoKeyProvider);
+      final enabled = ref.read(gatewayEnabledProvider);
+      if (!enabled || url.isEmpty || key.isEmpty) return null;
+      return GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+    },
+  );
 });
 
 final onboardingProfileProvider = FutureProvider<OnboardingProfile?>((ref) {
@@ -107,3 +112,30 @@ final roomMembersProvider = StreamProvider.family
           .watch(roomRepositoryProvider(key.siteId))
           .watchMembers(key.roomId),
     );
+
+/// The live [MeshBridgeClient] owned by the event-mode screen, published
+/// here so other screens (room chat/lobby) can observe mesh connectivity
+/// without a direct reference to the widget that owns the foreground
+/// service connection. Null when event mode has never started or has been
+/// torn down.
+final meshBridgeClientProvider = StateProvider<MeshBridgeClient?>(
+  (ref) => null,
+);
+
+/// Mesh-first connectivity status for room screens: peer count and whether
+/// the foreground BLE service is running, independent of the internet
+/// [RoomPresenceSocket]. Falls back to [MeshStatus.stopped] whenever no
+/// bridge client is registered yet.
+final meshStatusProvider = StreamProvider<MeshStatus>((ref) {
+  final client = ref.watch(meshBridgeClientProvider);
+  if (client == null) return Stream.value(MeshStatus.stopped);
+  return Stream.multi((controller) {
+    controller.add(client.meshStatus);
+    final subscription = client.meshStatusStream.listen(
+      controller.add,
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+    controller.onCancel = subscription.cancel;
+  });
+});

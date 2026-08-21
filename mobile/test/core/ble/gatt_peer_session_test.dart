@@ -12,6 +12,7 @@ class _FakeCentral extends UniversalBlePlatform {
   bool timeoutMtu = false;
   bool failCccd = false;
   bool emitNotificationDuringCccd = false;
+  String? disconnectDuring;
 
   final services = [
     BleService(MeshGatt.service, [
@@ -57,6 +58,7 @@ class _FakeCentral extends UniversalBlePlatform {
   }) async {
     calls.add('connect');
     updateConnection(deviceId, true);
+    if (disconnectDuring == 'connect') updateConnection(deviceId, false);
   }
 
   @override
@@ -71,6 +73,9 @@ class _FakeCentral extends UniversalBlePlatform {
     bool withDescriptors,
   ) async {
     calls.add('discover_services');
+    if (disconnectDuring == 'discover_services') {
+      updateConnection(deviceId, false);
+    }
     return services;
   }
 
@@ -82,6 +87,7 @@ class _FakeCentral extends UniversalBlePlatform {
     BleInputProperty bleInputProperty,
   ) async {
     calls.add('write_cccd');
+    if (disconnectDuring == 'write_cccd') updateConnection(deviceId, false);
     if (failCccd) throw StateError('cccd_write_failed');
     if (emitNotificationDuringCccd) {
       updateCharacteristicValue(
@@ -115,6 +121,9 @@ class _FakeCentral extends UniversalBlePlatform {
   @override
   Future<int> requestMtu(String deviceId, int expectedMtu) async {
     calls.add('request_mtu');
+    if (disconnectDuring == 'request_mtu') {
+      updateConnection(deviceId, false);
+    }
     if (timeoutMtu) throw TimeoutException('mtu callback missing');
     return mtuGate?.future ?? 185;
   }
@@ -217,5 +226,57 @@ void main() {
       'write_cccd',
     ]);
     await session.close();
+  });
+
+  test('late MTU completion cannot restart a timed-out session', () async {
+    final central = _FakeCentral()..mtuGate = Completer<int>();
+    UniversalBle.setInstance(central);
+    addTearDown(() => UniversalBle.setInstance(_FakeCentral()));
+
+    final session = GattPeerSession.open(
+      'AA:BB:CC:DD:EE:FF',
+      mtuTimeout: const Duration(milliseconds: 1),
+    );
+    await expectLater(session.awaitReady(), throwsA(isA<TimeoutException>()));
+    central.mtuGate!.complete(517);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(central.calls, ['connect', 'request_mtu']);
+    expect(session.state, PeerSessionState.failed);
+    expect(session.mtu, 23);
+    await session.close();
+  });
+
+  test('disconnect during every setup phase prevents readiness', () async {
+    for (final phase in [
+      'connect',
+      'request_mtu',
+      'discover_services',
+      'write_cccd',
+    ]) {
+      final central = _FakeCentral()..disconnectDuring = phase;
+      UniversalBle.setInstance(central);
+      final session = GattPeerSession.open('peer-$phase');
+
+      await expectLater(session.awaitReady(), throwsA(isA<StateError>()));
+      expect(session.state, PeerSessionState.disconnected, reason: phase);
+      await session.close();
+    }
+    UniversalBle.setInstance(_FakeCentral());
+  });
+
+  test('rapid ready-close cycles leave every session disconnected', () async {
+    final central = _FakeCentral();
+    UniversalBle.setInstance(central);
+    addTearDown(() => UniversalBle.setInstance(_FakeCentral()));
+
+    for (var index = 0; index < 20; index++) {
+      final session = GattPeerSession.open('peer-$index');
+      await session.awaitReady();
+      await session.close();
+      expect(session.state, PeerSessionState.disconnected);
+    }
+    expect(central.calls.where((call) => call == 'connect'), hasLength(20));
+    expect(central.calls.where((call) => call == 'disconnect'), hasLength(20));
   });
 }

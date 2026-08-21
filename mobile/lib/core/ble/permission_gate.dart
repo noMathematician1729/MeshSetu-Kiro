@@ -132,81 +132,90 @@ class _PermissionGateState extends State<PermissionGate>
     return Scaffold(
       appBar: AppBar(title: const Text('Permissions required')),
       body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520),
-            child: Padding(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
               padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Icon(Icons.security, size: 64),
-                  const SizedBox(height: 20),
-                  Text(
-                    'MeshSetu needs permission before you can enter the app.',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Bluetooth and location are required to discover, send, '
-                    'and receive mesh messages. Notifications keep the relay '
-                    'alive while the app is in the background.',
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 24),
-                  if (_loading)
-                    const Center(child: CircularProgressIndicator())
-                  else ...[
-                    for (final permission in _required)
-                      ListTile(
-                        leading: Icon(
-                          _statuses[permission]?.isGranted == true
-                              ? Icons.check_circle
-                              : Icons.cancel_outlined,
-                          color: _statuses[permission]?.isGranted == true
-                              ? Colors.green
-                              : Colors.red,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 520),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Icon(Icons.security, size: 64),
+                        const SizedBox(height: 20),
+                        Text(
+                          'MeshSetu needs permission before you can enter the app.',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.titleLarge,
                         ),
-                        title: Text(_label(permission)),
-                        dense: true,
-                      ),
-                    if (!_bluetoothEnabled)
-                      const ListTile(
-                        leading: Icon(
-                          Icons.bluetooth_disabled,
-                          color: Colors.red,
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Bluetooth and location are required to discover, send, '
+                          'and receive mesh messages. Notifications keep the relay '
+                          'alive while the app is in the background.',
+                          textAlign: TextAlign.center,
                         ),
-                        title: Text('Turn Bluetooth on to continue'),
-                        dense: true,
-                      ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: _requesting ? null : _requestPermissions,
-                      icon: _requesting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.shield_outlined),
-                      label: Text(
-                        _requesting ? 'Requesting…' : 'Grant permissions',
-                      ),
+                        const SizedBox(height: 24),
+                        if (_loading)
+                          const Center(child: CircularProgressIndicator())
+                        else ...[
+                          for (final permission in _required)
+                            ListTile(
+                              leading: Icon(
+                                _statuses[permission]?.isGranted == true
+                                    ? Icons.check_circle
+                                    : Icons.cancel_outlined,
+                                color: _statuses[permission]?.isGranted == true
+                                    ? Colors.green
+                                    : Colors.red,
+                              ),
+                              title: Text(_label(permission)),
+                              dense: true,
+                            ),
+                          if (!_bluetoothEnabled)
+                            const ListTile(
+                              leading: Icon(
+                                Icons.bluetooth_disabled,
+                                color: Colors.red,
+                              ),
+                              title: Text('Turn Bluetooth on to continue'),
+                              dense: true,
+                            ),
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed: _requesting ? null : _requestPermissions,
+                            icon: _requesting
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.shield_outlined),
+                            label: Text(
+                              _requesting ? 'Requesting…' : 'Grant permissions',
+                            ),
+                          ),
+                          if (_statuses.values.any(
+                            (status) => status.isPermanentlyDenied,
+                          ))
+                            TextButton(
+                              onPressed: openAppSettings,
+                              child: const Text('Open Android settings'),
+                            ),
+                        ],
+                      ],
                     ),
-                    if (_statuses.values.any(
-                      (status) => status.isPermanentlyDenied,
-                    ))
-                      TextButton(
-                        onPressed: openAppSettings,
-                        child: const Text('Open Android settings'),
-                      ),
-                  ],
-                ],
+                  ),
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );

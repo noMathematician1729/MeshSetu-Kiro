@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -50,3 +52,28 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+fun configuredBleCompanyId(): Int? {
+    val encoded = project.findProperty("dart-defines") as String? ?: return null
+    val value = encoded.split(',')
+        .mapNotNull { runCatching { String(Base64.getDecoder().decode(it)) }.getOrNull() }
+        .firstOrNull { it.startsWith("MESHSETU_BLE_COMPANY_ID=") }
+        ?.substringAfter('=')
+        ?: return null
+    return if (value.startsWith("0x", ignoreCase = true)) {
+        value.substring(2).toIntOrNull(16)
+    } else {
+        value.toIntOrNull()
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }
+    .configureEach {
+        doFirst {
+            val companyId = configuredBleCompanyId()
+            check(companyId != null && companyId in 0..0xFFFE) {
+                "Release builds require --dart-define=" +
+                    "MESHSETU_BLE_COMPANY_ID=<assigned Bluetooth SIG company ID>"
+            }
+        }
+    }

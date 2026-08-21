@@ -1,3 +1,6 @@
+import crypto from 'node:crypto'
+import path from 'node:path'
+import protobuf from 'protobufjs'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 process.env.NODE_ENV = 'test'
@@ -20,6 +23,20 @@ const [{ server }, { store }] = await Promise.all([import('./server.js'), import
 let base = ''
 let eventId = ''
 const gatewayHeaders = { 'content-type': 'application/json', 'x-meshsetu-gateway-key': 'change-me' }
+
+async function encryptedStructuredPacket({ objectId, eventId, reporterUid }: { objectId: bigint; eventId: string; reporterUid: string }) {
+  const root = await protobuf.load(path.join(import.meta.dirname, 'protocol', 'meshsetu.proto'))
+  const type = root.lookupType('meshsetu.v1.MeshEnvelope')
+  const site = Buffer.from('demo-site')
+  const payload = Buffer.from(JSON.stringify({ incidentType: 'medical', transcript: 'help at Gate B', sttConfidence: 0, triagePriority: 'p0Critical', triageConfidence: 1, hazards: [], rationale: [], inputMode: 'tap', locationHint: '', logicalZone: 'Gate-B', voiceClipId: '', lat: 19.076, lon: 72.8777, accuracyM: 8, locationCapturedAtMs: Date.now(), reporter: { uid: reporterUid, name: 'Priya Sharma', phone: '+919876543210', language: 'English', bloodGroup: 'O+', primaryContactName: 'Ravi', primaryContactPhone: '+15550003333' } }))
+  const now = Date.now()
+  const encoded = type.encode(type.create({ objectId: objectId.toString(), eventId, siteId: 'demo-site', roomId: 'public', createdAtMs: now, expiresAtMs: now + 900000, hopCount: 1, hopLimit: 4, priority: 1, payloadType: 1, payload, originEphemeralId: '12345', traceId: Buffer.alloc(16) })).finish()
+  const iv = Buffer.alloc(12, 9)
+  const aad = Buffer.alloc(1 + 8 + 2 + site.length); aad.writeUInt8(1, 0); aad.writeBigUInt64BE(objectId, 1); aad.writeUInt16BE(site.length, 9); site.copy(aad, 11)
+  const cipher = crypto.createCipheriv('aes-256-gcm', crypto.createHash('sha256').update('MeshSetu-demo-site-key-v1:demo-site').digest(), iv); cipher.setAAD(aad)
+  const encrypted = Buffer.concat([cipher.update(encoded), cipher.final(), cipher.getAuthTag()])
+  return { packet: Buffer.concat([Buffer.from([1, 0, site.length]), site, iv, encrypted]), objectId: objectId.toString() }
+}
 
 beforeAll(async () => {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -104,6 +121,19 @@ describe('compact SOS resolved from an advertised reporter UID', () => {
     expect(secondBody.event.event_id).toBe(thirdBody.event.event_id)
     const notifications: any[] = await (await fetch(`${base}/v1/notifications/ravi-uid`)).json()
     expect(notifications).toHaveLength(1)
+  })
+
+  it('upgrades a compact alert when the matching encrypted GATT SOS arrives', async () => {
+    const compact = await fetch(`${base}/v1/gateway/ceal-sos`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ reporter_uid: 'a1b2c3d4e5f6', sequence: 23, site_id: 'demo-site' }) })
+    const compactBody: any = await compact.json()
+    const packet = await encryptedStructuredPacket({ objectId: 65559n, eventId: 'rich-event-23', reporterUid: 'a1b2c3d4e5f6' })
+    const rich = await fetch(`${base}/v1/gateway/objects`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ site_id: 'demo-site', object_id: packet.objectId, packet_b64: packet.packet.toString('base64') }) })
+    const richBody: any = await rich.json()
+
+    expect(rich.status).toBe(200)
+    expect(richBody.event.event_id).toBe(compactBody.event.event_id)
+    expect(richBody.event.incident_type).toBe('medical')
+    expect(richBody.event.decrypt_status).toBe('verified')
   })
 
   it('still records an unresolved alert when the UID is unknown', async () => {

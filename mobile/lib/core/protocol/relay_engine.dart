@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -128,6 +129,13 @@ class MeshRelayEngine {
         _metrics.add(
           RelayMetric('ack', objectId: frame.objectId, peerId: peerId),
         );
+        _metrics.add(
+          RelayMetric(
+            'custody_ack_received',
+            objectId: frame.objectId,
+            peerId: peerId,
+          ),
+        );
       } else {
         _metrics.add(
           RelayMetric(
@@ -193,7 +201,7 @@ class MeshRelayEngine {
         );
         return RelayResult(const [], _drain());
       }
-      buffer = ReassemblyBuffer(frame.count);
+      buffer = ReassemblyBuffer(frame.count, objectId: frame.objectId);
       _partial[key] = buffer;
       _partialCreatedAt[key] = clockMs();
     }
@@ -465,12 +473,14 @@ class FileRelayStore extends RelayStore {
   FileRelayStore(this.directory) {
     _inbox.createSync(recursive: true);
     _outbox.createSync(recursive: true);
+    _acks.createSync(recursive: true);
     Directory('${directory.path}/deferred').createSync(recursive: true);
   }
 
   final Directory directory;
   Directory get _inbox => Directory('${directory.path}/inbox');
   Directory get _outbox => Directory('${directory.path}/outbox');
+  Directory get _acks => Directory('${directory.path}/acks');
 
   @override
   void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) {
@@ -559,6 +569,18 @@ class FileRelayStore extends RelayStore {
   void markAck(int objectId, String peerId) {
     final file = File('${_outbox.path}/$objectId.bin');
     if (file.existsSync()) file.deleteSync();
+    _writeAtomically(
+      File('${_acks.path}/$objectId.ack'),
+      Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'objectId': objectId,
+            'peerId': peerId,
+            'acknowledgedAtMs': DateTime.now().millisecondsSinceEpoch,
+          }),
+        ),
+      ),
+    );
   }
 
   @override

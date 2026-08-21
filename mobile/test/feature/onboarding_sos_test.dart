@@ -8,6 +8,7 @@ import 'package:meshsetu_mobile/feature/onboarding/onboarding_profile.dart';
 import 'package:meshsetu_mobile/feature/onboarding/onboarding_repository.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_payload.dart';
 import 'package:meshsetu_mobile/feature/sos/sos_repository.dart';
+import 'package:meshsetu_mobile/feature/voice/voice_repository.dart';
 import 'package:test/test.dart';
 
 OnboardingProfile sampleProfile() => OnboardingProfile.create(
@@ -133,4 +134,34 @@ void main() {
       expect(payload.reporter?.reporterUid, isNotEmpty);
     },
   );
+
+  test('voice evidence is linked before the structured SOS is queued', () async {
+    final db = MeshDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final sosRepository = DriftSosRepository(db, await savedRepository());
+    final eventId = await sosRepository.createDraft(
+      const SosInput(
+        siteId: 'site',
+        roomId: 'public',
+        inputMode: InputMode.voice,
+        priority: PriorityBand.p0Critical,
+      ),
+    );
+    await VoiceRepository(db, sosRepository).attachToSos(
+      sosEventId: eventId,
+      siteId: 'site',
+      roomId: 'public',
+      encoded: Uint8List.fromList([1, 2, 3]),
+    );
+    await sosRepository.finalizeAndEnqueue(eventId);
+
+    final rows = await db.select(db.outboxEvents).get();
+    final sos = rows.singleWhere((row) => row.eventId == eventId);
+    final voice = rows.singleWhere(
+      (row) => row.payloadType == PayloadType.voiceObject.name,
+    );
+    expect(StructuredSosPayload.decode(sos.payload!).voiceClipId, voice.eventId);
+    expect(sos.state, 'ready');
+    expect(voice.state, 'ready');
+  });
 }

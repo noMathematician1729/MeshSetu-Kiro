@@ -151,6 +151,7 @@ class MeshTransportCoordinator implements MeshTransport {
   StreamSubscription<String>? _serverUnsubscribedPeerSubscription;
   final Set<String> _serverPeersStarting = {};
   final Map<int, String> _lastInboundPeerByObject = {};
+  // Lock order is relay -> pump. No pump-held path may await the relay lock.
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
   bool _stopped = false;
@@ -172,13 +173,8 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     _stopped = false;
-    _serverPeerSubscription = server.subscribedPeerIds.listen((peerId) {
-      // MeshGattServer updates its admission sets from the same broadcast
-      // event. Defer one microtask so that listener runs before capacity is
-      // evaluated, including on a reconnect subscription.
-      scheduleMicrotask(() {
-        if (!_stopped) unawaited(_ensureServerPeer(peerId));
-      });
+    _serverPeerSubscription = server.readyPeerIds.listen((peerId) {
+      if (!_stopped) unawaited(_ensureServerPeer(peerId));
     });
     _serverUnsubscribedPeerSubscription = server.unsubscribedPeerIds.listen((
       peerId,
@@ -227,6 +223,8 @@ class MeshTransportCoordinator implements MeshTransport {
               await _sendServerControl(frame.deviceId, controlFrame);
             }
             await _pump();
+          } catch (error) {
+            _reportAsyncFailure(frame.deviceId, error);
           } finally {
             server.acknowledge(frame);
           }
@@ -264,6 +262,13 @@ class MeshTransportCoordinator implements MeshTransport {
           _sessions.containsKey(peerId)) {
         return;
       }
+      if (_sessions.length >= maxPeerConnections) {
+        server.rejectPeer(peerId);
+        _onMetrics([RelayMetric('peer_rejected_capacity', peerId: peerId)]);
+        unawaited(server.disconnectPeer(peerId));
+        return;
+      }
+      if (!server.admitPeer(peerId)) return;
       attach(
         peerId,
         GattServerPeerLink(server, peerId, mtu),
@@ -347,28 +352,32 @@ class MeshTransportCoordinator implements MeshTransport {
       link.incoming.listen((bytes) {
         unawaited(
           _relayLock.synchronized(() async {
-            if (_stopped || _sessions[peerId] != link) return;
-            if (!_acceptsHello(bytes)) {
-              _detach(peerId, expected: link);
-              await link.close();
-              return;
+            try {
+              if (_stopped || _sessions[peerId] != link) return;
+              if (!_acceptsHello(bytes)) {
+                _detach(peerId, expected: link);
+                await link.close();
+                return;
+              }
+              _onMetrics([
+                RelayMetric(
+                  'frame_received',
+                  peerId: peerId,
+                  value: bytes.length,
+                ),
+                RelayMetric('frame_rx', peerId: peerId, value: bytes.length),
+              ]);
+              final result = await relay.receive(peerId, bytes);
+              _rememberInboundPeers(peerId, result.metrics);
+              _markPeerSeen(peerId);
+              _onMetrics(result.metrics);
+              for (final controlFrame in result.controlFrames) {
+                await _sendControl(peerId, link, controlFrame);
+              }
+              await _pump();
+            } catch (error) {
+              _reportAsyncFailure(peerId, error);
             }
-            _onMetrics([
-              RelayMetric(
-                'frame_received',
-                peerId: peerId,
-                value: bytes.length,
-              ),
-              RelayMetric('frame_rx', peerId: peerId, value: bytes.length),
-            ]);
-            final result = await relay.receive(peerId, bytes);
-            _rememberInboundPeers(peerId, result.metrics);
-            _markPeerSeen(peerId);
-            _onMetrics(result.metrics);
-            for (final controlFrame in result.controlFrames) {
-              await _sendControl(peerId, link, controlFrame);
-            }
-            await _pump();
           }),
         );
       }),
@@ -416,6 +425,12 @@ class MeshTransportCoordinator implements MeshTransport {
       return SendTicket(value.objectId);
     });
   }
+
+  /// Produces the authenticated packet representation used by an online
+  /// gateway. The mesh send path encrypts independently, so this method never
+  /// changes scheduler ownership or peer delivery.
+  Future<EncryptedObject> encryptForGateway(MeshEnvelope value) =>
+      relay.crypto.encrypt(value);
 
   /// Requests missing chunks from each attached peer, drains any newly
   /// queued outbound objects, and forwards accumulated metrics. Meant to be
@@ -539,20 +554,19 @@ class MeshTransportCoordinator implements MeshTransport {
             }
           } on ArgumentError catch (_) {
             // fragment() rejects an object that can't fit this peer's MTU
-            // budget; defer voice evidence (graceful degradation) instead of
-            // blocking the queue on it.
-            if (objectToSend.trafficClass == TrafficClass.voiceEvidence) {
-              // Defer only if every available peer rejects the object. A
-              // mixed-MTU mesh may still have a peer that can carry it.
-              mtuRejectedPeers++;
-              _onMetrics([
-                RelayMetric(
-                  'deferred_mtu',
-                  objectId: objectToSend.objectId,
-                  peerId: peer.key,
-                ),
-              ]);
-            }
+            // budget (or, for a malformed/oversized object, any budget).
+            // Defer instead of blocking the queue on it — voice evidence
+            // degrades gracefully by design, and a non-voice object that
+            // cannot fragment for any peer will never succeed by retrying,
+            // so it must not spin the pump forever either.
+            mtuRejectedPeers++;
+            _onMetrics([
+              RelayMetric(
+                'deferred_mtu',
+                objectId: objectToSend.objectId,
+                peerId: peer.key,
+              ),
+            ]);
           } catch (_) {
             _onMetrics([
               RelayMetric(
@@ -656,7 +670,7 @@ class MeshTransportCoordinator implements MeshTransport {
         return;
       }
       if (server.hasLiveSubscription(peerId)) {
-        if (server.admitPeer(peerId)) {
+        if (server.makePeerEligible(peerId)) {
           unawaited(_ensureServerPeer(peerId));
         }
       } else {
@@ -676,14 +690,32 @@ class MeshTransportCoordinator implements MeshTransport {
 
   void _wakeScheduler(String reason) {
     if (_stopped) return;
-    unawaited(
-      _relayLock.synchronized(() async {
+    unawaited(_runSchedulerWake(reason));
+  }
+
+  Future<void> _runSchedulerWake(String reason) async {
+    try {
+      await _relayLock.synchronized(() async {
         if (_stopped) return;
         _onMetrics([RelayMetric('scheduler_wake', detail: reason)]);
         await _pump();
         _onMetrics(relay.drainMetrics());
-      }),
-    );
+      });
+    } catch (error) {
+      _reportAsyncFailure(null, error, kind: 'scheduler_failed');
+    }
+  }
+
+  void _reportAsyncFailure(
+    String? peerId,
+    Object error, {
+    String kind = 'frame_processing_failed',
+  }) {
+    try {
+      _onMetrics([RelayMetric(kind, peerId: peerId, detail: '$error')]);
+    } catch (_) {
+      // Observability must not reintroduce the uncaught async failure.
+    }
   }
 
   void _markPeerSeen(String peerId) {
@@ -718,11 +750,13 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> _sendServerControl(String peerId, Uint8List frame) async {
     try {
-      if (!await server.notifyAwait(peerId, frame)) {
-        _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
-      }
+      _reportControlResult(
+        peerId,
+        frame,
+        await server.notifyAwait(peerId, frame),
+      );
     } catch (_) {
-      _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      _reportControlResult(peerId, frame, false);
     }
   }
 
@@ -732,12 +766,53 @@ class MeshTransportCoordinator implements MeshTransport {
     Uint8List frame,
   ) async {
     try {
-      if (!await link.send(frame, withResponse: true)) {
-        _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      _reportControlResult(
+        peerId,
+        frame,
+        await link.send(frame, withResponse: true),
+      );
+    } catch (_) {
+      _reportControlResult(peerId, frame, false);
+    }
+  }
+
+  void _reportControlResult(String peerId, Uint8List frame, bool sent) {
+    int? custodyAckObjectId;
+    try {
+      final decoded = FrameCodec.decode(frame);
+      if (decoded.type == FrameType.custodyAck) {
+        custodyAckObjectId = decoded.objectId;
       }
     } catch (_) {
-      _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      // A malformed local control frame is reported through the send result.
     }
+
+    if (sent) {
+      if (custodyAckObjectId != null) {
+        _onMetrics([
+          RelayMetric(
+            'custody_ack_sent',
+            objectId: custodyAckObjectId,
+            peerId: peerId,
+          ),
+        ]);
+      }
+      return;
+    }
+
+    _onMetrics([
+      RelayMetric(
+        'control_send_failed',
+        objectId: custodyAckObjectId,
+        peerId: peerId,
+      ),
+      if (custodyAckObjectId != null)
+        RelayMetric(
+          'custody_ack_send_failed',
+          objectId: custodyAckObjectId,
+          peerId: peerId,
+        ),
+    ]);
   }
 
   bool _acceptsHello(Uint8List bytes) {

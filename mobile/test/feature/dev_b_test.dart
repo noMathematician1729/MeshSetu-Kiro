@@ -453,4 +453,52 @@ void main() {
     expect(sent, hasLength(1));
     expect(sent.single.objectId, 11);
   });
+
+  test('OutboxSender acknowledges only its active relaying event', () async {
+    final db = MeshDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final row in [
+      ('active-relaying', 'site', 'relaying'),
+      ('active-ready', 'site', 'ready'),
+      ('other-site', 'other-site', 'relaying'),
+    ]) {
+      await db
+          .into(db.outboxEvents)
+          .insert(
+            OutboxEventsCompanion.insert(
+              eventId: row.$1,
+              objectId: const Value(77),
+              siteId: row.$2,
+              roomId: 'public',
+              payloadType: PayloadType.structuredSos.name,
+              priority: PriorityBand.p0Critical.name,
+              payload: Value(Uint8List.fromList([1])),
+              state: Value(row.$3),
+              createdAtMs: now,
+              updatedAtMs: now,
+              expiresAtMs: now + 60000,
+            ),
+          );
+    }
+    final sender = OutboxSender(
+      db,
+      (_) async {},
+      siteId: 'site',
+      localEphemeralId: 3,
+    );
+    addTearDown(sender.dispose);
+
+    await sender.onMetrics([
+      MeshBridge.metricFromJson(const {'kind': 'ack', 'objectId': 77}),
+    ]);
+
+    final states = {
+      for (final row in await db.select(db.outboxEvents).get())
+        row.eventId: row.state,
+    };
+    expect(states['active-relaying'], 'acked');
+    expect(states['active-ready'], 'ready');
+    expect(states['other-site'], 'relaying');
+  });
 }

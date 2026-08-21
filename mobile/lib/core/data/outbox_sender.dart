@@ -75,11 +75,15 @@ class OutboxSender {
 
   Future<void> _markByObjectId(int objectId, String state) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    await (_db.update(
-      _db.outboxEvents,
-    )..where((t) => t.objectId.equals(objectId))).write(
-      OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(now)),
-    );
+    await (_db.update(_db.outboxEvents)..where(
+          (t) =>
+              t.siteId.equals(siteId) &
+              t.objectId.equals(objectId) &
+              t.state.equals('relaying'),
+        ))
+        .write(
+          OutboxEventsCompanion(state: Value(state), updatedAtMs: Value(now)),
+        );
   }
 
   Future<void> _drainOnce(OutboxEvent row) async {

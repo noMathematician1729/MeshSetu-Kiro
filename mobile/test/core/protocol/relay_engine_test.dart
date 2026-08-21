@@ -168,6 +168,148 @@ void main() {
     expect(engine.nextOutbound(nowMs: 100), isNull);
   });
 
+  test('ack timeout retains the object for a later custody retry', () async {
+    final crypto = AeadEnvelope(List.filled(32, 4));
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: _RecordingStore(),
+      clockMs: () => 100,
+    );
+    final source = MeshEnvelope(
+      objectId: 131,
+      eventId: 'event',
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 100000,
+      hopCount: 0,
+      hopLimit: 2,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([9]),
+      originEphemeralId: 1,
+    );
+    await engine.submit(source);
+    final outbound = engine.nextOutbound(nowMs: 100)!;
+    engine.markSent(outbound, 'peer', nowMs: 100);
+
+    engine.retryExpired(nowMs: 8100);
+
+    expect(
+      engine.drainMetrics().any(
+        (metric) =>
+            metric.kind == 'ack_timeout' && metric.objectId == source.objectId,
+      ),
+      isTrue,
+    );
+    expect(engine.nextOutbound(nowMs: 8100)?.objectId, source.objectId);
+  });
+
+  test('only the peer holding custody can acknowledge a sent object', () async {
+    final crypto = AeadEnvelope(List.filled(32, 6));
+    final acked = <int>[];
+    final engine = MeshRelayEngine(
+      siteId: 'site',
+      crypto: crypto,
+      store: _AckTrackingStore(acked),
+      clockMs: () => 100,
+    );
+    final source = MeshEnvelope(
+      objectId: 133,
+      eventId: 'event',
+      siteId: 'site',
+      roomId: 'room',
+      createdAtMs: 1,
+      expiresAtMs: 1000,
+      hopCount: 0,
+      hopLimit: 2,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+      payload: Uint8List.fromList([9]),
+      originEphemeralId: 1,
+    );
+    await engine.submit(source);
+    engine.markSent(engine.nextOutbound(nowMs: 100)!, 'peer-a');
+    final payload = (ByteData(
+      8,
+    )..setInt64(0, source.objectId, Endian.big)).buffer.asUint8List();
+    final result = await engine.receive(
+      'peer-b',
+      FrameCodec.encode(
+        MeshFrame(
+          type: FrameType.custodyAck,
+          priority: 1,
+          flags: 0,
+          objectId: source.objectId,
+          sequence: 0,
+          count: 1,
+          payload: payload,
+        ),
+      ),
+    );
+
+    expect(acked, isEmpty);
+    expect(
+      result.metrics.any(
+        (metric) =>
+            metric.kind == 'unexpected_ack' &&
+            metric.objectId == source.objectId,
+      ),
+      isTrue,
+    );
+  });
+
+  test(
+    'duplicate delivery is acknowledged without duplicate persistence',
+    () async {
+      final crypto = AeadEnvelope(List.filled(32, 5));
+      final store = _RecordingStore();
+      final engine = MeshRelayEngine(
+        siteId: 'site',
+        crypto: crypto,
+        store: store,
+        clockMs: () => 100,
+      );
+      final source = MeshEnvelope(
+        objectId: 132,
+        eventId: 'event',
+        siteId: 'site',
+        roomId: 'room',
+        createdAtMs: 1,
+        expiresAtMs: 1000,
+        hopCount: 0,
+        hopLimit: 0,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+        payload: Uint8List.fromList([9]),
+        originEphemeralId: 1,
+      );
+      final encrypted = await crypto.encrypt(source);
+      final frame = FrameCodec.encode(
+        fragment(
+          objectId: source.objectId,
+          priority: 1,
+          encrypted: encrypted.bytes,
+          mtu: 185,
+        ).single,
+      );
+
+      final first = await engine.receive('peer', frame);
+      final duplicate = await engine.receive('peer', frame);
+
+      expect(store.stored, hasLength(1));
+      expect(
+        FrameCodec.decode(first.controlFrames.single).type,
+        FrameType.custodyAck,
+      );
+      expect(
+        FrameCodec.decode(duplicate.controlFrames.single).type,
+        FrameType.custodyAck,
+      );
+    },
+  );
+
   test('file store restores pending outbox', () {
     final directory = Directory.systemTemp.createTempSync('meshsetu-relay');
     addTearDown(() => directory.deleteSync(recursive: true));
@@ -191,6 +333,10 @@ void main() {
 
     first.markAck(value.objectId, 'peer');
     expect(FileRelayStore(directory).pending(100), isEmpty);
+    expect(
+      File('${directory.path}/acks/${value.objectId}.ack').existsSync(),
+      isTrue,
+    );
   });
 
   test('file store removes expired pending entries', () {

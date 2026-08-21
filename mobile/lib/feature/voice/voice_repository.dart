@@ -114,7 +114,7 @@ class VoiceRepository {
                 bytes: encoded,
               ).encode(),
             ),
-            state: const Value('ready'), // queued
+            state: const Value('created'),
             createdAtMs: now,
             updatedAtMs: now,
             expiresAtMs: now + ttlMs,

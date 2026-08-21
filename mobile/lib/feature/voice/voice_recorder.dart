@@ -62,6 +62,9 @@ class VoiceRecorder {
     }
   }
 
+  /// Captures an Opus clip suitable for a linked mesh voice object.
+  Future<Uint8List> recordOpusClip() => start();
+
   /// Starts recording; the returned future completes with the encoded
   /// bytes once [stop] is called or the duration cap is hit, whichever
   /// comes first.

@@ -205,6 +205,17 @@ class DriftSosRepository implements SosRepository {
         updatedAtMs: Value(now),
       ),
     );
+    final clipId = _voiceClipIdFrom(row.voicePath);
+    if (clipId.isNotEmpty) {
+      await (_db.update(
+        _db.outboxEvents,
+      )..where((t) => t.eventId.equals(clipId))).write(
+        OutboxEventsCompanion(
+          state: const Value('ready'),
+          updatedAtMs: Value(now),
+        ),
+      );
+    }
   }
 
   String _encodeTriage(TriageOutput o) => jsonEncode({

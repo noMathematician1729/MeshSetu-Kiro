@@ -44,11 +44,22 @@ export class EventStore {
   async status(id: string, value: string) { const current = await this.get(id); if (!current) return undefined; const next = { ...current, status: value }; return this.upsert(next) }
   /// Multiple relays forward the same compact alert. Reusing the recent
   /// incident keeps one dashboard entry and one contact notification.
-  async findRecentCompactEvent(reporterUid: string, sequence: number | null | undefined, sinceMs: number): Promise<EventRecord | undefined> {
+  async findRecentCompactEvent(reporterUid: string, sequence: number | null | undefined, sinceMs: number, siteId?: string): Promise<EventRecord | undefined> {
     if (sequence == null) return undefined
-    const matches = (row: EventRecord) => row.reporter_uid === reporterUid && row.compact_sequence === sequence && Number(row.received_at_ms ?? 0) >= sinceMs
+    const matches = (row: EventRecord) => {
+      const sameReporter = row.reporter_uid === reporterUid
+        || String(row.reporter_uid ?? '').startsWith(reporterUid)
+        || reporterUid.startsWith(String(row.reporter_uid ?? ''))
+      return sameReporter
+        && row.compact_sequence === sequence
+        && (!siteId || row.site_id === siteId)
+        && Number(row.received_at_ms ?? 0) >= sinceMs
+    }
     if (!this.pool) return [...this.memory.values()].filter(matches).sort((a, b) => Number(b.received_at_ms ?? 0) - Number(a.received_at_ms ?? 0))[0]
-    const result = await this.pool.query('SELECT * FROM sos_incidents WHERE reporter_uid=$1 AND compact_sequence=$2 AND received_at_ms >= $3 ORDER BY received_at_ms DESC LIMIT 1', [reporterUid, sequence, sinceMs])
+    const siteClause = siteId ? ' AND site_id=$4' : ''
+    const params: Array<string | number> = [reporterUid, sequence, sinceMs]
+    if (siteId) params.push(siteId)
+    const result = await this.pool.query(`SELECT * FROM sos_incidents WHERE (reporter_uid=$1 OR reporter_uid LIKE $1 || '%' OR $1 LIKE reporter_uid || '%') AND compact_sequence=$2 AND received_at_ms >= $3${siteClause} ORDER BY received_at_ms DESC LIMIT 1`, params)
     return result.rows[0]
   }
   async upsertProfile(profile: ProfileRecord) {

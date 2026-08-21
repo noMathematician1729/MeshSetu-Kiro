@@ -69,5 +69,6 @@ abstract final class MeshBridge {
     objectId: map['objectId'] as int?,
     peerId: map['peerId'] as String?,
     value: map['value'] as int?,
+    detail: map['detail'] as String?,
   );
 }

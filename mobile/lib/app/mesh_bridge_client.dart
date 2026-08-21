@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
@@ -9,12 +10,46 @@ import '../core/data/database.dart';
 import '../core/data/outbox_sender.dart';
 import '../core/model/model.dart';
 import '../core/protocol/envelope_codec.dart';
+import '../core/protocol/relay_engine.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
+
+/// Snapshot of the foreground mesh service's connectivity, observable from
+/// the UI isolate without polling. Room screens use this as the primary
+/// delivery signal instead of the internet-only [RoomPresenceSocket] status
+/// — a healthy BLE mesh with zero internet should never look like a broken
+/// connection.
+class MeshStatus {
+  const MeshStatus({
+    required this.eventModeRunning,
+    required this.peerCount,
+    required this.statusText,
+  });
+
+  static const stopped = MeshStatus(
+    eventModeRunning: false,
+    peerCount: 0,
+    statusText: 'stopped',
+  );
+
+  final bool eventModeRunning;
+  final int peerCount;
+  final String statusText;
+
+  MeshStatus copyWith({
+    bool? eventModeRunning,
+    int? peerCount,
+    String? statusText,
+  }) => MeshStatus(
+    eventModeRunning: eventModeRunning ?? this.eventModeRunning,
+    peerCount: peerCount ?? this.peerCount,
+    statusText: statusText ?? this.statusText,
+  );
+}
 
 /// UI-isolate half of the cross-isolate mesh bridge (see `mesh_bridge.dart`
 /// for the wire format, `event_mode_screen.dart` for the background half).
@@ -25,9 +60,17 @@ import 'sos_incident_navigator.dart';
 /// starts (matches how `feature/sos`/`feature/rooms` are meant to be used:
 /// after "Start event mode").
 class MeshBridgeClient {
-  MeshBridgeClient(this._db);
+  MeshBridgeClient(
+    this._db, {
+    Future<void> Function(MeshEnvelope envelope)? sendToMesh,
+    this.registerTaskDataCallback = true,
+    this.syncRelayInbox = true,
+  }) : _sendToMeshOverride = sendToMesh;
 
   final MeshDatabase _db;
+  final Future<void> Function(MeshEnvelope envelope)? _sendToMeshOverride;
+  final bool registerTaskDataCallback;
+  final bool syncRelayInbox;
   OutboxSender? _outbox;
   bool _listening = false;
   GatewayBridge? _gatewayBridge;
@@ -46,6 +89,19 @@ class MeshBridgeClient {
   bool _pollingContactNotifications = false;
   bool _contactNotificationsPrimed = false;
   final Set<String> _deliveredContactNotifications = {};
+  final _meshStatusController = StreamController<MeshStatus>.broadcast();
+  MeshStatus _meshStatus = MeshStatus.stopped;
+
+  /// Current mesh connectivity snapshot; [meshStatusStream] emits every
+  /// change. Safe to read before [start] — defaults to [MeshStatus.stopped].
+  MeshStatus get meshStatus => _meshStatus;
+  Stream<MeshStatus> get meshStatusStream => _meshStatusController.stream;
+
+  void _updateMeshStatus(MeshStatus Function(MeshStatus current) update) {
+    final next = update(_meshStatus);
+    _meshStatus = next;
+    if (!_meshStatusController.isClosed) _meshStatusController.add(next);
+  }
 
   /// Enables emergency-contact alert delivery for the signed-in profile.
   void configureContactAlerts({
@@ -75,13 +131,48 @@ class MeshBridgeClient {
   }
 
   void start({required String siteId, required int localEphemeralId}) {
-    if (!_listening) {
-      FlutterForegroundTask.addTaskDataCallback(_onTaskData);
-      _listening = true;
-    }
+    _ensureTaskDataListener();
     _siteId = siteId;
     _localEphemeralId = localEphemeralId;
+    _activateOutbox();
+  }
+
+  /// Attaches this client to a site before the foreground task has reported
+  /// its local identity. Room screens use this when they start Event Mode
+  /// directly; the outbox begins draining as soon as `started` arrives.
+  void prepareForSite({required String siteId}) {
+    _ensureTaskDataListener();
+    final changed = _siteId != siteId;
+    _siteId = siteId;
+    if (changed && _localEphemeralId != null) _activateOutbox();
+  }
+
+  /// Requests the identity from an already-running foreground task. This is
+  /// needed when a participant opens a room after Event Mode was started by a
+  /// different screen, so the room-created bridge can attach without a task
+  /// restart.
+  void requestForegroundIdentity() {
+    if (_siteId == null) return;
+    FlutterForegroundTask.sendDataToTask(const {'mesh_identity_request': true});
+  }
+
+  void _ensureTaskDataListener() {
+    if (_listening || !registerTaskDataCallback) return;
+    FlutterForegroundTask.addTaskDataCallback(handleTaskData);
+    _listening = true;
+  }
+
+  void _acceptForegroundIdentity(int localEphemeralId) {
+    if (localEphemeralId <= 0 || _localEphemeralId == localEphemeralId) {
+      return;
+    }
+    _localEphemeralId = localEphemeralId;
+    if (_siteId != null) _activateOutbox();
+  }
+
+  void _activateOutbox() {
     unawaited(_restartOutbox());
+    if (!syncRelayInbox) return;
     unawaited(_syncRelayInbox());
     _inboxSyncTimer ??= Timer.periodic(
       const Duration(seconds: 2),
@@ -90,10 +181,7 @@ class MeshBridgeClient {
   }
 
   void setSiteId(String siteId) {
-    if (_siteId == siteId || _localEphemeralId == null) return;
-    _siteId = siteId;
-    unawaited(_restartOutbox());
-    unawaited(_syncRelayInbox());
+    prepareForSite(siteId: siteId);
   }
 
   Future<void> _restartOutbox() async {
@@ -110,6 +198,11 @@ class MeshBridgeClient {
   }
 
   Future<void> _sendToMesh(MeshEnvelope envelope) async {
+    final override = _sendToMeshOverride;
+    if (override != null) {
+      await override(envelope);
+      return;
+    }
     if (!await FlutterForegroundTask.isRunningService) {
       throw StateError('event mode is not running');
     }
@@ -139,9 +232,20 @@ class MeshBridgeClient {
     }
   }
 
-  void _onTaskData(Object data) {
+  /// Consumes a foreground-task message. Public so its status projection can
+  /// be unit-tested without a real Android foreground service; production
+  /// registers this exact method as the task-data callback in [start].
+  void handleTaskData(Object data) {
     if (data is! Map) return;
     switch (data['status']) {
+      case 'started':
+        final localEphemeralId = data['localEphemeralId'];
+        if (localEphemeralId is int) {
+          _acceptForegroundIdentity(localEphemeralId);
+        }
+        _updateMeshStatus(
+          (current) => current.copyWith(eventModeRunning: true),
+        );
       case 'mesh_submit_result':
         final objectId = data['objectId'];
         if (objectId is! int) return;
@@ -156,6 +260,25 @@ class MeshBridgeClient {
             ),
           );
         }
+      case 'mesh_status':
+        final value = data['value'];
+        if (value is! String) return;
+        _updateMeshStatus(
+          (current) =>
+              current.copyWith(eventModeRunning: true, statusText: value),
+        );
+      case 'mesh_peers':
+        final peers = data['peers'];
+        if (peers is! List) return;
+        _updateMeshStatus(
+          (current) => current.copyWith(
+            eventModeRunning: true,
+            peerCount: peers.whereType<Map>().where((peer) {
+              final connected = peer['connected'];
+              return connected == null || connected == true;
+            }).length,
+          ),
+        );
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
@@ -176,31 +299,46 @@ class MeshBridgeClient {
         unawaited(_storeReceived(received));
       case 'mesh_origin_submitted':
         final envelopeJson = data['envelope'];
-        if (envelopeJson is! Map || _gatewayBridge == null) return;
+        final encryptedBytes = data['encryptedBytes'];
+        if (envelopeJson is! Map ||
+            encryptedBytes is! String ||
+            _gatewayBridge == null) {
+          return;
+        }
         unawaited(
           _forwardOriginSos(
             MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
+            base64Decode(encryptedBytes),
           ),
         );
       case 'error' || 'stopped':
+        _updateMeshStatus((_) => MeshStatus.stopped);
         _failPendingSubmissions(
           StateError(data['message'] as String? ?? 'foreground mesh stopped'),
         );
     }
   }
 
-  Future<void> _forwardOriginSos(MeshEnvelope envelope) async {
+  Future<void> _forwardOriginSos(
+    MeshEnvelope envelope,
+    List<int> encryptedBytes,
+  ) async {
     final bridge = _gatewayBridge;
-    if (bridge == null || envelope.payloadType != PayloadType.structuredSos) {
+    if (bridge == null ||
+        (envelope.payloadType != PayloadType.structuredSos &&
+            envelope.payloadType != PayloadType.voiceObject)) {
       return;
     }
     try {
-      final sos = StructuredSosPayload.decode(envelope.payload);
-      await bridge.postToDashboard(
-        bridge.eventJson(envelope: envelope, sos: sos),
+      await bridge.postEncryptedObject(
+        siteId: envelope.siteId,
+        objectId: envelope.objectId,
+        packet: encryptedBytes,
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        peerId: 'origin',
       );
     } catch (_) {
-      // The durable mesh object remains available for retry through the normal gateway path.
+      // Relay delivery can still carry this object to another gateway.
     }
   }
 
@@ -265,37 +403,70 @@ class MeshBridgeClient {
     try {
       final documents = await getApplicationDocumentsDirectory();
       final directory = Directory('${documents.path}/mesh-relay/inbox');
-      if (!await directory.exists()) return;
-      await for (final entity in directory.list()) {
-        if (entity is! File || !entity.path.endsWith('.bin')) continue;
-        try {
-          final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
-          if (envelope.siteId != _siteId ||
-              envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
-            continue;
+      if (await directory.exists()) {
+        await for (final entity in directory.list()) {
+          if (entity is! File || !entity.path.endsWith('.bin')) continue;
+          try {
+            final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
+            if (envelope.siteId != _siteId ||
+                envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
+              continue;
+            }
+            final modifiedAt =
+                (await entity.stat()).modified.millisecondsSinceEpoch;
+            final wire = File(
+              '${directory.path}/${entity.uri.pathSegments.last.replaceFirst('.bin', '.wire')}',
+            );
+            await _storeReceived(
+              ReceivedObject(
+                envelope: envelope,
+                peerId: 'durable-relay',
+                receivedAtMs: modifiedAt,
+                encryptedBytes: await wire.exists()
+                    ? await wire.readAsBytes()
+                    : null,
+              ),
+            );
+          } catch (_) {
+            // Ignore incomplete/foreign files; atomic writes mean valid packets
+            // will be available on the next pass.
           }
-          final modifiedAt =
-              (await entity.stat()).modified.millisecondsSinceEpoch;
-          final wire = File(
-            '${directory.path}/${entity.uri.pathSegments.last.replaceFirst('.bin', '.wire')}',
-          );
-          await _storeReceived(
-            ReceivedObject(
-              envelope: envelope,
-              peerId: 'durable-relay',
-              receivedAtMs: modifiedAt,
-              encryptedBytes: await wire.exists()
-                  ? await wire.readAsBytes()
-                  : null,
-            ),
-          );
-        } catch (_) {
-          // Ignore incomplete/foreign files; atomic writes mean valid packets
-          // will be available on the next pass.
         }
       }
+      await _syncRelayAcknowledgements(documents);
     } finally {
       _syncingInbox = false;
+    }
+  }
+
+  /// The foreground isolate can receive an ACK while the UI isolate is
+  /// paused, so the task writes a tiny durable marker beside its relay store.
+  /// Consume it here instead of relying solely on the best-effort task-data
+  /// callback.
+  Future<void> _syncRelayAcknowledgements(Directory documents) async {
+    final outbox = _outbox;
+    if (outbox == null) return;
+    final directory = Directory('${documents.path}/mesh-relay/acks');
+    if (!await directory.exists()) return;
+    await for (final entity in directory.list()) {
+      if (entity is! File || !entity.path.endsWith('.ack')) continue;
+      try {
+        final payload = jsonDecode(await entity.readAsString());
+        final objectId = payload is Map
+            ? int.tryParse('${payload['objectId'] ?? ''}')
+            : null;
+        if (objectId == null || objectId <= 0) {
+          await entity.delete();
+          continue;
+        }
+        final peerId = payload is Map ? payload['peerId'] as String? : null;
+        await outbox.onMetrics([
+          RelayMetric('ack', objectId: objectId, peerId: peerId),
+        ]);
+        await entity.delete();
+      } catch (_) {
+        // Atomic marker writes are retried on the next sync pass.
+      }
     }
   }
 
@@ -375,7 +546,7 @@ class MeshBridgeClient {
     _contactNotificationTimer?.cancel();
     _contactNotificationTimer = null;
     if (_listening) {
-      FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+      FlutterForegroundTask.removeTaskDataCallback(handleTaskData);
       _listening = false;
     }
     await _outbox?.dispose();
@@ -386,5 +557,7 @@ class MeshBridgeClient {
     _storedObjectIds.clear();
     _forwardedObjectIds.clear();
     _forwardingObjectIds.clear();
+    _meshStatus = MeshStatus.stopped;
+    await _meshStatusController.close();
   }
 }

@@ -20,10 +20,28 @@ class LiveRoomMessage {
   final int sentAtMs;
 }
 
+/// A transport [RoomMessageDispatcher] can attempt a room message over
+/// before falling back to the durable mesh outbox. [RoomPresenceSocket] is
+/// the only implementation today; the interface exists so the dispatcher
+/// can be tested without a real socket/server.
+abstract interface class LiveRoomMessageTransport {
+  /// Whether the live channel currently has a snapshot showing at least one
+  /// *other* room member online. A lone sender has nobody to deliver to, so
+  /// the dispatcher should go straight to the mesh instead of waiting on a
+  /// socket round trip that can only fail.
+  bool get canReachOtherMember;
+
+  /// Sends [text] over the live channel and resolves `true` only once the
+  /// server confirms at least one other member received it, `false` if the
+  /// channel is unreachable, the send fails, or no confirmation arrives
+  /// within the transport's ack timeout.
+  Future<bool> sendRoomMessage({required String messageId, required String text});
+}
+
 /// Live room membership shared through the event backend. Mesh announcements
 /// remain durable/offline fallback; this channel makes open lobbies update
 /// immediately when a participant joins or leaves.
-class RoomPresenceSocket {
+class RoomPresenceSocket implements LiveRoomMessageTransport {
   RoomPresenceSocket({
     required this.baseUrl,
     required this.gatewayKey,
@@ -31,6 +49,7 @@ class RoomPresenceSocket {
     required this.roomId,
     required this.memberId,
     required this.displayName,
+    this.messageAckTimeout = const Duration(seconds: 5),
   });
 
   final Uri baseUrl;
@@ -39,18 +58,29 @@ class RoomPresenceSocket {
   final String roomId;
   final String memberId;
   final String displayName;
+
+  /// How long [sendRoomMessage] waits for a `room-message-accepted` reply
+  /// before treating the send as failed and letting the caller fall back to
+  /// the mesh. Overridable in tests so they don't wait out a real timeout.
+  final Duration messageAckTimeout;
+
   final _members = StreamController<List<RoomMember>>.broadcast();
   final _messages = StreamController<LiveRoomMessage>.broadcast();
   final _debug = StreamController<String>.broadcast();
   final _pendingMessages = <Map<String, Object?>>[];
+  final Map<String, Completer<int>> _pendingAcks = {};
   WebSocket? _socket;
   Timer? _retry;
   bool _disposed = false;
   bool _connecting = false;
+  bool _canReachOtherMember = false;
 
   Stream<List<RoomMember>> get members => _members.stream;
   Stream<LiveRoomMessage> get messages => _messages.stream;
   Stream<String> get debug => _debug.stream;
+
+  @override
+  bool get canReachOtherMember => _canReachOtherMember;
 
   void start() => unawaited(_connect());
 
@@ -142,6 +172,19 @@ class RoomPresenceSocket {
         }
         return;
       }
+      if (decoded['type'] == 'room-message-accepted') {
+        final data = decoded['data'];
+        if (data is! Map) return;
+        final item = data.cast<String, Object?>();
+        final messageId = item['messageId'] as String?;
+        final recipientCount = (item['recipientCount'] as num?)?.toInt();
+        if (messageId == null || recipientCount == null) return;
+        final pending = _pendingAcks.remove(messageId);
+        if (pending != null && !pending.isCompleted) {
+          pending.complete(recipientCount);
+        }
+        return;
+      }
       if (decoded['type'] != 'room-members') return;
       final data = decoded['data'];
       if (data is! List) return;
@@ -152,13 +195,20 @@ class RoomPresenceSocket {
                 case final member?)
               member,
       ]..sort((a, b) => a.joinedAtMs.compareTo(b.joinedAtMs));
+      _canReachOtherMember = values.any(
+        (member) => member.memberId != memberId,
+      );
       if (!_disposed) _members.add(values);
     } catch (_) {
       // Ignore malformed presence data and wait for the next snapshot.
     }
   }
 
-  void sendRoomMessage({required String messageId, required String text}) {
+  @override
+  Future<bool> sendRoomMessage({
+    required String messageId,
+    required String text,
+  }) async {
     final message = <String, Object?>{
       'type': 'room-message',
       'messageId': messageId,
@@ -169,10 +219,20 @@ class RoomPresenceSocket {
     if (socket == null) {
       _pendingMessages.add(message);
       _report('Queued message until live chat connects.');
-      return;
+      return false;
     }
+    final ack = _pendingAcks[messageId] ??= Completer<int>();
     socket.add(jsonEncode(message));
     _report('Sent message to live room.');
+    try {
+      final recipientCount = await ack.future.timeout(messageAckTimeout);
+      return recipientCount > 0;
+    } on TimeoutException {
+      _report('No live-room acknowledgement; falling back to mesh.');
+      return false;
+    } finally {
+      _pendingAcks.remove(messageId);
+    }
   }
 
   void _report(String value) {
@@ -191,6 +251,10 @@ class RoomPresenceSocket {
   Future<void> dispose() async {
     _disposed = true;
     _retry?.cancel();
+    for (final pending in _pendingAcks.values) {
+      if (!pending.isCompleted) pending.complete(0);
+    }
+    _pendingAcks.clear();
     await _socket?.close();
     _socket = null;
     await _members.close();
