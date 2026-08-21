@@ -181,7 +181,16 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
     if (decoded.envelope.expiresAtMs <= now) return res.status(422).json({ error: 'expired packet' })
     if (decoded.envelope.payloadType === 'structuredSos') {
       const s = decoded.payload
-      const record = await store.upsert({ event_id: decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null })
+      const compactSequence = Number(BigInt(decoded.envelope.objectId) & 0xffffn)
+      const compact = s.reporter?.uid
+        ? await store.findRecentCompactEvent(
+            s.reporter.uid,
+            compactSequence,
+            now - 600000,
+            decoded.envelope.siteId,
+          )
+        : undefined
+      const record = await store.upsert({ event_id: compact?.event_id ?? decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null, compact_sequence: compact?.compact_sequence ?? compactSequence })
       await fanOutIncident(record, 'new')
       emit('incident', record); return res.json({ ok: true, verified: true, event: record })
     }
@@ -220,7 +229,11 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const now = parsed.data.received_at_ms ?? Date.now()
   // Every nearby peer with internet forwards the same alert. Converge them on
   // one incident so the dashboard and the contacts see a single emergency.
-  const existing = await store.findRecentCompactEvent(parsed.data.reporter_uid, parsed.data.sequence ?? null, now - 600000)
+  const existing = await store.findRecentCompactEvent(parsed.data.reporter_uid, parsed.data.sequence ?? null, now - 600000, parsed.data.site_id)
+  if (existing?.decrypt_status === 'verified') {
+    emit('incident', existing)
+    return res.json({ ok: true, resolved: true, event: existing, profile: profile ?? null })
+  }
   const eventId = existing?.event_id ?? `ceal-${parsed.data.reporter_uid}-${Date.now()}`
   const record = await store.upsert({
     event_id: eventId,

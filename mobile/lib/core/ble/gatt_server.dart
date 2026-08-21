@@ -45,6 +45,8 @@ class MeshGattServer {
   final Duration notificationTimeout;
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
+  final StreamController<String> _readyPeers =
+      StreamController<String>.broadcast();
   final Set<String> _subscribers = {};
   // A rejected client can remain subscribed on the radio. Keep that fact
   // separate so a freed slot can restore admission without a second CCCD write.
@@ -68,6 +70,10 @@ class MeshGattServer {
   final Map<String, int> _mtus = {};
 
   Stream<IncomingGattFrame> get incoming => _frames.stream;
+
+  /// Emits a peer once both its GATT connection and TX subscription are live.
+  /// Either platform callback may arrive first on Android.
+  Stream<String> get readyPeerIds => _readyPeers.stream;
 
   Stream<String> get subscribedPeerIds => UniversalBlePeripheral
       .characteristicSubscriptionStream
@@ -176,6 +182,7 @@ class MeshGattServer {
             _rejectedPeers.remove(event.deviceId);
             _reconnectRequests.remove(event.deviceId);
             _diagnostic('server_notification_subscribed', event.deviceId);
+            _emitReadyPeer(event.deviceId);
           } else {
             _diagnostic(
               'server_descriptor_write_request',
@@ -204,6 +211,7 @@ class MeshGattServer {
           );
           if (event.connected) {
             _connectedPeers.add(event.deviceId);
+            _emitReadyPeer(event.deviceId);
           } else {
             _connectedPeers.remove(event.deviceId);
             _subscribers.remove(event.deviceId);
@@ -414,6 +422,7 @@ class MeshGattServer {
     _mtus.clear();
     _pendingFrames = 0;
     await _frames.close();
+    await _readyPeers.close();
   }
 
   Future<void> _cancelPlatformSubscriptions() async {
@@ -430,6 +439,12 @@ class MeshGattServer {
       onDiagnostic?.call(kind, peerId, detail: detail, value: value);
     } catch (_) {
       // Diagnostics must never prevent a GATT callback from being answered.
+    }
+  }
+
+  void _emitReadyPeer(String deviceId) {
+    if (_running && hasLiveSubscription(deviceId) && !_readyPeers.isClosed) {
+      _readyPeers.add(deviceId);
     }
   }
 }

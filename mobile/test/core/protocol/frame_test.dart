@@ -24,6 +24,21 @@ void main() {
     }
   });
 
+  test('max Android MTU never emits an oversized GATT attribute value', () {
+    final frames = fragment(
+      objectId: 42,
+      priority: 1,
+      encrypted: Uint8List(1000),
+      mtu: 517,
+    );
+
+    expect(maxFragmentPayload(517), 496);
+    expect(
+      frames.every((frame) => FrameCodec.encode(frame).length <= 512),
+      isTrue,
+    );
+  });
+
   test('malformed frames fail before use', () {
     expect(() => FrameCodec.decode(Uint8List(15)), throwsArgumentError);
     expect(

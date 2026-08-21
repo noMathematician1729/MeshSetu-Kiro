@@ -633,8 +633,12 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   kind.startsWith('gatt_') ||
                   kind.startsWith('server_') ||
                   kind == 'send_failed' ||
-                  kind == 'control_send_failed') {
-                _lastConnection = _lastMetric;
+                  kind == 'control_send_failed' ||
+                  kind == 'custody_ack_sent' ||
+                  kind == 'custody_ack_received' ||
+                  kind == 'custody_ack_send_failed' ||
+                  kind == 'ack_timeout') {
+                _lastConnection = _friendlyConnectionMetric(kind, peer, detail);
               }
               if (kind == 'object_received') {
                 _lastReceived =
@@ -671,6 +675,29 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               '${data['zone'] ?? 'unknown'} (${data['uncertainty'] ?? 'unknown'})',
         );
     }
+  }
+
+  String _friendlyConnectionMetric(String kind, Object? peer, Object? detail) {
+    final peerSuffix = peer == null ? '' : ' (${peer.toString()})';
+    final description = switch (kind) {
+      'gatt_server_connected' =>
+        'Peer connected to this phone as a GATT server',
+      'gatt_server_disconnected' =>
+        'Peer disconnected from this phone as a GATT server',
+      'peer_connected' => 'Mesh peer connected',
+      'peer_connect_failed' => 'Could not connect to mesh peer',
+      'peer_session_ready' => 'Mesh peer session ready',
+      'send_failed' => 'Mesh send failed',
+      'control_send_failed' => 'Mesh acknowledgement/control send failed',
+      'custody_ack_sent' => 'Custody acknowledgement sent to peer',
+      'custody_ack_received' => 'Custody acknowledgement received from peer',
+      'custody_ack_send_failed' =>
+        'Could not send custody acknowledgement; sender will retry',
+      'ack_timeout' => 'No peer acknowledgement received; retrying',
+      _ => kind,
+    };
+    return '$description$peerSuffix'
+        '${detail == null ? '' : ': ${detail.toString()}'}';
   }
 
   void _recordReceivedSos(ReceivedObject received) {
@@ -1480,7 +1507,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
-              Text('Connection: $_lastConnection'),
+              Text('Latest link event: $_lastConnection'),
               Text('Last object: $_lastReceived'),
               if (_peerDebug.isNotEmpty) ...[
                 const SizedBox(height: 4),

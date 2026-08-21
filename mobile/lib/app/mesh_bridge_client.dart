@@ -10,6 +10,7 @@ import '../core/data/database.dart';
 import '../core/data/outbox_sender.dart';
 import '../core/model/model.dart';
 import '../core/protocol/envelope_codec.dart';
+import '../core/protocol/relay_engine.dart';
 import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
@@ -280,37 +281,70 @@ class MeshBridgeClient {
     try {
       final documents = await getApplicationDocumentsDirectory();
       final directory = Directory('${documents.path}/mesh-relay/inbox');
-      if (!await directory.exists()) return;
-      await for (final entity in directory.list()) {
-        if (entity is! File || !entity.path.endsWith('.bin')) continue;
-        try {
-          final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
-          if (envelope.siteId != _siteId ||
-              envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
-            continue;
+      if (await directory.exists()) {
+        await for (final entity in directory.list()) {
+          if (entity is! File || !entity.path.endsWith('.bin')) continue;
+          try {
+            final envelope = EnvelopeCodec.decode(await entity.readAsBytes());
+            if (envelope.siteId != _siteId ||
+                envelope.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
+              continue;
+            }
+            final modifiedAt =
+                (await entity.stat()).modified.millisecondsSinceEpoch;
+            final wire = File(
+              '${directory.path}/${entity.uri.pathSegments.last.replaceFirst('.bin', '.wire')}',
+            );
+            await _storeReceived(
+              ReceivedObject(
+                envelope: envelope,
+                peerId: 'durable-relay',
+                receivedAtMs: modifiedAt,
+                encryptedBytes: await wire.exists()
+                    ? await wire.readAsBytes()
+                    : null,
+              ),
+            );
+          } catch (_) {
+            // Ignore incomplete/foreign files; atomic writes mean valid packets
+            // will be available on the next pass.
           }
-          final modifiedAt =
-              (await entity.stat()).modified.millisecondsSinceEpoch;
-          final wire = File(
-            '${directory.path}/${entity.uri.pathSegments.last.replaceFirst('.bin', '.wire')}',
-          );
-          await _storeReceived(
-            ReceivedObject(
-              envelope: envelope,
-              peerId: 'durable-relay',
-              receivedAtMs: modifiedAt,
-              encryptedBytes: await wire.exists()
-                  ? await wire.readAsBytes()
-                  : null,
-            ),
-          );
-        } catch (_) {
-          // Ignore incomplete/foreign files; atomic writes mean valid packets
-          // will be available on the next pass.
         }
       }
+      await _syncRelayAcknowledgements(documents);
     } finally {
       _syncingInbox = false;
+    }
+  }
+
+  /// The foreground isolate can receive an ACK while the UI isolate is
+  /// paused, so the task writes a tiny durable marker beside its relay store.
+  /// Consume it here instead of relying solely on the best-effort task-data
+  /// callback.
+  Future<void> _syncRelayAcknowledgements(Directory documents) async {
+    final outbox = _outbox;
+    if (outbox == null) return;
+    final directory = Directory('${documents.path}/mesh-relay/acks');
+    if (!await directory.exists()) return;
+    await for (final entity in directory.list()) {
+      if (entity is! File || !entity.path.endsWith('.ack')) continue;
+      try {
+        final payload = jsonDecode(await entity.readAsString());
+        final objectId = payload is Map
+            ? int.tryParse('${payload['objectId'] ?? ''}')
+            : null;
+        if (objectId == null || objectId <= 0) {
+          await entity.delete();
+          continue;
+        }
+        final peerId = payload is Map ? payload['peerId'] as String? : null;
+        await outbox.onMetrics([
+          RelayMetric('ack', objectId: objectId, peerId: peerId),
+        ]);
+        await entity.delete();
+      } catch (_) {
+        // Atomic marker writes are retried on the next sync pass.
+      }
     }
   }
 

@@ -173,13 +173,8 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> start() async {
     _stopped = false;
-    _serverPeerSubscription = server.subscribedPeerIds.listen((peerId) {
-      // MeshGattServer updates its admission sets from the same broadcast
-      // event. Defer one microtask so that listener runs before capacity is
-      // evaluated, including on a reconnect subscription.
-      scheduleMicrotask(() {
-        if (!_stopped) unawaited(_ensureServerPeer(peerId));
-      });
+    _serverPeerSubscription = server.readyPeerIds.listen((peerId) {
+      if (!_stopped) unawaited(_ensureServerPeer(peerId));
     });
     _serverUnsubscribedPeerSubscription = server.unsubscribedPeerIds.listen((
       peerId,
@@ -732,11 +727,13 @@ class MeshTransportCoordinator implements MeshTransport {
 
   Future<void> _sendServerControl(String peerId, Uint8List frame) async {
     try {
-      if (!await server.notifyAwait(peerId, frame)) {
-        _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
-      }
+      _reportControlResult(
+        peerId,
+        frame,
+        await server.notifyAwait(peerId, frame),
+      );
     } catch (_) {
-      _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      _reportControlResult(peerId, frame, false);
     }
   }
 
@@ -746,12 +743,53 @@ class MeshTransportCoordinator implements MeshTransport {
     Uint8List frame,
   ) async {
     try {
-      if (!await link.send(frame, withResponse: true)) {
-        _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      _reportControlResult(
+        peerId,
+        frame,
+        await link.send(frame, withResponse: true),
+      );
+    } catch (_) {
+      _reportControlResult(peerId, frame, false);
+    }
+  }
+
+  void _reportControlResult(String peerId, Uint8List frame, bool sent) {
+    int? custodyAckObjectId;
+    try {
+      final decoded = FrameCodec.decode(frame);
+      if (decoded.type == FrameType.custodyAck) {
+        custodyAckObjectId = decoded.objectId;
       }
     } catch (_) {
-      _onMetrics([RelayMetric('control_send_failed', peerId: peerId)]);
+      // A malformed local control frame is reported through the send result.
     }
+
+    if (sent) {
+      if (custodyAckObjectId != null) {
+        _onMetrics([
+          RelayMetric(
+            'custody_ack_sent',
+            objectId: custodyAckObjectId,
+            peerId: peerId,
+          ),
+        ]);
+      }
+      return;
+    }
+
+    _onMetrics([
+      RelayMetric(
+        'control_send_failed',
+        objectId: custodyAckObjectId,
+        peerId: peerId,
+      ),
+      if (custodyAckObjectId != null)
+        RelayMetric(
+          'custody_ack_send_failed',
+          objectId: custodyAckObjectId,
+          peerId: peerId,
+        ),
+    ]);
   }
 
   bool _acceptsHello(Uint8List bytes) {

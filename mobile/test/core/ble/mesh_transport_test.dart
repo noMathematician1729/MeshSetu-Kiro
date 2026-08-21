@@ -87,6 +87,7 @@ class _FakeLink implements PeerLink {
 class _RecordingStore extends RelayStore {
   final List<MeshEnvelope> stored = [];
   final List<EncryptedObject> deferred = [];
+  final List<int> acked = [];
 
   @override
   void persist(MeshEnvelope envelope, {Uint8List? encryptedBytes}) =>
@@ -94,6 +95,9 @@ class _RecordingStore extends RelayStore {
 
   @override
   void markDeferred(EncryptedObject value) => deferred.add(value);
+
+  @override
+  void markAck(int objectId, String peerId) => acked.add(objectId);
 }
 
 class _FakePeripheral extends UniversalBlePeripheralUnsupported {
@@ -244,6 +248,91 @@ void main() {
     expect(received.envelope.objectId, source.objectId);
     expect(received.envelope.eventId, source.eventId);
     expect(received.peerId, 'peer-a');
+  });
+
+  test(
+    'custody ACK returns to the source after receiver persistence',
+    () async {
+      final sourceMetrics = <RelayMetric>[];
+      final receiverMetrics = <RelayMetric>[];
+      final sourceStore = _RecordingStore();
+      final coordinatorA = _coordinator(
+        store: sourceStore,
+        onMetrics: sourceMetrics.addAll,
+      );
+      final coordinatorB = _coordinator(onMetrics: receiverMetrics.addAll);
+      final (linkAtoB, linkBtoA) = _pairedLinks();
+      coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
+      coordinatorB.attach('peer-a', linkBtoA, siteFingerprint: 1);
+
+      final source = _envelope(
+        objectId: 421,
+        priority: PriorityBand.p0Critical,
+        payloadType: PayloadType.structuredSos,
+      );
+      final acked = Completer<void>();
+      final monitor = Timer.periodic(const Duration(milliseconds: 1), (_) {
+        if (!acked.isCompleted &&
+            sourceMetrics.any((metric) => metric.kind == 'ack')) {
+          acked.complete();
+        }
+      });
+      addTearDown(monitor.cancel);
+
+      await coordinatorA.send(source);
+      await acked.future.timeout(const Duration(seconds: 2));
+
+      expect(sourceStore.acked, [source.objectId]);
+      expect(
+        sourceMetrics.any(
+          (metric) =>
+              metric.kind == 'custody_ack_received' &&
+              metric.objectId == source.objectId,
+        ),
+        isTrue,
+      );
+      expect(
+        receiverMetrics.any(
+          (metric) =>
+              metric.kind == 'custody_ack_sent' &&
+              metric.objectId == source.objectId,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('failed custody ACK leaves the source pending for retry', () async {
+    final sourceStore = _RecordingStore();
+    final receiverMetrics = <RelayMetric>[];
+    final coordinatorA = _coordinator(store: sourceStore);
+    final coordinatorB = _coordinator(onMetrics: receiverMetrics.addAll);
+    final linkAtoB = _FakeLink();
+    final linkBtoA = _FakeLink(sendSucceeds: false);
+    linkAtoB.peer = linkBtoA;
+    linkBtoA.peer = linkAtoB;
+    coordinatorA.attach('peer-b', linkAtoB, siteFingerprint: 1);
+    coordinatorB.attach('peer-a', linkBtoA, siteFingerprint: 1);
+
+    final source = _envelope(
+      objectId: 422,
+      priority: PriorityBand.p0Critical,
+      payloadType: PayloadType.structuredSos,
+    );
+    final received = coordinatorB.incoming.first;
+    await coordinatorA.send(source);
+    await received.timeout(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(sourceStore.acked, isEmpty);
+    expect(
+      receiverMetrics.any(
+        (metric) =>
+            metric.kind == 'custody_ack_send_failed' &&
+            metric.objectId == source.objectId,
+      ),
+      isTrue,
+    );
   });
 
   test('keeps a queued object until a BLE peer attaches', () async {
@@ -891,6 +980,42 @@ void main() {
     expect(coordinator.hasPeer('server-peer'), isFalse);
     await coordinator.stop();
   });
+
+  test(
+    'server admits a peer when subscription arrives before connection',
+    () async {
+      final peripheral = _FakePeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      final previousTarget = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = previousTarget;
+        UniversalBlePeripheral.setInstance(UniversalBlePeripheralUnsupported());
+      });
+
+      final server = MeshGattServer();
+      final coordinator = _coordinator(server: server);
+      await coordinator.start();
+
+      peripheral.updateCharacteristicSubscription(
+        BlePeripheralCharacteristicSubscriptionChanged(
+          deviceId: 'reverse-order-peer',
+          characteristicId: MeshGatt.tx,
+          isSubscribed: true,
+          name: null,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(coordinator.hasPeer('reverse-order-peer'), isFalse);
+
+      peripheral.updateConnectionState(
+        BlePeripheralConnectionStateChanged('reverse-order-peer', true),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(coordinator.hasPeer('reverse-order-peer'), isTrue);
+      await coordinator.stop();
+    },
+  );
 
   test('foreign server HELLO remains quarantined after detaching', () async {
     final peripheral = _FakePeripheral();

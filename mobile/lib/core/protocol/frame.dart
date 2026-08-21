@@ -11,6 +11,7 @@ const int frameHeaderBytes = 16;
 const int frameVersion = 1;
 const int maxChunks = 512;
 const int maxObjectBytes = 64 * 1024;
+const int maxGattAttributeValueBytes = 512;
 
 enum FrameType {
   data(1),
@@ -187,7 +188,12 @@ abstract final class FrameCodec {
 }
 
 int maxFragmentPayload(int mtu) {
-  final attValueBytes = math.max(mtu - 3, 20);
+  // A 517-byte ATT MTU advertises 514 notification bytes, but Android's
+  // BluetoothGattServer rejects characteristic values above 512 bytes.
+  final attValueBytes = math.min(
+    math.max(mtu - 3, 20),
+    maxGattAttributeValueBytes,
+  );
   return math.max(attValueBytes - frameHeaderBytes, 1);
 }
 

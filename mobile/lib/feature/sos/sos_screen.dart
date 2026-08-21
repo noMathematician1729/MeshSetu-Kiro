@@ -99,7 +99,7 @@ class _SosScreenState extends ConsumerState<SosScreen> {
         _sending = false;
         _eventId = eventId;
         _status =
-            'SOS stored locally · awaiting foreground mesh · '
+            'SOS saved locally · Event Mode will relay it when ready · '
             '${locationResult.status} · $voiceStatus';
         _textController.clear();
       });
@@ -176,11 +176,12 @@ class _SosScreenState extends ConsumerState<SosScreen> {
   }
 
   String _deliveryLabel(String? state) => switch (state) {
-    'ready' => 'Delivery: queued locally, waiting for the mesh service.',
-    'relaying' => 'Delivery: accepted by mesh, waiting for a GATT peer.',
-    'acked' => 'Delivery: received and acknowledged by a peer.',
-    'expired' => 'Delivery: expired before peer acknowledgement.',
-    'failed' => 'Delivery: failed locally; retry event mode.',
-    _ => 'Delivery: preparing SOS.',
+    'ready' => 'Delivery: saved on this phone; waiting for Event Mode.',
+    'relaying' =>
+      'Delivery: queued for mesh; waiting for a peer acknowledgement.',
+    'acked' => 'Delivery: acknowledged by a mesh peer.',
+    'expired' => 'Delivery: no peer acknowledgement before expiry.',
+    'failed' => 'Delivery: local relay failed; restart Event Mode and retry.',
+    _ => 'Delivery: preparing SOS for local storage.',
   };
 }

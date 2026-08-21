@@ -246,12 +246,31 @@ class UniversalBlePeripheralPlugin(
                     .addLast(PendingNotification(notificationId, value.copyOf()))
             }
             handler.post {
-                val accepted = gattServer?.notifyCharacteristicChanged(
-                    device,
-                    characteristic,
-                    indicate,
-                ) ?: false
-                if (!accepted) {
+                try {
+                    val accepted = gattServer?.notifyCharacteristicChanged(
+                        device,
+                        characteristic,
+                        indicate,
+                    ) ?: false
+                    if (!accepted) {
+                        val failed = takePendingNotification(
+                            device.address,
+                            notificationId,
+                            fallbackToFirst = false,
+                        ) ?: PendingNotification(notificationId, value.copyOf())
+                        callback.onNotificationSent(
+                            device.address,
+                            BluetoothGatt.GATT_FAILURE.toLong(),
+                            failed.id,
+                            failed.value,
+                        ) {}
+                    }
+                } catch (error: Exception) {
+                    // Android throws for an oversized value or a peer that
+                    // disconnected after the Dart-side readiness check. A
+                    // BLE failure must complete the pending operation, not
+                    // terminate the app from this Handler callback.
+                    Log.w(TAG, "notifyCharacteristicChanged failed", error)
                     val failed = takePendingNotification(
                         device.address,
                         notificationId,

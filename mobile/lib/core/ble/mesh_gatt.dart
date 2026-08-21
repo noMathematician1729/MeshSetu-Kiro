@@ -13,7 +13,9 @@ abstract final class MeshGatt {
   static const String tx = '2a6f5f12-4f7b-4c46-8cc8-cf282e4f4c01';
   static const String cccd = '00002902-0000-1000-8000-00805f9b34fb';
   static const int discoveryVersion = 1;
-  static const int maxAttributeValueBytes = 517 - 3;
+  // ATT MTU 517 leaves 514 bytes for a notification, but a GATT
+  // characteristic value itself is capped at 512 bytes by Android.
+  static const int maxAttributeValueBytes = 512;
 
   /// Bluetooth SIG's reserved "for testing" company identifier.
   static const int developmentManufacturerId = 0xFFFF;
