@@ -15,6 +15,7 @@ abstract final class SosAlertNotifications {
   static final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
+  static void Function(String? payload)? _onTapPayload;
 
   /// Stable notification id for one logical SOS, so the enriched update
   /// replaces the initial relay alert instead of adding a second card.
@@ -23,25 +24,37 @@ abstract final class SosAlertNotifications {
     return id == 0 ? 1 : id;
   }
 
+  /// Initializes the plugin, optionally registering the tap handler.
+  ///
+  /// Both isolates and several call sites reach this. `show()` calls it
+  /// without a handler, so the handler is stored separately and the
+  /// dispatcher reads it late: whichever call arrives first, a tap still
+  /// routes into the app once [onTapPayload] has been supplied.
   static Future<void> ensureInitialized({
     void Function(String? payload)? onTapPayload,
   }) async {
-    if (_initialized) return;
+    if (onTapPayload != null) _onTapPayload = onTapPayload;
+    if (_initialized) {
+      if (onTapPayload != null) await _replayLaunchPayload();
+      return;
+    }
     const settings = InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
     );
     await _plugin.initialize(
       settings: settings,
-      onDidReceiveNotificationResponse: onTapPayload == null
-          ? null
-          : (response) => onTapPayload(response.payload),
+      onDidReceiveNotificationResponse: (response) =>
+          _onTapPayload?.call(response.payload),
     );
     _initialized = true;
-    if (onTapPayload != null) {
-      final launch = await _plugin.getNotificationAppLaunchDetails();
-      if (launch?.didNotificationLaunchApp ?? false) {
-        onTapPayload(launch?.notificationResponse?.payload);
-      }
+    if (_onTapPayload != null) await _replayLaunchPayload();
+  }
+
+  /// Delivers the payload of a notification that cold-started the app.
+  static Future<void> _replayLaunchPayload() async {
+    final launch = await _plugin.getNotificationAppLaunchDetails();
+    if (launch?.didNotificationLaunchApp ?? false) {
+      _onTapPayload?.call(launch?.notificationResponse?.payload);
     }
   }
 

@@ -33,22 +33,31 @@ abstract final class SosIncidentNavigator {
   }
 
   static void openEvent(String eventId) {
+    if (_push(eventId)) return;
+    // A tap can cold-start the app, arriving before the navigator is mounted.
+    // Hold the destination; [openPending] delivers it on the first frame so
+    // the user is not left on the home screen.
+    _pendingEventId = eventId;
+  }
+
+  /// Flushes a tap that arrived before the navigator existed.
+  static void openPending() {
+    final eventId = _pendingEventId;
+    if (eventId == null) return;
+    if (_push(eventId)) return;
+    _pendingEventId = eventId;
+  }
+
+  static bool _push(String eventId) {
     final navigator = key.currentState;
-    if (navigator == null) {
-      _pendingEventId = eventId;
-      return;
-    }
+    if (navigator == null) return false;
+    _pendingEventId = null;
     navigator.push(
       MaterialPageRoute<void>(
         builder: (_) => SosIncidentScreen(eventId: eventId),
         settings: RouteSettings(name: '/sos/$eventId'),
       ),
     );
-  }
-
-  static void openPending() {
-    final eventId = _pendingEventId;
-    _pendingEventId = null;
-    if (eventId != null) openEvent(eventId);
+    return true;
   }
 }

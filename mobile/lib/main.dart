@@ -17,20 +17,21 @@ import 'feature/onboarding/onboarding_screen.dart';
 /// this UI isolate — `core/data`, `feature/join`, `feature/rooms`,
 /// `feature/sos`, `feature/voice`, `feature/gateway`.
 void main() {
+  // The notification plugin uses platform channels, so the binding must exist
+  // before it is initialized; otherwise the tap handler is never registered
+  // and every SOS tap falls back to the launcher activity's home screen.
+  WidgetsFlutterBinding.ensureInitialized();
   FlutterForegroundTask.initCommunicationPort();
+  runApp(const ProviderScope(child: MeshSetuApp()));
   // Notification payloads are MeshSetu routes, never external web links.
   unawaited(
     SosAlertNotifications.ensureInitialized(
       onTapPayload: SosIncidentNavigator.openPayload,
     ),
   );
-  runApp(const ProviderScope(child: MeshSetuApp()));
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    SosIncidentNavigator.openPending();
-  });
 }
 
-class MeshSetuApp extends StatelessWidget {
+class MeshSetuApp extends StatefulWidget {
   const MeshSetuApp({
     super.key,
     this.enforcePermissions = true,
@@ -43,15 +44,32 @@ class MeshSetuApp extends StatelessWidget {
   final bool enforceOnboarding;
 
   @override
+  State<MeshSetuApp> createState() => _MeshSetuAppState();
+}
+
+class _MeshSetuAppState extends State<MeshSetuApp> {
+  @override
+  void initState() {
+    super.initState();
+    // A notification tap can cold-start the app before the navigator exists.
+    // Deliver it as soon as the first frame has mounted one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      SosIncidentNavigator.openPending();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final eventMode = enforcePermissions
+    final eventMode = widget.enforcePermissions
         ? const PermissionGate(child: EventModeScreen())
         : const EventModeScreen();
     return MaterialApp(
       navigatorKey: SosIncidentNavigator.key,
       title: 'MeshSetu',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
-      home: enforceOnboarding ? OnboardingGate(child: eventMode) : eventMode,
+      home: widget.enforceOnboarding
+          ? OnboardingGate(child: eventMode)
+          : eventMode,
     );
   }
 }
