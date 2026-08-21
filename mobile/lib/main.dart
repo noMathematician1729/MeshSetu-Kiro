@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/event_mode_screen.dart';
 import 'app/notification_router.dart';
+import 'app/sos_incident_navigator.dart';
 import 'core/ble/mesh_gatt.dart';
 import 'core/ble/permission_gate.dart';
 import 'feature/onboarding/onboarding_screen.dart';
@@ -40,9 +41,10 @@ class MeshSetuApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => NotificationRouter.flushPending(),
-    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      NotificationRouter.flushPending();
+      SosIncidentNavigator.openPending();
+    });
     final eventMode = enforcePermissions
         ? const PermissionGate(child: EventModeScreen())
         : const EventModeScreen();

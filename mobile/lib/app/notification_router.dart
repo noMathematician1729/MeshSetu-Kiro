@@ -1,9 +1,10 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-final navigatorKey = GlobalKey<NavigatorState>();
+import 'sos_incident_navigator.dart';
+
+final navigatorKey = SosIncidentNavigator.key;
 
 class NotificationRouter {
   NotificationRouter._();
