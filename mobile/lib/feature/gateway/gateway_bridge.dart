@@ -137,7 +137,10 @@ class GatewayBridge {
 
   /// CEAL-style: forward a compact BLE SOS alert (UID-only) to the backend
   /// so it can resolve the reporter's profile and create an enriched event.
-  Future<(bool, String)> forwardCealSos({
+  ///
+  /// The decoded response body is returned so a receiver with internet can
+  /// show the resolved incident detail instead of a generic alert.
+  Future<(bool, String, Map<String, Object?>?)> forwardCealSos({
     required String reporterUid,
     required String siteId,
     int? originId,
@@ -169,11 +172,38 @@ class GatewayBridge {
           )
           .timeout(const Duration(seconds: 12));
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        return (true, 'ok');
+        final decoded = jsonDecode(response.body);
+        return (
+          true,
+          'ok',
+          decoded is Map ? decoded.cast<String, Object?>() : null,
+        );
       }
-      return (false, 'HTTP ${response.statusCode}: ${response.body}');
+      return (false, 'HTTP ${response.statusCode}: ${response.body}', null);
     } catch (error) {
-      return (false, '$error');
+      return (false, '$error', null);
+    }
+  }
+
+  /// Undelivered alerts addressed to this account (emergency-contact fan-out).
+  Future<List<Map<String, Object?>>> fetchNotifications(
+    String recipientUid,
+  ) async {
+    try {
+      final response = await http
+          .get(baseUrl.resolve('/v1/notifications/$recipientUid'))
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return const [];
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! List) return const [];
+      return [
+        for (final item in decoded)
+          if (item is Map) item.cast<String, Object?>(),
+      ];
+    } catch (_) {
+      return const [];
     }
   }
 }

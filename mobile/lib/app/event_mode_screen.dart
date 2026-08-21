@@ -4,9 +4,7 @@ import 'dart:ui';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart'
-    hide NotificationVisibility;
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -29,89 +27,38 @@ import '../feature/voice/voice_recorder.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
+import 'incident_summary.dart';
 import 'providers.dart';
+import 'sos_alert_notifications.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event-v2';
-const String _sosNotificationChannelId = 'meshsetu-sos-alerts-v1';
 const String _meshSiteConfigurationKey = 'mesh-site-configuration';
-final FlutterLocalNotificationsPlugin _sosNotifications =
-    FlutterLocalNotificationsPlugin();
-bool _sosNotificationsInitialized = false;
 
 Future<void> _showSosNotification({
   required ReceivedObject received,
   required String detail,
   int? notificationId,
 }) async {
-  try {
-    if (!_sosNotificationsInitialized) {
-      const settings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      );
-      await _sosNotifications.initialize(settings: settings);
-      _sosNotificationsInitialized = true;
-    }
-    var id = notificationId ?? (received.envelope.objectId & 0x7fffffff);
-    if (id == 0) id = 1;
-    await _sosNotifications.show(
-      id: id,
-      title: 'SOS RECEIVED',
-      body: detail,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _sosNotificationChannelId,
-          'SOS alerts',
-          channelDescription: 'Nearby MeshSetu emergency signals',
-          importance: Importance.max,
-          priority: Priority.max,
-          playSound: true,
-          enableVibration: true,
-          ticker: 'SOS received',
-          category: AndroidNotificationCategory.alarm,
-          visibility: NotificationVisibility.public,
-          onlyAlertOnce: false,
-        ),
-      ),
-    );
-  } catch (_) {
-    // A notification failure must not stop BLE relaying.
-  }
+  var id =
+      notificationId ?? (received.envelope.objectId & 0x7fffffff);
+  if (id == 0) id = 1;
+  await SosAlertNotifications.show(
+    id: id,
+    title: 'SOS RECEIVED',
+    body: detail,
+  );
 }
 
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  try {
-    if (!_sosNotificationsInitialized) {
-      const settings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      );
-      await _sosNotifications.initialize(settings: settings);
-      _sosNotificationsInitialized = true;
-    }
-    final id = Object.hash(alert.originId, alert.sequence) & 0x7fffffff;
-    await _sosNotifications.show(
-      id: id == 0 ? 1 : id,
-      title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
-      body: alert.isTest
-          ? 'Nearby BLE transport test received.'
-          : 'Nearby emergency alert received. Details may follow.',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _sosNotificationChannelId,
-          'SOS alerts',
-          channelDescription: 'Nearby MeshSetu emergency signals',
-          importance: Importance.max,
-          priority: Priority.max,
-          playSound: true,
-          enableVibration: true,
-          category: AndroidNotificationCategory.alarm,
-          visibility: NotificationVisibility.public,
-        ),
-      ),
-    );
-  } catch (_) {
-    // BLE relaying must remain live if Android rejects an alert.
-  }
+  await SosAlertNotifications.show(
+    id: SosAlertNotifications.idForKey(alert.dedupeKey),
+    title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
+    body: alert.isTest
+        ? 'Nearby BLE transport test received.'
+        : 'You are relaying a nearby emergency alert. '
+              'Fetching full details…',
+  );
 }
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
@@ -273,10 +220,15 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     if (data is Map && data['broadcast_ceal_sos'] == true) {
       final originId = data['originId'] as int?;
+      final reporterUid = data['reporterUid'] as String?;
       final controller = _controller;
       if (controller != null) {
         unawaited(
-          controller.broadcastCompactSos(isTest: false, originId: originId),
+          controller.broadcastCompactSos(
+            isTest: false,
+            originId: originId,
+            reporterUidHex: reporterUid,
+          ),
         );
         FlutterForegroundTask.sendDataToMain(const {
           'status': 'ceal_sos_broadcast_ok',
@@ -342,10 +294,19 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     try {
       if (envelope.payloadType == PayloadType.structuredSos) {
+        String reporterUid = '';
+        try {
+          reporterUid =
+              StructuredSosPayload.decode(envelope.payload).reporter?.reporterUid ??
+              '';
+        } catch (_) {
+          // A non-identity structured payload still broadcasts a routing alert.
+        }
         unawaited(
           controller.broadcastCompactSos(
             originId: envelope.originEphemeralId,
             sequence: envelope.objectId & 0xffff,
+            reporterUidHex: reporterUid,
           ),
         );
       }
@@ -382,6 +343,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         'sequence': alert.sequence,
         'siteFingerprint': alert.siteFingerprint,
         'dedupeKey': alert.dedupeKey,
+        'reporterUid': alert.reporterUidHex,
       });
     }
   }
@@ -410,11 +372,7 @@ class _MeshEventTaskHandler extends TaskHandler {
       received: received,
       detail: detail,
       notificationId: updatesCompactAlert
-          ? Object.hash(
-                  received.envelope.originEphemeralId & 0xffffffff,
-                  received.envelope.objectId & 0xffff,
-                ) &
-                0x7fffffff
+          ? SosAlertNotifications.idForKey(compactKey)
           : null,
     );
     try {
@@ -701,19 +659,29 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     try {
       final originId = data['originId'] as int?;
       final sequence = data['sequence'] as int?;
-      // Reconstruct UID from originId: pad to 8 hex chars (4 bytes sent in advert).
-      final reporterUid = originId != null
+      final dedupeKey = data['dedupeKey'] as String?;
+      // A v2 advert carries the sender's full 6-byte UID. Older phones only
+      // send 4 bytes of it, so fall back to a resolvable prefix.
+      final advertisedUid = MeshSosAdvertisement.normalizeReporterUid(
+        data['reporterUid'] as String?,
+      );
+      final reporterUid = advertisedUid.isNotEmpty
+          ? advertisedUid
+          : originId != null
           ? originId.toRadixString(16).padLeft(8, '0')
           : '';
       if (reporterUid.isEmpty) return;
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
       final site = await ref.read(joinRepositoryProvider).activeManifest();
-      final (success, detail) = await bridge.forwardCealSos(
+      final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
         siteId: site?.siteId ?? MeshEventController.demoSiteId,
         originId: originId,
         sequence: sequence,
       );
+      if (success && dedupeKey != null) {
+        await _showResolvedSosDetails(dedupeKey: dedupeKey, body: body);
+      }
       if (mounted) {
         setState(
           () => _status = success
@@ -726,6 +694,27 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         setState(() => _status = 'MeshSetu\nCEAL relay error: $error');
       }
     }
+  }
+
+  /// Replaces the "you are relaying" alert with the decrypted/resolved
+  /// incident detail once the control room answers. This is what an
+  /// internet-connected peer sees instead of a generic alert.
+  Future<void> _showResolvedSosDetails({
+    required String dedupeKey,
+    required Map<String, Object?>? body,
+  }) async {
+    final event = body?['event'];
+    if (event is! Map) return;
+    final incident = event.cast<String, Object?>();
+    final eventId = incident['event_id'] as String?;
+    await SosAlertNotifications.show(
+      id: SosAlertNotifications.idForKey(dedupeKey),
+      title: 'SOS RECEIVED',
+      body: describeIncident(incident),
+      payload: eventId == null
+          ? null
+          : publicIncidentUrl(ref.read(gatewayUrlProvider), eventId),
+    );
   }
 
   Future<void> _startEventMode() async {
@@ -921,6 +910,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       FlutterForegroundTask.sendDataToTask({
         'broadcast_ceal_sos': true,
         'originId': originId,
+        'reporterUid': profile.reporterUid,
       });
       // Also forward to the admin backend for UID→profile resolution.
       // Construct the bridge directly from provider state rather than relying
@@ -929,7 +919,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final key = ref.read(gatewayDemoKeyProvider);
       if (url.isNotEmpty && key.isNotEmpty) {
         final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
-        final (success, detail) = await bridge.forwardCealSos(
+        final (success, detail, _) = await bridge.forwardCealSos(
           reporterUid: profile.reporterUid,
           siteId:
               (await ref.read(joinRepositoryProvider).activeManifest())
@@ -1115,9 +1105,26 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final enabled = ref.read(gatewayEnabledProvider);
     final url = ref.read(gatewayUrlProvider);
     final key = ref.read(gatewayDemoKeyProvider);
-    _bridgeClient?.gatewayBridge = (enabled && url.isNotEmpty && key.isNotEmpty)
+    final bridge = (enabled && url.isNotEmpty && key.isNotEmpty)
         ? GatewayBridge(baseUrl: Uri.parse(url), demoKey: key)
         : null;
+    _bridgeClient?.gatewayBridge = bridge;
+    unawaited(_applyContactAlertSettings(bridge));
+  }
+
+  /// Emergency-contact alerts are addressed to this device's own profile UID,
+  /// so the backend fan-out reaches the contact even when the incident was
+  /// relayed by someone else entirely.
+  Future<void> _applyContactAlertSettings(GatewayBridge? bridge) async {
+    try {
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      _bridgeClient?.configureContactAlerts(
+        reporterUid: profile?.reporterUid,
+        bridge: bridge,
+      );
+    } catch (_) {
+      // Without a stored profile this device is not an emergency contact.
+    }
   }
 
   int _randomEphemeralId() {

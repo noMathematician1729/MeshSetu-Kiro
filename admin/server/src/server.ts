@@ -180,11 +180,15 @@ const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.str
 app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const parsed = cealSosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid CEAL SOS', details: parsed.error.issues })
   const profile = await store.getProfile(parsed.data.reporter_uid) ?? await store.getProfileByPrefix(parsed.data.reporter_uid)
-  const eventId = `ceal-${parsed.data.reporter_uid}-${Date.now()}`
   const now = parsed.data.received_at_ms ?? Date.now()
+  // Every nearby peer with internet forwards the same alert. Converge them on
+  // one incident so the dashboard and the contacts see a single emergency.
+  const existing = await store.findRecentCompactEvent(parsed.data.reporter_uid, parsed.data.sequence ?? null, now - 600000)
+  const eventId = existing?.event_id ?? `ceal-${parsed.data.reporter_uid}-${Date.now()}`
   const record = await store.upsert({
     event_id: eventId,
-    object_id: `ceal-${parsed.data.origin_id ?? 0}-${parsed.data.sequence ?? 0}-${now}`,
+    object_id: existing?.object_id ?? `ceal-${parsed.data.origin_id ?? 0}-${parsed.data.sequence ?? 0}-${now}`,
+    compact_sequence: parsed.data.sequence ?? null,
     site_id: parsed.data.site_id,
     room_id: 'public',
     priority: 'p0Critical',

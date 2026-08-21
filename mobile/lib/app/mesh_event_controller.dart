@@ -431,6 +431,7 @@ class MeshEventController {
     bool isTest = false,
     int? originId,
     int? sequence,
+    String? reporterUidHex,
   }) async {
     final metadata = _discoveryMetadata;
     if (!_looping || metadata == null) {
@@ -444,6 +445,9 @@ class MeshEventController {
           MeshSosAdvertisement.alertFlag |
           (isTest ? MeshSosAdvertisement.testFlag : 0),
       ttl: 4,
+      reporterUidHex: isTest
+          ? ''
+          : MeshSosAdvertisement.normalizeReporterUid(reporterUidHex),
     );
     _reportMetrics([RelayMetric('sos_alert_broadcast', value: alert.sequence)]);
     try {
@@ -475,13 +479,7 @@ class MeshEventController {
   Future<void> _relayCompactSos(MeshSosAdvertisement alert) async {
     final metadata = _discoveryMetadata;
     if (!_looping || metadata == null) return;
-    final relayed = MeshSosAdvertisement(
-      siteFingerprint: alert.siteFingerprint,
-      originId: alert.originId,
-      sequence: alert.sequence,
-      flags: alert.flags,
-      ttl: alert.ttl - 1,
-    );
+    final relayed = alert.withTtl(alert.ttl - 1);
     _reportMetrics([
       RelayMetric(
         'sos_alert_relayed',

@@ -13,6 +13,8 @@ import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
+import 'incident_summary.dart';
+import 'sos_alert_notifications.dart';
 
 /// UI-isolate half of the cross-isolate mesh bridge (see `mesh_bridge.dart`
 /// for the wire format, `event_mode_screen.dart` for the background half).
@@ -36,9 +38,33 @@ class MeshBridgeClient {
   final Set<int> _storedObjectIds = {};
   final Set<int> _forwardedObjectIds = {};
   final Set<int> _forwardingObjectIds = {};
-  final Set<String> _forwardedCompactAlerts = {};
   Timer? _inboxSyncTimer;
   bool _syncingInbox = false;
+  String? _reporterUid;
+  GatewayBridge? _contactBridge;
+  Timer? _contactNotificationTimer;
+  bool _pollingContactNotifications = false;
+  bool _contactNotificationsPrimed = false;
+  final Set<String> _deliveredContactNotifications = {};
+
+  /// Enables emergency-contact alert delivery for the signed-in profile.
+  void configureContactAlerts({
+    required String? reporterUid,
+    required GatewayBridge? bridge,
+  }) {
+    _reporterUid = reporterUid;
+    _contactBridge = bridge;
+    if (reporterUid == null || reporterUid.isEmpty || bridge == null) {
+      _contactNotificationTimer?.cancel();
+      _contactNotificationTimer = null;
+      return;
+    }
+    unawaited(_pollContactNotifications());
+    _contactNotificationTimer ??= Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_pollContactNotifications()),
+    );
+  }
 
   /// Non-null only on the one phone acting as gateway (Bible §15.1);
   /// [feature/gateway/gateway_screen.dart] flips this on/off.
@@ -156,8 +182,6 @@ class MeshBridgeClient {
             MeshBridge.envelopeFromJson(envelopeJson.cast<Object?, Object?>()),
           ),
         );
-      case 'compact_sos_received':
-        unawaited(_forwardCompactSos(data));
       case 'error' || 'stopped':
         _failPendingSubmissions(
           StateError(data['message'] as String? ?? 'foreground mesh stopped'),
@@ -180,43 +204,46 @@ class MeshBridgeClient {
     }
   }
 
-  /// Forwards a received CEAL-style compact SOS alert to the admin backend
-  /// for UID→profile resolution. Every phone with connectivity acts as a
-  /// beacon/gateway for UID-only alerts, matching CEAL's architecture.
-  Future<void> _forwardCompactSos(Map data) async {
-    final bridge = _gatewayBridge ?? _fallbackBridge();
-    if (bridge == null) return;
-    final dedupeKey = data['dedupeKey'] as String?;
-    if (dedupeKey == null || !_forwardedCompactAlerts.add(dedupeKey)) return;
-    final originId = data['originId'] as int?;
-    final sequence = data['sequence'] as int?;
-    // Derive the reporterUid hex from originId (reverse of the 4-byte
-    // truncation used when broadcasting). Pad to 12 chars with trailing zeros
-    // to match the full UID length stored in the profiles table.
-    final reporterUid = originId != null
-        ? originId.toRadixString(16).padLeft(8, '0').padRight(12, '0')
-        : '';
-    if (reporterUid.isEmpty) return;
+  /// Delivers alerts the backend addressed to this account because the sender
+  /// listed it as an emergency contact. Polling keeps the app free of a
+  /// third-party push dependency; the server-side delivery record is the
+  /// contract, so FCM can replace this without changing the backend.
+  Future<void> _pollContactNotifications() async {
+    final uid = _reporterUid;
+    final bridge = _contactBridge;
+    if (uid == null || uid.isEmpty || bridge == null) return;
+    if (_pollingContactNotifications) return;
+    _pollingContactNotifications = true;
     try {
-      final (success, _) = await bridge.forwardCealSos(
-        reporterUid: reporterUid,
-        siteId: _siteId ?? 'demo-site',
-        originId: originId,
-        sequence: sequence,
-      );
-      if (!success) _forwardedCompactAlerts.remove(dedupeKey);
+      final records = await bridge.fetchNotifications(uid);
+      // First pass after launch only primes the seen-set so a contact is not
+      // alerted for a backlog of historical incidents.
+      final priming = !_contactNotificationsPrimed;
+      _contactNotificationsPrimed = true;
+      for (final record in records.reversed) {
+        final id = '${record['notification_id'] ?? ''}';
+        if (id.isEmpty || !_deliveredContactNotifications.add(id)) continue;
+        if (priming) continue;
+        final eventId = '${record['event_id'] ?? ''}';
+        final url = '${record['public_url'] ?? ''}'.trim();
+        await SosAlertNotifications.show(
+          id: SosAlertNotifications.idForKey('contact:$id'),
+          title: '${record['title'] ?? 'Emergency alert'}',
+          body:
+              '${record['body'] ?? 'An emergency contact needs help.'}'
+              '\nTap to open the full incident page.',
+          payload: url.isNotEmpty
+              ? url
+              : eventId.isEmpty
+              ? null
+              : publicIncidentUrl(bridge.baseUrl.toString(), eventId),
+        );
+      }
     } catch (_) {
-      // Best-effort: if connectivity is unavailable, the alert was still
-      // shown locally and may be forwarded by another peer with Wi-Fi.
-      _forwardedCompactAlerts.remove(dedupeKey);
+      // Connectivity failures retry on the next poll tick.
+    } finally {
+      _pollingContactNotifications = false;
     }
-  }
-
-  GatewayBridge? _fallbackBridge() {
-    // Construct a bridge from defaults if the configured one isn't set yet.
-    const url = 'https://sih26-1xdevs.onrender.com';
-    const key = 'change-me';
-    return GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
   }
 
   void _failPendingSubmissions(Object error) {
@@ -348,6 +375,8 @@ class MeshBridgeClient {
   Future<void> dispose() async {
     _inboxSyncTimer?.cancel();
     _inboxSyncTimer = null;
+    _contactNotificationTimer?.cancel();
+    _contactNotificationTimer = null;
     if (_listening) {
       FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
       _listening = false;
@@ -360,6 +389,5 @@ class MeshBridgeClient {
     _storedObjectIds.clear();
     _forwardedObjectIds.clear();
     _forwardingObjectIds.clear();
-    _forwardedCompactAlerts.clear();
   }
 }
