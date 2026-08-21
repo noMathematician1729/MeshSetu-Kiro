@@ -48,6 +48,7 @@ Future<void> _showSosNotification({
     id: id,
     title: 'SOS RECEIVED',
     body: detail,
+    payload: SosIncidentNavigator.payloadForEvent(received.envelope.eventId),
   );
 }
 
