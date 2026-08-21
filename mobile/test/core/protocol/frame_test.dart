@@ -73,6 +73,31 @@ void main() {
     expect(buffer.received, 1);
   });
 
+  test('reassembly rejects object/count mismatches and byte overflow', () {
+    MeshFrame frame({
+      required int objectId,
+      required int count,
+      int bytes = 1,
+    }) => MeshFrame(
+      type: FrameType.data,
+      priority: 1,
+      flags: 0,
+      objectId: objectId,
+      sequence: 0,
+      count: count,
+      payload: Uint8List(bytes),
+    );
+
+    final buffer = ReassemblyBuffer(1, objectId: 42, maxBytes: 2);
+    expect(buffer.add(frame(objectId: 43, count: 1)), isFalse);
+    expect(buffer.add(frame(objectId: 42, count: 2)), isFalse);
+    expect(
+      () => buffer.add(frame(objectId: 42, count: 1, bytes: 3)),
+      throwsStateError,
+    );
+    expect(buffer.received, 0);
+  });
+
   test('low MTU rejects objects that exceed the voice chunk budget', () {
     expect(
       () => fragment(

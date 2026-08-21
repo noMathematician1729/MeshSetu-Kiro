@@ -19,6 +19,19 @@ flutter test
 flutter build apk --debug
 ```
 
+Debug builds use Bluetooth SIG's testing company ID. Release builds require
+MeshSetu's assigned 16-bit Company Identifier:
+
+```sh
+flutter build apk --release \
+  --dart-define=MESHSETU_BLE_COMPANY_ID=0x1234
+```
+
+Replace `0x1234` with the identifier assigned to MeshSetu. The release build
+fails before compilation when the define is missing, invalid, or `0xFFFF`.
+Discovery, SOS, and beacon advertisements share that company ID and use a
+MeshSetu payload-type byte to distinguish their records.
+
 The app requests Bluetooth and notification permissions before starting event
 mode. The foreground notification can be stopped from the screen; the BLE
 controller and its metrics sink are stopped with it.

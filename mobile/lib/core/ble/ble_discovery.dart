@@ -13,8 +13,8 @@ import '../model/model.dart';
 /// Deviations from the Kotlin source:
 /// - `universal_ble`'s `startAdvertising` doesn't expose raw BLE
 ///   service-data (only `services`, `localName`, `manufacturerData`), so
-///   [DiscoveryMetadata] rides as manufacturer data instead, tagged with
-///   [MeshGatt.developmentManufacturerId]. This turned out to match what the
+///   [DiscoveryMetadata] rides as typed manufacturer data instead. This
+///   turned out to match what the
 ///   Kotlin source independently switched to as well (upstream hit the same
 ///   31-byte legacy advertising-response budget problem).
 /// - `scan` is time-bounded but also accepts a cancellation future so a
@@ -29,8 +29,11 @@ abstract final class MeshAdvertiser {
       services: const [MeshGatt.service],
       localName: 'MeshSetu',
       manufacturerData: ManufacturerData(
-        MeshGatt.developmentManufacturerId,
-        metadata.encode(),
+        MeshGatt.manufacturerId,
+        MeshGatt.manufacturerPayload(
+          MeshGatt.discoveryPayloadType,
+          metadata.encode(),
+        ),
       ),
       // Keep the 128-bit service UUID in the primary advertisement for the
       // scan filter and move the 14-byte discovery record to the scan
@@ -63,8 +66,8 @@ abstract final class MeshAdvertiser {
         services: const [MeshGatt.service],
         localName: 'MeshSetu',
         manufacturerData: ManufacturerData(
-          MeshGatt.sosManufacturerId,
-          alert.encode(),
+          MeshGatt.manufacturerId,
+          MeshGatt.manufacturerPayload(MeshGatt.sosPayloadType, alert.encode()),
         ),
         platformConfig: PeripheralPlatformConfig(
           android: PeripheralAndroidOptions(
@@ -145,8 +148,13 @@ abstract final class MeshScanner {
           serviceMatches.add(device.deviceId);
         }
         for (final data in device.manufacturerDataList) {
-          if (data.companyId == MeshGatt.sosManufacturerId) {
-            final alert = MeshSosAdvertisement.decode(data.payload);
+          if (data.companyId != MeshGatt.manufacturerId) continue;
+          final sosPayload = MeshGatt.payloadForType(
+            data.payload,
+            MeshGatt.sosPayloadType,
+          );
+          if (sosPayload != null) {
+            final alert = MeshSosAdvertisement.decode(sosPayload);
             if (alert != null &&
                 (expectedFingerprint == null ||
                     alert.siteFingerprint ==
@@ -155,8 +163,12 @@ abstract final class MeshScanner {
             }
             continue;
           }
-          if (data.companyId == MeshGatt.beaconManufacturerId) {
-            final metadata = BeaconMetadata.decode(data.payload);
+          final beaconPayload = MeshGatt.payloadForType(
+            data.payload,
+            MeshGatt.beaconPayloadType,
+          );
+          if (beaconPayload != null) {
+            final metadata = BeaconMetadata.decode(beaconPayload);
             if (metadata != null) {
               final observation = BeaconObservation(
                 anchorId: metadata.anchorId,
@@ -170,9 +182,13 @@ abstract final class MeshScanner {
             }
             continue;
           }
-          if (data.companyId != MeshGatt.developmentManufacturerId) continue;
+          final discoveryPayload = MeshGatt.payloadForType(
+            data.payload,
+            MeshGatt.discoveryPayloadType,
+          );
+          if (discoveryPayload == null) continue;
           manufacturerMatches.add(device.deviceId);
-          final metadata = DiscoveryMetadata.decode(data.payload);
+          final metadata = DiscoveryMetadata.decode(discoveryPayload);
           if (metadata == null) {
             malformedMetadata.add(device.deviceId);
             continue;
@@ -239,8 +255,13 @@ abstract final class MeshBeaconScanner {
     try {
       subscription = UniversalBle.scanStream.listen((device) {
         for (final data in device.manufacturerDataList) {
-          if (data.companyId != MeshGatt.beaconManufacturerId) continue;
-          final metadata = BeaconMetadata.decode(data.payload);
+          if (data.companyId != MeshGatt.manufacturerId) continue;
+          final payload = MeshGatt.payloadForType(
+            data.payload,
+            MeshGatt.beaconPayloadType,
+          );
+          if (payload == null) continue;
+          final metadata = BeaconMetadata.decode(payload);
           if (metadata == null) continue;
           final observation = BeaconObservation(
             anchorId: metadata.anchorId,

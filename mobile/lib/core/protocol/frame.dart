@@ -224,14 +224,18 @@ List<MeshFrame> fragment({
 }
 
 class ReassemblyBuffer {
-  ReassemblyBuffer(this.expectedCount, {this.maxBytes = maxObjectBytes})
-    : _parts = List<Uint8List?>.filled(expectedCount, null) {
+  ReassemblyBuffer(
+    this.expectedCount, {
+    this.objectId,
+    this.maxBytes = maxObjectBytes,
+  }) : _parts = List<Uint8List?>.filled(expectedCount, null) {
     if (expectedCount < 1 || expectedCount > maxChunks) {
       throw ArgumentError('expectedCount out of range');
     }
   }
 
   final int expectedCount;
+  final int? objectId;
   final int maxBytes;
   final List<Uint8List?> _parts;
   int _bytes = 0;
@@ -240,7 +244,8 @@ class ReassemblyBuffer {
   int get received => _received;
 
   bool add(MeshFrame frame) {
-    if (frame.count != expectedCount ||
+    if ((objectId != null && frame.objectId != objectId) ||
+        frame.count != expectedCount ||
         frame.sequence < 0 ||
         frame.sequence >= _parts.length ||
         _parts[frame.sequence] != null) {

@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 /// Port of `in.meshsetu.ble.MeshGatt` (Kotlin `MeshGatt.kt`).
@@ -13,17 +13,38 @@ abstract final class MeshGatt {
   static const String tx = '2a6f5f12-4f7b-4c46-8cc8-cf282e4f4c01';
   static const String cccd = '00002902-0000-1000-8000-00805f9b34fb';
   static const int discoveryVersion = 1;
+  static const int maxAttributeValueBytes = 517 - 3;
 
-  /// Bluetooth SIG's reserved "for testing" company identifier. Used as the
-  /// manufacturer-data tag for discovery metadata (see `ble_discovery.dart`)
-  /// — swap for an assigned company ID before any real deployment.
+  /// Bluetooth SIG's reserved "for testing" company identifier.
   static const int developmentManufacturerId = 0xFFFF;
-
-  /// Development-only manufacturer tag for compact SOS advertisements.
-  /// Replace both testing identifiers with assigned IDs before production.
-  static const int sosManufacturerId = 0xFFFD;
-  static const int beaconManufacturerId = 0xFFFE;
+  static const int manufacturerId = int.fromEnvironment(
+    'MESHSETU_BLE_COMPANY_ID',
+    defaultValue: developmentManufacturerId,
+  );
+  static const int discoveryPayloadType = 1;
+  static const int sosPayloadType = 2;
+  static const int beaconPayloadType = 3;
   static const int beaconVersion = 1;
+
+  static bool isProductionCompanyId(int value) =>
+      value >= 0 && value < developmentManufacturerId;
+
+  static void validateCompanyId() {
+    if (kReleaseMode && !isProductionCompanyId(manufacturerId)) {
+      throw StateError(
+        'Release builds require --dart-define='
+        'MESHSETU_BLE_COMPANY_ID=<assigned Bluetooth SIG company ID>',
+      );
+    }
+  }
+
+  static Uint8List manufacturerPayload(int type, Uint8List payload) =>
+      Uint8List.fromList([type, ...payload]);
+
+  static Uint8List? payloadForType(Uint8List payload, int type) =>
+      payload.isNotEmpty && payload.first == type
+      ? Uint8List.sublistView(payload, 1)
+      : null;
 
   static int siteFingerprint(String siteId, {String namespace = 'demo'}) {
     final digest = sha256.convert(utf8.encode('$siteId|$namespace')).bytes;

@@ -31,7 +31,6 @@ import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
 import 'incident_summary.dart';
 import 'notification_router.dart';
-import 'debug_runtime_log.dart';
 import 'providers.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
@@ -81,26 +80,7 @@ Future<void> _showSosNotification({
         objectId: received.envelope.objectId,
       ),
     );
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H2',
-      location: 'event_mode_screen.dart:_showSosNotification',
-      message: 'Rich GATT SOS notification displayed with incident payload',
-      data: {
-        'objectId': received.envelope.objectId,
-        'payloadType': received.envelope.payloadType.name,
-      },
-    );
-    // #endregion
-  } catch (error) {
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H2',
-      location: 'event_mode_screen.dart:_showSosNotification',
-      message: 'Rich GATT SOS notification failed to display',
-      data: {'error': '$error'},
-    );
-    // #endregion
+  } catch (_) {
     // A notification failure must not stop BLE relaying.
   }
 }
@@ -132,26 +112,7 @@ Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
         ),
       ),
     );
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H2',
-      location: 'event_mode_screen.dart:_showCompactSosNotification',
-      message: 'Compact advert notification displayed without incident payload',
-      data: {
-        'originIdPresent': alert.originId != 0,
-        'isTest': alert.isTest,
-      },
-    );
-    // #endregion
-  } catch (error) {
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H2',
-      location: 'event_mode_screen.dart:_showCompactSosNotification',
-      message: 'Compact advert notification failed to display',
-      data: {'error': '$error'},
-    );
-    // #endregion
+  } catch (_) {
     // BLE relaying must remain live if Android rejects an alert.
   }
 }
@@ -436,18 +397,6 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 
   void _announceCompactSos(MeshSosAdvertisement alert) {
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H1',
-      location: 'event_mode_screen.dart:_announceCompactSos',
-      message: 'Receiver processed compact SOS advert',
-      data: {
-        'originIdPresent': alert.originId != 0,
-        'sequence': alert.sequence,
-        'isTest': alert.isTest,
-      },
-    );
-    // #endregion
     _compactAlertKeys.add(alert.dedupeKey);
     unawaited(_showCompactSosNotification(alert));
     // Forward to the UI isolate so MeshBridgeClient can relay to admin backend.
@@ -464,18 +413,6 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 
   Future<void> _announceReceivedSos(ReceivedObject received) async {
-    // #region agent log
-    DebugRuntimeLog.write(
-      hypothesisId: 'H1',
-      location: 'event_mode_screen.dart:_announceReceivedSos',
-      message: 'Receiver obtained reassembled rich GATT object',
-      data: {
-        'objectId': received.envelope.objectId,
-        'payloadType': received.envelope.payloadType.name,
-        'peerIdPresent': received.peerId.isNotEmpty,
-      },
-    );
-    // #endregion
     final generation = ++_notificationGeneration;
     late final String detail;
     try {

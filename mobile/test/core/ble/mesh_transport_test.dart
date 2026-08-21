@@ -662,6 +662,7 @@ void main() {
         await server.notifyAwait('peer', Uint8List.fromList([1])),
         isFalse,
       );
+      expect(server.makePeerEligible('peer'), isTrue);
       expect(server.admitPeer('peer'), isTrue);
       expect(await server.notifyAwait('peer', Uint8List.fromList([1])), isTrue);
       expect(peripheral.notifications, hasLength(1));

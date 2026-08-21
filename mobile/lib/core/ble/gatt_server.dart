@@ -10,6 +10,7 @@ import 'mesh_gatt.dart';
 /// `universal_ble` exposes raw status ints rather than the Android constant.
 const int _gattRequestNotSupported = 3;
 const int _gattFailure = 1;
+const int _gattInvalidAttributeLength = 13;
 const int _maxPendingFrames = 64;
 
 class IncomingGattFrame {
@@ -35,9 +36,13 @@ typedef GattServerDiagnostic =
 /// `universal_ble`'s write-request handler (the plugin handles prepared
 /// writes internally), so that check from the Kotlin source is dropped.
 class MeshGattServer {
-  MeshGattServer({this.onDiagnostic});
+  MeshGattServer({
+    this.onDiagnostic,
+    this.notificationTimeout = const Duration(seconds: 2),
+  });
 
   final GattServerDiagnostic? onDiagnostic;
+  final Duration notificationTimeout;
   final StreamController<IncomingGattFrame> _frames =
       StreamController<IncomingGattFrame>.broadcast();
   final Set<String> _subscribers = {};
@@ -132,6 +137,16 @@ class MeshGattServer {
         _diagnostic('gatt_rx_rejected', deviceId, detail: 'peer_not_ready');
         return PeripheralWriteRequestResult(status: _gattFailure);
       }
+      if (value.isEmpty || value.length > MeshGatt.maxAttributeValueBytes) {
+        _diagnostic(
+          'gatt_rx_rejected',
+          deviceId,
+          detail: 'invalid_frame_length=${value.length}',
+        );
+        return PeripheralWriteRequestResult(
+          status: _gattInvalidAttributeLength,
+        );
+      }
       if (_pendingFrames >= _maxPendingFrames) {
         _diagnostic('gatt_rx_rejected', deviceId, detail: 'receive_queue_full');
         return PeripheralWriteRequestResult(status: _gattFailure);
@@ -160,7 +175,6 @@ class MeshGattServer {
             // capacity check from this event.
             _rejectedPeers.remove(event.deviceId);
             _reconnectRequests.remove(event.deviceId);
-            _subscribers.add(event.deviceId);
             _diagnostic('server_notification_subscribed', event.deviceId);
           } else {
             _diagnostic(
@@ -192,6 +206,7 @@ class MeshGattServer {
             _connectedPeers.add(event.deviceId);
           } else {
             _connectedPeers.remove(event.deviceId);
+            _subscribers.remove(event.deviceId);
             _mtus.remove(event.deviceId);
           }
         });
@@ -300,14 +315,21 @@ class MeshGattServer {
     }
   }
 
-  /// Re-admits a client that is still subscribed after a slot opens.
-  bool admitPeer(String deviceId) {
+  /// Makes a capacity-rejected client eligible for the coordinator to retry.
+  bool makePeerEligible(String deviceId) {
     if (!_rejectedPeers.remove(deviceId)) return false;
     _reconnectRequests.remove(deviceId);
-    if (_running && hasLiveSubscription(deviceId)) {
-      _subscribers.add(deviceId);
-    }
     return true;
+  }
+
+  /// Enables RX/TX only after the coordinator has reserved peer capacity.
+  bool admitPeer(String deviceId) {
+    if (!_running ||
+        _rejectedPeers.contains(deviceId) ||
+        !hasLiveSubscription(deviceId)) {
+      return false;
+    }
+    return _subscribers.add(deviceId);
   }
 
   /// Serializes notifications and waits for Android's native
@@ -345,7 +367,7 @@ class MeshGattServer {
           value: bytes,
           notificationId: notificationId,
           deviceId: deviceId,
-        ).timeout(const Duration(seconds: 2));
+        ).timeout(notificationTimeout);
       } catch (_) {
         _diagnostic('tx_notify_api_result', deviceId, detail: 'failed');
         await completionSubscription?.cancel();
@@ -353,19 +375,17 @@ class MeshGattServer {
       }
       if (completion == null) {
         _diagnostic('tx_notify_api_result', deviceId, detail: 'accepted');
-        return true;
+        return _subscribers.contains(deviceId);
       }
       try {
-        final status = (await completion.timeout(
-          const Duration(seconds: 2),
-        )).status;
+        final status = (await completion.timeout(notificationTimeout)).status;
         _diagnostic(
           'tx_notify_api_result',
           deviceId,
           value: status,
           detail: status == 0 ? 'remote_stack_accepted' : 'remote_stack_failed',
         );
-        return status == 0;
+        return status == 0 && _subscribers.contains(deviceId);
       } catch (_) {
         _diagnostic(
           'tx_notify_api_result',

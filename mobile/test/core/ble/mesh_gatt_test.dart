@@ -7,6 +7,7 @@ import 'package:meshsetu_mobile/core/ble/ble_discovery.dart';
 
 class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
   PeripheralPlatformConfig? config;
+  ManufacturerData? manufacturerData;
 
   @override
   Future<void> startAdvertising({
@@ -17,6 +18,7 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
     PeripheralPlatformConfig? platformConfig,
   }) async {
     config = platformConfig;
+    this.manufacturerData = manufacturerData;
   }
 }
 
@@ -46,6 +48,26 @@ void main() {
     expect(() => BeaconMetadata('x' * 25).encode(), throwsArgumentError);
   });
 
+  test('manufacturer payloads use one company ID and explicit types', () {
+    final encoded = MeshGatt.manufacturerPayload(
+      MeshGatt.sosPayloadType,
+      Uint8List.fromList([7, 8]),
+    );
+
+    expect(encoded, orderedEquals([MeshGatt.sosPayloadType, 7, 8]));
+    expect(
+      MeshGatt.payloadForType(encoded, MeshGatt.sosPayloadType),
+      orderedEquals([7, 8]),
+    );
+    expect(
+      MeshGatt.payloadForType(encoded, MeshGatt.beaconPayloadType),
+      isNull,
+    );
+    expect(MeshGatt.isProductionCompanyId(0), isTrue);
+    expect(MeshGatt.isProductionCompanyId(0xFFFE), isTrue);
+    expect(MeshGatt.isProductionCompanyId(0xFFFF), isFalse);
+  });
+
   test(
     'advertising moves discovery metadata to Android scan response',
     () async {
@@ -69,6 +91,11 @@ void main() {
         isTrue,
       );
       expect(peripheral.config?.android?.addServicesInScanResponse, isNull);
+      expect(peripheral.manufacturerData?.companyId, MeshGatt.manufacturerId);
+      expect(
+        peripheral.manufacturerData?.payload.first,
+        MeshGatt.discoveryPayloadType,
+      );
     },
   );
 }

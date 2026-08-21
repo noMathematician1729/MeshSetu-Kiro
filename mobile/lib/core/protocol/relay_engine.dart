@@ -193,7 +193,7 @@ class MeshRelayEngine {
         );
         return RelayResult(const [], _drain());
       }
-      buffer = ReassemblyBuffer(frame.count);
+      buffer = ReassemblyBuffer(frame.count, objectId: frame.objectId);
       _partial[key] = buffer;
       _partialCreatedAt[key] = clockMs();
     }

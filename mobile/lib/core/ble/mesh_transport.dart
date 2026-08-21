@@ -151,6 +151,7 @@ class MeshTransportCoordinator implements MeshTransport {
   StreamSubscription<String>? _serverUnsubscribedPeerSubscription;
   final Set<String> _serverPeersStarting = {};
   final Map<int, String> _lastInboundPeerByObject = {};
+  // Lock order is relay -> pump. No pump-held path may await the relay lock.
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
   bool _stopped = false;
@@ -264,6 +265,13 @@ class MeshTransportCoordinator implements MeshTransport {
           _sessions.containsKey(peerId)) {
         return;
       }
+      if (_sessions.length >= maxPeerConnections) {
+        server.rejectPeer(peerId);
+        _onMetrics([RelayMetric('peer_rejected_capacity', peerId: peerId)]);
+        unawaited(server.disconnectPeer(peerId));
+        return;
+      }
+      if (!server.admitPeer(peerId)) return;
       attach(
         peerId,
         GattServerPeerLink(server, peerId, mtu),
@@ -662,7 +670,7 @@ class MeshTransportCoordinator implements MeshTransport {
         return;
       }
       if (server.hasLiveSubscription(peerId)) {
-        if (server.admitPeer(peerId)) {
+        if (server.makePeerEligible(peerId)) {
           unawaited(_ensureServerPeer(peerId));
         }
       } else {
