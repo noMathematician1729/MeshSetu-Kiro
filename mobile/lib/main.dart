@@ -1,10 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import 'app/event_mode_screen.dart';
 import 'app/sos_alert_notifications.dart';
+import 'app/sos_incident_navigator.dart';
 import 'core/ble/permission_gate.dart';
 import 'feature/onboarding/onboarding_screen.dart';
 
@@ -16,17 +18,16 @@ import 'feature/onboarding/onboarding_screen.dart';
 /// `feature/sos`, `feature/voice`, `feature/gateway`.
 void main() {
   FlutterForegroundTask.initCommunicationPort();
-  // Tapping an emergency alert opens that SOS's dedicated incident page.
-  SosAlertNotifications.ensureInitialized(
-    onTapPayload: (payload) {
-      final url = (payload ?? '').trim();
-      if (url.isEmpty) return;
-      final uri = Uri.tryParse(url);
-      if (uri == null || !uri.hasScheme) return;
-      launchUrl(uri, mode: LaunchMode.externalApplication);
-    },
+  // Notification payloads are MeshSetu routes, never external web links.
+  unawaited(
+    SosAlertNotifications.ensureInitialized(
+      onTapPayload: SosIncidentNavigator.openPayload,
+    ),
   );
   runApp(const ProviderScope(child: MeshSetuApp()));
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    SosIncidentNavigator.openPending();
+  });
 }
 
 class MeshSetuApp extends StatelessWidget {
@@ -47,6 +48,7 @@ class MeshSetuApp extends StatelessWidget {
         ? const PermissionGate(child: EventModeScreen())
         : const EventModeScreen();
     return MaterialApp(
+      navigatorKey: SosIncidentNavigator.key,
       title: 'MeshSetu',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
       home: enforceOnboarding ? OnboardingGate(child: eventMode) : eventMode,

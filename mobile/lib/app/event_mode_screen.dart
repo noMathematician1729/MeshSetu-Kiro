@@ -30,6 +30,7 @@ import 'mesh_event_controller.dart';
 import 'incident_summary.dart';
 import 'providers.dart';
 import 'sos_alert_notifications.dart';
+import 'sos_incident_navigator.dart';
 
 const int _notificationServiceId = 1001;
 const String _notificationChannelId = 'meshsetu-event-v2';
@@ -713,7 +714,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       body: describeIncident(incident),
       payload: eventId == null
           ? null
-          : publicIncidentUrl(ref.read(gatewayUrlProvider), eventId),
+          : SosIncidentNavigator.payloadForEvent(eventId),
     );
   }
 

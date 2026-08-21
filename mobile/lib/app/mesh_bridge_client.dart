@@ -13,8 +13,8 @@ import '../feature/gateway/gateway_bridge.dart';
 import '../feature/sos/sos_payload.dart';
 import '../feature/voice/voice_repository.dart';
 import 'mesh_bridge.dart';
-import 'incident_summary.dart';
 import 'sos_alert_notifications.dart';
+import 'sos_incident_navigator.dart';
 
 /// UI-isolate half of the cross-isolate mesh bridge (see `mesh_bridge.dart`
 /// for the wire format, `event_mode_screen.dart` for the background half).
@@ -225,18 +225,15 @@ class MeshBridgeClient {
         if (id.isEmpty || !_deliveredContactNotifications.add(id)) continue;
         if (priming) continue;
         final eventId = '${record['event_id'] ?? ''}';
-        final url = '${record['public_url'] ?? ''}'.trim();
         await SosAlertNotifications.show(
           id: SosAlertNotifications.idForKey('contact:$id'),
           title: '${record['title'] ?? 'Emergency alert'}',
           body:
               '${record['body'] ?? 'An emergency contact needs help.'}'
               '\nTap to open the full incident page.',
-          payload: url.isNotEmpty
-              ? url
-              : eventId.isEmpty
+          payload: eventId.isEmpty
               ? null
-              : publicIncidentUrl(bridge.baseUrl.toString(), eventId),
+              : SosIncidentNavigator.payloadForEvent(eventId),
         );
       }
     } catch (_) {

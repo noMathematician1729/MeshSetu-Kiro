@@ -37,6 +37,12 @@ abstract final class SosAlertNotifications {
           : (response) => onTapPayload(response.payload),
     );
     _initialized = true;
+    if (onTapPayload != null) {
+      final launch = await _plugin.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp ?? false) {
+        onTapPayload(launch?.notificationResponse?.payload);
+      }
+    }
   }
 
   /// Shows or replaces an emergency alert. [payload] carries the incident

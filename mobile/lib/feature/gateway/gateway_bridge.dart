@@ -185,6 +185,24 @@ class GatewayBridge {
     }
   }
 
+  /// Fetches the incident record rendered by the dashboard for the native
+  /// recipient detail screen. This public route is intentionally linked from
+  /// SOS notifications and does not require operator credentials.
+  Future<Map<String, Object?>?> fetchPublicIncident(String eventId) async {
+    try {
+      final response = await http
+          .get(baseUrl.resolve('/v1/public/sos/${Uri.encodeComponent(eventId)}'))
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final decoded = jsonDecode(response.body);
+      return decoded is Map ? decoded.cast<String, Object?>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Undelivered alerts addressed to this account (emergency-contact fan-out).
   Future<List<Map<String, Object?>>> fetchNotifications(
     String recipientUid,
