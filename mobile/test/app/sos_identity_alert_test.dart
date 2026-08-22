@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:meshsetu_mobile/app/incident_summary.dart';
+import 'package:meshsetu_mobile/app/sos_alert_notifications.dart';
 import 'package:meshsetu_mobile/core/ble/sos_advertisement.dart';
 
 void main() {
@@ -27,6 +28,32 @@ void main() {
       expect(decoded.originId, 0x87654321);
       expect(decoded.sequence, 7);
       expect(decoded.ttl, 4);
+    });
+
+    test('renders a self-contained offline compact SOS packet', () {
+      const alert = MeshSosAdvertisement(
+        siteFingerprint: 0x12345678,
+        originId: 0x87654321,
+        sequence: 7,
+        flags: MeshSosAdvertisement.alertFlag | (4 << 2),
+        ttl: 3,
+        reporterUidHex: 'a1b2c3d4e5f6',
+      );
+
+      final body = SosAlertNotifications.compactPacketBody(
+        alert,
+        availability: 'Offline: verified details cannot be fetched.',
+      );
+
+      expect(body, contains('COMPACT SOS PACKET'));
+      expect(body, contains('MEDICAL EMERGENCY'));
+      expect(body, contains('CEAL ID A1B2C3D4E5F6'));
+      expect(body, contains('87654321-00007'));
+      expect(body, contains('3 hops remaining'));
+      expect(
+        body,
+        contains('Name, contacts, and precise location are encrypted.'),
+      );
     });
 
     test('stays 14-byte v1 compatible when no UID is known', () {
@@ -83,8 +110,14 @@ void main() {
     test('normalizes unusable reporter UIDs to empty', () {
       expect(MeshSosAdvertisement.normalizeReporterUid(null), isEmpty);
       expect(MeshSosAdvertisement.normalizeReporterUid('abc'), isEmpty);
-      expect(MeshSosAdvertisement.normalizeReporterUid('zzzzzzzzzzzz'), isEmpty);
-      expect(MeshSosAdvertisement.normalizeReporterUid('000000000000'), isEmpty);
+      expect(
+        MeshSosAdvertisement.normalizeReporterUid('zzzzzzzzzzzz'),
+        isEmpty,
+      );
+      expect(
+        MeshSosAdvertisement.normalizeReporterUid('000000000000'),
+        isEmpty,
+      );
       expect(
         MeshSosAdvertisement.normalizeReporterUid('A1B2C3D4E5F6'),
         'a1b2c3d4e5f6',

@@ -84,35 +84,17 @@ Future<void> _showSosNotification({
 }
 
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  try {
-    if (!_sosNotificationsInitialized) {
-      await NotificationRouter.configure(_sosNotifications);
-      _sosNotificationsInitialized = true;
-    }
-    final id = Object.hash(alert.originId, alert.sequence) & 0x7fffffff;
-    await _sosNotifications.show(
-      id: id == 0 ? 1 : id,
-      title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
-      body: alert.isTest
-          ? 'Nearby BLE transport test received.'
-          : '${alert.emergencyType.label} received. Details may follow.',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _sosNotificationChannelId,
-          'SOS alerts',
-          channelDescription: 'Nearby MeshSetu emergency signals',
-          importance: Importance.max,
-          priority: Priority.max,
-          playSound: true,
-          enableVibration: true,
-          category: AndroidNotificationCategory.alarm,
-          visibility: NotificationVisibility.public,
-        ),
-      ),
-    );
-  } catch (_) {
-    // BLE relaying must remain live if Android rejects an alert.
-  }
+  await SosAlertNotifications.show(
+    id: SosAlertNotifications.idForKey(alert.dedupeKey),
+    title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED · MESH',
+    body: alert.isTest
+        ? 'Nearby BLE transport test received.'
+        : SosAlertNotifications.compactPacketBody(
+            alert,
+            availability:
+                'Offline-ready: attempting verified detail lookup when available.',
+          ),
+  );
 }
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
@@ -428,6 +410,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         'originId': alert.originId,
         'sequence': alert.sequence,
         'flags': alert.flags,
+        'ttl': alert.ttl,
         'siteFingerprint': alert.siteFingerprint,
         'dedupeKey': alert.dedupeKey,
         'reporterUid': alert.reporterUidHex,
@@ -823,10 +806,53 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
+  MeshSosAdvertisement? _compactAlertFromData(Map data) {
+    final siteFingerprint = data['siteFingerprint'] as int?;
+    final originId = data['originId'] as int?;
+    final sequence = data['sequence'] as int?;
+    if (siteFingerprint == null || originId == null || sequence == null) {
+      return null;
+    }
+    return MeshSosAdvertisement(
+      siteFingerprint: siteFingerprint,
+      originId: originId,
+      sequence: sequence,
+      flags: data['flags'] as int? ?? MeshSosAdvertisement.alertFlag,
+      ttl: data['ttl'] as int? ?? 0,
+      reporterUidHex: MeshSosAdvertisement.normalizeReporterUid(
+        data['reporterUid'] as String?,
+      ),
+    );
+  }
+
+  Future<void> _showCompactSosFallback(
+    Map data, {
+    required String availability,
+  }) async {
+    final alert = _compactAlertFromData(data);
+    final dedupeKey = data['dedupeKey'] as String?;
+    if (alert == null || dedupeKey == null) return;
+    await SosAlertNotifications.show(
+      id: SosAlertNotifications.idForKey(dedupeKey),
+      title: 'SOS RECEIVED · OFFLINE',
+      body: SosAlertNotifications.compactPacketBody(
+        alert,
+        availability: availability,
+      ),
+    );
+  }
+
   Future<void> _forwardReceivedCealSos(Map data) async {
     final url = ref.read(gatewayUrlProvider);
     final key = ref.read(gatewayDemoKeyProvider);
-    if (url.isEmpty || key.isEmpty) return;
+    if (url.isEmpty || key.isEmpty) {
+      await _showCompactSosFallback(
+        data,
+        availability:
+            'No control-room connection is configured; relay this packet over Bluetooth.',
+      );
+      return;
+    }
     try {
       final originId = data['originId'] as int?;
       final sequence = data['sequence'] as int?;
@@ -843,6 +869,21 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           : '';
       if (reporterUid.isEmpty) return;
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+      if (!await bridge.canReachControlRoom()) {
+        await _showCompactSosFallback(
+          data,
+          availability:
+              'Offline: verified details cannot be fetched. Keep Bluetooth on and relay this packet.',
+        );
+        if (mounted) {
+          setState(
+            () => _status =
+                'MeshSetu\nOffline compact SOS received · relaying over Bluetooth',
+          );
+        }
+        return;
+      }
+
       final site = await ref.read(joinRepositoryProvider).activeManifest();
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
@@ -851,19 +892,32 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         originId: originId,
         sequence: sequence,
       );
-      if (success && dedupeKey != null) {
+      final resolved = success && body?['event'] is Map;
+      if (resolved && dedupeKey != null) {
         await _showResolvedSosDetails(dedupeKey: dedupeKey, body: body);
+      } else {
+        await _showCompactSosFallback(
+          data,
+          availability: success
+              ? 'Control room reached, but expanded details are not available yet. Keep relaying this packet.'
+              : 'Verified detail lookup failed; this compact packet remains available offline.',
+        );
       }
       if (mounted) {
         setState(
-          () => _status = success
-              ? 'MeshSetu\nCEAL SOS relayed to admin ✓ (nearby device SOS)'
-              : 'MeshSetu\nCEAL relay to admin failed: $detail',
+          () => _status = resolved
+              ? 'MeshSetu\nSOS details resolved from control room ✓'
+              : 'MeshSetu\nCompact SOS received · $detail',
         );
       }
     } catch (error) {
+      await _showCompactSosFallback(
+        data,
+        availability:
+            'Verified detail lookup is unavailable; relay this compact packet over Bluetooth.',
+      );
       if (mounted) {
-        setState(() => _status = 'MeshSetu\nCEAL relay error: $error');
+        setState(() => _status = 'MeshSetu\nCompact SOS relay error: $error');
       }
     }
   }

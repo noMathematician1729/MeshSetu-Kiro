@@ -135,6 +135,22 @@ class GatewayBridge {
     }
   }
 
+  /// Tests whether this phone can reach the configured control-room service.
+  /// This is intentionally stronger than checking Wi-Fi/mobile-data state: a
+  /// connected captive portal or a down control room cannot resolve an SOS.
+  Future<bool> canReachControlRoom() async {
+    try {
+      final response = await http
+          .get(baseUrl.resolve('/health'))
+          .timeout(const Duration(seconds: 4));
+      // Any non-server-error response proves the network path reached the
+      // service, including a deployment-specific auth or route response.
+      return response.statusCode < 500;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// CEAL-style: forward a compact BLE SOS alert (UID-only) to the backend
   /// so it can resolve the reporter's profile and create an enriched event.
   ///
