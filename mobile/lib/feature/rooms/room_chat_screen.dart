@@ -189,10 +189,27 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
                   itemCount: visible.length,
                   itemBuilder: (context, i) {
                     final m = visible[visible.length - 1 - i];
+                    final status = meshStatus.valueOrNull;
+                    final reason = m.mine
+                        ? queuedReasonFor(
+                            m,
+                            eventModeRunning: status?.eventModeRunning ?? false,
+                            peerCount: status?.peerCount ?? 0,
+                            blockedReason: status?.blockedReason,
+                            siteMismatchDetected:
+                                status?.siteMismatchDetected ?? false,
+                            nowMs: DateTime.now().millisecondsSinceEpoch,
+                          )
+                        : null;
                     return ListTile(
                       dense: true,
                       title: Text(m.text),
-                      subtitle: Text(m.mine ? 'you' : (m.fromPeerId ?? 'peer')),
+                      subtitle: reason != null
+                          ? Text(
+                              reason,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            )
+                          : Text(m.mine ? 'you' : (m.fromPeerId ?? 'peer')),
                       trailing: m.mine
                           ? _DeliveryStateIcon(state: m.state)
                           : null,
@@ -254,6 +271,7 @@ class _MeshStatusBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!status.eventModeRunning) {
+      final blockedReason = status.blockedReason;
       return Material(
         color: Theme.of(context).colorScheme.secondaryContainer,
         child: Padding(
@@ -262,10 +280,10 @@ class _MeshStatusBar extends StatelessWidget {
             children: [
               const Icon(Icons.bluetooth_disabled, size: 18),
               const SizedBox(width: 8),
-              const Expanded(
+              Expanded(
                 child: Text(
-                  'Event mode is off — messages will queue.',
-                  style: TextStyle(fontSize: 13),
+                  blockedReason ?? 'Event mode is off — messages will queue.',
+                  style: const TextStyle(fontSize: 13),
                 ),
               ),
               TextButton(
@@ -288,21 +306,44 @@ class _MeshStatusBar extends StatelessWidget {
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              peerCount > 0
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_searching,
-              size: 16,
+            Row(
+              children: [
+                Icon(
+                  peerCount > 0
+                      ? Icons.bluetooth_connected
+                      : Icons.bluetooth_searching,
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  peerCount > 0
+                      ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'}'
+                      : 'Mesh: no peers yet · queued',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            Text(
-              peerCount > 0
-                  ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'}'
-                  : 'Mesh: no peers yet · queued',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            if (status.siteMismatchDetected)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber, size: 14),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'A nearby device is using a different event/site '
+                        'code — it will not connect.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),

@@ -8,6 +8,8 @@ import 'package:meshsetu_mobile/core/ble/ble_discovery.dart';
 class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
   PeripheralPlatformConfig? config;
   ManufacturerData? manufacturerData;
+  int startCount = 0;
+  int stopCount = 0;
 
   @override
   Future<void> startAdvertising({
@@ -17,8 +19,14 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
     ManufacturerData? manufacturerData,
     PeripheralPlatformConfig? platformConfig,
   }) async {
+    startCount++;
     config = platformConfig;
     this.manufacturerData = manufacturerData;
+  }
+
+  @override
+  Future<void> stopAdvertising() async {
+    stopCount++;
   }
 }
 
@@ -98,4 +106,91 @@ void main() {
       );
     },
   );
+
+  test(
+    'isIntendedToAdvertise reflects start/stop and reassert re-issues advertising',
+    () async {
+      final peripheral = _AdvertisingPeripheral();
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      // MeshAdvertiser holds process-wide static state shared with earlier
+      // tests in this file; reset explicitly rather than assuming an
+      // initial value.
+      await MeshAdvertiser.stop();
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+
+      const metadata = DiscoveryMetadata(
+        fingerprint: 1,
+        connectionToken: 2,
+        capabilities: 1,
+      );
+      await MeshAdvertiser.start(metadata);
+      expect(MeshAdvertiser.isIntendedToAdvertise, isTrue);
+      final startCountAfterFirstStart = peripheral.startCount;
+      expect(startCountAfterFirstStart, greaterThanOrEqualTo(1));
+
+      await MeshAdvertiser.reassert();
+      expect(peripheral.startCount, startCountAfterFirstStart + 1);
+      expect(MeshAdvertiser.isIntendedToAdvertise, isTrue);
+
+      final stopCountBeforeFinalStop = peripheral.stopCount;
+      await MeshAdvertiser.stop();
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+      expect(peripheral.stopCount, stopCountBeforeFinalStop + 1);
+
+      // reassert after stop must not silently revive advertising.
+      final startCountAfterStop = peripheral.startCount;
+      await MeshAdvertiser.reassert();
+      expect(peripheral.startCount, startCountAfterStop);
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+    },
+  );
+
+  group('shouldDialNow', () {
+    test('dials immediately when winning the deterministic tie-break', () {
+      final result = shouldDialNow(
+        localToken: 1,
+        remoteToken: 2,
+        waitingSinceMs: null,
+        nowMs: 0,
+      );
+      expect(result, isTrue);
+    });
+
+    test('does not dial when losing the tie-break before the fallback delay', () {
+      final result = shouldDialNow(
+        localToken: 2,
+        remoteToken: 1,
+        waitingSinceMs: 1000,
+        nowMs: 1000 + const Duration(seconds: 5).inMilliseconds,
+        fallbackDelay: const Duration(seconds: 15),
+      );
+      expect(result, isFalse);
+    });
+
+    test('falls back to dialing once the wait meets the fallback delay', () {
+      final result = shouldDialNow(
+        localToken: 2,
+        remoteToken: 1,
+        waitingSinceMs: 1000,
+        nowMs: 1000 + const Duration(seconds: 15).inMilliseconds,
+        fallbackDelay: const Duration(seconds: 15),
+      );
+      expect(result, isTrue);
+    });
+
+    test('never falls back if no wait-start time has been recorded yet', () {
+      final result = shouldDialNow(
+        localToken: 2,
+        remoteToken: 1,
+        waitingSinceMs: null,
+        nowMs: 1000000,
+      );
+      expect(result, isFalse);
+    });
+  });
 }

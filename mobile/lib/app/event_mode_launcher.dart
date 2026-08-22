@@ -6,6 +6,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart'
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/ble/ble_permissions.dart';
+import '../core/ble/mesh_radio_preflight.dart';
 import 'mesh_event_controller.dart';
 
 const int eventModeNotificationServiceId = 1001;
@@ -94,12 +95,12 @@ abstract final class EventModeLauncher {
     }
     var startedHere = false;
     try {
+      final androidInfo = await DeviceInfoPlugin().androidInfo;
       final bluetoothMessage = await BlePermissions.availabilityMessage();
       if (bluetoothMessage != null) {
         onStatus?.call(bluetoothMessage);
         return EventModeLaunchResult.failure;
       }
-      final androidInfo = await DeviceInfoPlugin().androidInfo;
       final permissions = await BlePermissions.request(
         sdkInt: androidInfo.version.sdkInt,
       );
@@ -110,6 +111,13 @@ abstract final class EventModeLauncher {
           'Nearby devices permission is required. '
           'Allow Bluetooth access in Settings, then try again.',
         );
+        return EventModeLaunchResult.failure;
+      }
+      final preflight = await MeshRadioPreflight.check(
+        sdkInt: androidInfo.version.sdkInt,
+      );
+      if (preflight is MeshRadioBlocked) {
+        onStatus?.call(preflight.message);
         return EventModeLaunchResult.failure;
       }
 

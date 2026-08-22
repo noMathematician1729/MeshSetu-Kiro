@@ -22,9 +22,20 @@ import '../model/model.dart';
 abstract final class MeshAdvertiser {
   static final AsyncLock _advertisingLock = AsyncLock();
   static int _advertisingGeneration = 0;
+  static DiscoveryMetadata? _activeMetadata;
+
+  /// Whether [start] has been called more recently than [stop] for the
+  /// current advertising generation. This tracks *intent*, not a confirmed
+  /// platform state — `universal_ble` exposes no query for whether Android
+  /// is still actually broadcasting, which is exactly the failure mode this
+  /// is meant to catch (Bible audit Task 3): Android can silently stop
+  /// advertising (radio toggled, too many concurrent advertisers) while
+  /// this flag still reads true. [reassert] is the mitigation.
+  static bool get isIntendedToAdvertise => _activeMetadata != null;
 
   static Future<void> start(DiscoveryMetadata metadata) async {
     _advertisingGeneration++;
+    _activeMetadata = metadata;
     await UniversalBlePeripheral.startAdvertising(
       services: const [MeshGatt.service],
       localName: 'MeshSetu',
@@ -46,8 +57,21 @@ abstract final class MeshAdvertiser {
     );
   }
 
+  /// Re-issues [start] with the last-known discovery metadata. Safe to call
+  /// periodically as a liveness re-assertion: `startAdvertising` is
+  /// idempotent from this app's perspective, and this is the only available
+  /// mitigation for Android silently dropping an active advertisement since
+  /// there is no platform callback for "advertising stopped unexpectedly".
+  /// A no-op if advertising was never started or has since been [stop]ped.
+  static Future<void> reassert() async {
+    final metadata = _activeMetadata;
+    if (metadata == null) return;
+    await start(metadata);
+  }
+
   static Future<void> stop() async {
     _advertisingGeneration++;
+    _activeMetadata = null;
     await UniversalBlePeripheral.stopAdvertising();
   }
 
@@ -102,6 +126,7 @@ class MeshScanReport {
     required this.manufacturerMatches,
     required this.malformedMetadata,
     required this.fingerprintMismatches,
+    this.uuidOnlyDeviceIds = const [],
   });
 
   final List<DiscoveredPeer> peers;
@@ -111,6 +136,17 @@ class MeshScanReport {
   final int manufacturerMatches;
   final int malformedMetadata;
   final int fingerprintMismatches;
+
+  /// Device IDs that matched the MeshSetu service UUID but never produced a
+  /// decodable discovery record during this scan window (Bible audit
+  /// Task 4). Some OEM BLE stacks fail to deliver or merge the scan-response
+  /// packet that carries [DiscoveryMetadata], so `serviceMatches > 0` while
+  /// `manufacturerMatches == 0` for that device — normal discovery then
+  /// finds zero peers with no fallback. [MeshEventController] uses this list
+  /// as a last-resort connection candidate set after repeated blind cycles,
+  /// relying on the post-connection HELLO handshake (not this scan) to
+  /// establish site identity, since no fingerprint is available here.
+  final List<String> uuidOnlyDeviceIds;
 }
 
 abstract final class MeshScanner {
@@ -136,6 +172,7 @@ abstract final class MeshScanner {
     final manufacturerMatches = <String>{};
     final malformedMetadata = <String>{};
     final fingerprintMismatches = <String>{};
+    final discoveryRecordSeen = <String>{};
     final beacons = <String, BeaconObservation>{};
     StreamSubscription<BleDevice>? subscription;
     var started = false;
@@ -188,6 +225,7 @@ abstract final class MeshScanner {
           );
           if (discoveryPayload == null) continue;
           manufacturerMatches.add(device.deviceId);
+          discoveryRecordSeen.add(device.deviceId);
           final metadata = DiscoveryMetadata.decode(discoveryPayload);
           if (metadata == null) {
             malformedMetadata.add(device.deviceId);
@@ -240,6 +278,9 @@ abstract final class MeshScanner {
       manufacturerMatches: manufacturerMatches.length,
       malformedMetadata: malformedMetadata.length,
       fingerprintMismatches: fingerprintMismatches.length,
+      uuidOnlyDeviceIds: serviceMatches
+          .difference(discoveryRecordSeen)
+          .toList(growable: false),
     );
   }
 }

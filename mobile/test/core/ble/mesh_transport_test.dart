@@ -545,6 +545,99 @@ void main() {
   });
 
   test(
+    'log-only: a peer sending real traffic without ever sending HELLO is '
+    'flagged but not dropped',
+    () async {
+      final metrics = <RelayMetric>[];
+      final coordinator = _coordinator(
+        localHello: const Hello(
+          siteFingerprint: 111,
+          ephemeralNodeId: 1,
+          capabilities: 1,
+          nowEpochSec: 0,
+        ),
+        onMetrics: metrics.addAll,
+      );
+      final link = _FakeLink()..peer = _FakeLink();
+      coordinator.attach('peer-b', link, siteFingerprint: 1);
+      metrics.clear();
+
+      // Deliver a well-formed non-HELLO control frame without this peer
+      // ever having sent a HELLO first.
+      link.deliver(
+        FrameCodec.encode(
+          MeshFrame(
+            type: FrameType.custodyAck,
+            priority: 0,
+            flags: 0,
+            objectId: 7,
+            sequence: 0,
+            count: 1,
+            payload: Uint8List(0),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(
+        metrics.any(
+          (m) => m.kind == 'peer_unverified_site' && m.peerId == 'peer-b',
+        ),
+        isTrue,
+      );
+      // Log-only: the connection must remain open and untouched.
+      expect(link.closed, isFalse);
+      expect(coordinator.peerCount, 1);
+
+      metrics.clear();
+      final validHello = const Hello(
+        siteFingerprint: 111,
+        ephemeralNodeId: 2,
+        capabilities: 1,
+        nowEpochSec: 0,
+      );
+      link.deliver(
+        FrameCodec.encode(
+          MeshFrame(
+            type: FrameType.hello,
+            priority: 0,
+            flags: 0,
+            objectId: validHello.ephemeralNodeId,
+            sequence: 0,
+            count: 1,
+            payload: HelloCodec.encode(validHello),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(link.closed, isFalse);
+      expect(coordinator.peerCount, 1);
+
+      metrics.clear();
+      link.deliver(
+        FrameCodec.encode(
+          MeshFrame(
+            type: FrameType.custodyAck,
+            priority: 0,
+            flags: 0,
+            objectId: 8,
+            sequence: 0,
+            count: 1,
+            payload: Uint8List(0),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // After a valid same-site HELLO, subsequent traffic is verified and
+      // no longer flagged.
+      expect(
+        metrics.any((m) => m.kind == 'peer_unverified_site'),
+        isFalse,
+      );
+    },
+  );
+
+  test(
     'a stale replacement state event cannot detach the new session',
     () async {
       final coordinator = _coordinator();

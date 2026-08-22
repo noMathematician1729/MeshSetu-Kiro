@@ -29,6 +29,51 @@ RoomMessageState _stateFromOutboxState(String state) => switch (state) {
   _ => RoomMessageState.queued, // 'created', 'ready'/meshReadyState, 'retry'
 };
 
+/// How long a message must sit in [RoomMessageState.queued] or
+/// [RoomMessageState.sending] before the UI treats it as stalled rather than
+/// "about to go out" (Bible audit Task 8).
+const roomMessageStallThreshold = Duration(seconds: 20);
+
+/// Derives a specific, human-readable reason a message identified by
+/// [message] has not been delivered yet, given the current mesh
+/// connectivity ([eventModeRunning], [peerCount], [blockedReason],
+/// [siteMismatchDetected] — the fields of `MeshStatus`, passed individually
+/// so this stays independent of `app/mesh_bridge_client.dart` and testable
+/// without importing it here).
+///
+/// Returns `null` when the message is not queued/sending, or is queued but
+/// has not yet been queued long enough to call it stalled — a bare clock
+/// icon is enough for the first few seconds after sending.
+String? queuedReasonFor(
+  RoomMessage message, {
+  required bool eventModeRunning,
+  required int peerCount,
+  required String? blockedReason,
+  required bool siteMismatchDetected,
+  required int nowMs,
+  Duration stallThreshold = roomMessageStallThreshold,
+}) {
+  if (message.state != RoomMessageState.queued &&
+      message.state != RoomMessageState.sending) {
+    return null;
+  }
+  final queuedSince = message.queuedSinceMs;
+  if (queuedSince == null ||
+      nowMs - queuedSince < stallThreshold.inMilliseconds) {
+    return null;
+  }
+  if (!eventModeRunning) {
+    return blockedReason ?? 'Waiting — start event mode to send.';
+  }
+  if (peerCount == 0) {
+    if (siteMismatchDetected) {
+      return 'Waiting — nearby devices are on a different event/site.';
+    }
+    return 'Waiting for a nearby device with event mode on.';
+  }
+  return 'Waiting to relay over Bluetooth.';
+}
+
 class RoomMessage {
   const RoomMessage({
     required this.eventId,
@@ -37,6 +82,7 @@ class RoomMessage {
     required this.atMs,
     required this.mine,
     this.state = RoomMessageState.delivered,
+    this.queuedSinceMs,
   });
 
   final String eventId;
@@ -49,6 +95,14 @@ class RoomMessage {
   /// [RoomMessageState.delivered] because its presence in the inbox already
   /// proves it arrived.
   final RoomMessageState state;
+
+  /// When [state] is [RoomMessageState.queued] or [RoomMessageState.sending],
+  /// the durable outbox row's `updatedAtMs` — the last time its state
+  /// machine actually advanced (Bible audit Task 8). The chat UI uses this
+  /// to distinguish "just sent, about to go out" from "has been stuck for
+  /// minutes", which a bare icon cannot express. Null for delivered/failed
+  /// messages and for anything not sent by this device.
+  final int? queuedSinceMs;
 }
 
 /// `feature/rooms`: composes/reads Room chat, enforcing [RoomPolicy] before
@@ -122,7 +176,11 @@ class RoomRepository {
   /// mesh outbox — the internet socket already confirmed a remote member
   /// received it, so a GATT send would be redundant.
   Future<void> markSocketDelivered(String eventId) async {
-    await _db.markState(eventId, 'acked', DateTime.now().millisecondsSinceEpoch);
+    await _db.markState(
+      eventId,
+      'acked',
+      DateTime.now().millisecondsSinceEpoch,
+    );
   }
 
   /// Moves a [socketPendingState] row into the mesh outbox after a socket
@@ -236,14 +294,7 @@ class RoomRepository {
           final messages = [
             for (final r in sentRows)
               if (r.payloadType == PayloadType.roomMessage.name)
-                RoomMessage(
-                  eventId: r.eventId,
-                  text: r.rawText ?? '',
-                  fromPeerId: null,
-                  atMs: r.createdAtMs,
-                  mine: true,
-                  state: _stateFromOutboxState(r.state),
-                ),
+                _mineMessageFromRow(r),
             for (final r in receivedRows)
               if (r.payloadType == PayloadType.roomMessage.name)
                 if (_decodeMessage(r) case final message?) message,
@@ -355,6 +406,22 @@ class RoomRepository {
       Uint8List.fromList(digest.sublist(0, 8)),
     ).getInt64(0, Endian.big);
     return value == 0 ? 1 : value;
+  }
+
+  RoomMessage _mineMessageFromRow(OutboxEvent row) {
+    final state = _stateFromOutboxState(row.state);
+    return RoomMessage(
+      eventId: row.eventId,
+      text: row.rawText ?? '',
+      fromPeerId: null,
+      atMs: row.createdAtMs,
+      mine: true,
+      state: state,
+      queuedSinceMs:
+          state == RoomMessageState.queued || state == RoomMessageState.sending
+          ? row.updatedAtMs
+          : null,
+    );
   }
 
   RoomMessage? _decodeMessage(InboxEvent row) {

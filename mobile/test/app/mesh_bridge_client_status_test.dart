@@ -75,15 +75,15 @@ void main() {
       final repository = RoomRepository(database, siteId: 'participant-site');
 
       client.prepareForSite(siteId: 'participant-site');
-      client.handleTaskData(const {
-        'status': 'started',
-        'localEphemeralId': 17,
-      });
       final eventId = await repository.sendMessage(
         policy: policyForRole('public', 'public'),
         userRoles: const {'public'},
         text: 'participant offline message',
       );
+      client.handleTaskData(const {
+        'status': 'started',
+        'localEphemeralId': 17,
+      });
 
       final envelope = await submitted.future.timeout(
         const Duration(seconds: 1),
@@ -110,6 +110,51 @@ void main() {
       expect(client.meshStatus.eventModeRunning, before.eventModeRunning);
       expect(client.meshStatus.peerCount, before.peerCount);
       expect(client.meshStatus.statusText, before.statusText);
+    },
+  );
+
+  test(
+    'reportBlockedReason surfaces a preflight failure and clears on started',
+    () {
+      expect(client.meshStatus.blockedReason, isNull);
+
+      client.reportBlockedReason('Turn on Location in Settings.');
+      expect(client.meshStatus.blockedReason, 'Turn on Location in Settings.');
+      expect(client.meshStatus.eventModeRunning, isFalse);
+
+      client.handleTaskData(const {
+        'status': 'started',
+        'localEphemeralId': 5,
+      });
+      expect(client.meshStatus.blockedReason, isNull);
+      expect(client.meshStatus.eventModeRunning, isTrue);
+    },
+  );
+
+  test(
+    'mesh_metric with scan_fingerprint_mismatches sets and clears siteMismatchDetected',
+    () async {
+      client.handleTaskData(const {'status': 'started'});
+      await Future<void>.delayed(Duration.zero);
+      expect(client.meshStatus.siteMismatchDetected, isFalse);
+
+      client.handleTaskData(const {
+        'status': 'mesh_metric',
+        'metrics': [
+          {'kind': 'scan_fingerprint_mismatches', 'value': 2},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.meshStatus.siteMismatchDetected, isTrue);
+
+      client.handleTaskData(const {
+        'status': 'mesh_metric',
+        'metrics': [
+          {'kind': 'scan_fingerprint_mismatches', 'value': 0},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.meshStatus.siteMismatchDetected, isFalse);
     },
   );
 }

@@ -12,7 +12,9 @@ import '../core/ble/device_key_store.dart';
 import '../core/ble/gatt_peer_session.dart';
 import '../core/ble/gatt_server.dart';
 import '../core/ble/mesh_gatt.dart';
+import '../core/ble/mesh_health_watchdog.dart';
 import '../core/ble/mesh_transport.dart';
+import '../core/ble/scan_pacer.dart';
 import '../core/ble/sos_advertisement.dart';
 import '../core/model/model.dart';
 import '../core/protocol/frame.dart';
@@ -113,6 +115,26 @@ class MeshEventController {
   DiscoveryMetadata? _discoveryMetadata;
   int _sosSequence = 0;
   final Map<String, int> _seenCompactAlerts = {};
+  ScanPacer _scanPacer = ScanPacer();
+  MeshHealthWatchdog _healthWatchdog = MeshHealthWatchdog();
+  int _runGeneration = 0;
+  Timer? _advertisingLivenessTimer;
+  final Map<String, int> _uuidOnlySightings = {};
+  final Map<String, int> _waitingForRemoteDialSinceMs = {};
+
+  /// Consecutive scan cycles a device must be seen as UUID-only (service
+  /// UUID matched, no decodable discovery record) before it becomes a
+  /// fallback connection candidate (Bible audit Task 4). Requiring repeat
+  /// sightings avoids treating a single transient scan-response miss as a
+  /// broken peer.
+  static const int _uuidOnlyFallbackThreshold = 2;
+
+  /// How long to wait for the peer designated as initiator by
+  /// [shouldInitiate] to dial before this device dials anyway (Bible audit
+  /// Task 6). Without this, a peer whose own scanning/radio is degraded
+  /// never gets called back — connection ownership is one-sided and only
+  /// half the pair can ever notice the other went dark.
+  static const Duration _fallbackDialDelay = Duration(seconds: 15);
 
   MeshTransportCoordinator? get coordinator => _coordinator;
 
@@ -128,6 +150,9 @@ class MeshEventController {
     if (_looping || _starting) return;
     _starting = true;
     _stopRequested = false;
+    _scanPacer = ScanPacer();
+    _healthWatchdog = MeshHealthWatchdog();
+    final generation = ++_runGeneration;
     MeshTransportCoordinator? coordinator;
     IOSink? metricSink;
     try {
@@ -188,14 +213,20 @@ class MeshEventController {
       await MeshAdvertiser.start(_discoveryMetadata!);
       if (_stopRequested) throw StateError('mesh start cancelled');
       _reportMetrics([RelayMetric('advertising_started')]);
+      _advertisingLivenessTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => unawaited(_reassertAdvertising()),
+      );
 
       _looping = true;
       _scanCancel = Completer<void>();
-      _scanFuture = _scanLoop(siteFingerprint, coordinator);
+      _scanFuture = _scanLoop(siteFingerprint, coordinator, generation);
       unawaited(_scanFuture!);
       onMeshStatus?.call('advertising');
     } catch (_) {
       _looping = false;
+      _advertisingLivenessTimer?.cancel();
+      _advertisingLivenessTimer = null;
       _scanCancel?.complete();
       _scanCancel = null;
       await _scanFuture;
@@ -223,12 +254,21 @@ class MeshEventController {
   Future<void> _scanLoop(
     int siteFingerprint,
     MeshTransportCoordinator coordinator,
+    int generation,
   ) async {
     while (_looping) {
+      if (_scanPacer.isThrottled) {
+        _reportMetrics(const [RelayMetric('scan_throttle_deferred')]);
+        onMeshStatus?.call('idle');
+        if (!await _waitOrStop(_scanPacer.nextIdleDuration())) return;
+        continue;
+      }
       MeshScanReport report;
       try {
         onMeshStatus?.call('scanning');
+        _scanPacer.recordScanStart();
         report = await MeshScanner.scanReport(
+          window: _scanPacer.nextScanWindow(),
           expectedFingerprint: siteFingerprint,
           cancel: _scanCancel?.future,
           onSosAlert: _onCompactSosAlert,
@@ -240,6 +280,7 @@ class MeshEventController {
         continue;
       }
       if (!_looping) return;
+      _scanPacer.recordCycleResult(devicesSeen: report.devicesSeen);
       final peers = report.peers;
       _reportMetrics([
         RelayMetric('scan_devices_seen', value: report.devicesSeen),
@@ -267,28 +308,95 @@ class MeshEventController {
             value: peer.device.rssi,
           ),
       ]);
+      final healthAction = _healthWatchdog.recordCycle(
+        devicesSeen: report.devicesSeen,
+        connectedPeerCount: coordinator.peerCount,
+      );
+      switch (healthAction) {
+        case MeshHealthAction.none:
+          break;
+        case MeshHealthAction.reassertAdvertising:
+          _reportMetrics([
+            RelayMetric(
+              'mesh_health_action',
+              detail: 'reassertAdvertising',
+              value: _healthWatchdog.consecutiveUnhealthyCycles,
+            ),
+          ]);
+          unawaited(_reassertAdvertising());
+        case MeshHealthAction.restartController:
+          _reportMetrics([
+            RelayMetric(
+              'mesh_health_action',
+              detail: 'restartController',
+              value: _healthWatchdog.consecutiveUnhealthyCycles,
+            ),
+          ]);
+          // Scheduled outside this cycle's synchronous continuation: stop()
+          // awaits this same scan loop's future, so calling it inline here
+          // would deadlock the loop against its own teardown.
+          scheduleMicrotask(() => _restartAfterHealthCheckFailure(generation));
+          return;
+      }
       final candidates = <DiscoveredPeer>[];
       final now = DateTime.now().millisecondsSinceEpoch;
       final capacity =
           MeshTransportCoordinator.maxPeerConnections -
           coordinator.peerCount -
           _connectingPeerIds.length;
+      final seenThisCycle = <String>{};
       for (final peer in peers) {
+        seenThisCycle.add(peer.device.deviceId);
+        if (coordinator.hasPeer(peer.device.deviceId)) {
+          _waitingForRemoteDialSinceMs.remove(peer.device.deviceId);
+          continue;
+        }
+        final weShouldInitiate = shouldInitiate(
+          _localToken,
+          peer.metadata.connectionToken,
+        );
+        int? waitingSince;
+        if (weShouldInitiate) {
+          _waitingForRemoteDialSinceMs.remove(peer.device.deviceId);
+        } else {
+          waitingSince = _waitingForRemoteDialSinceMs.putIfAbsent(
+            peer.device.deviceId,
+            () => now,
+          );
+        }
+        final dialNow = shouldDialNow(
+          localToken: _localToken,
+          remoteToken: peer.metadata.connectionToken,
+          waitingSinceMs: waitingSince,
+          nowMs: now,
+          fallbackDelay: _fallbackDialDelay,
+        );
+        if (!dialNow) continue;
+        if (!weShouldInitiate) {
+          _reportMetrics([
+            RelayMetric(
+              'fallback_dial_after_wait',
+              peerId: peer.device.deviceId,
+            ),
+          ]);
+        }
         if (candidates.length >= capacity) {
           break;
         }
         if (capacity <= 0) break;
-        if (!shouldInitiate(_localToken, peer.metadata.connectionToken) ||
-            coordinator.hasPeer(peer.device.deviceId) ||
-            _connectingPeerIds.contains(peer.device.deviceId) ||
+        if (_connectingPeerIds.contains(peer.device.deviceId) ||
             (_retryAfterMs[peer.device.deviceId] ?? 0) > now) {
           continue;
         }
         candidates.add(peer);
       }
+      _waitingForRemoteDialSinceMs.removeWhere(
+        (deviceId, _) => !seenThisCycle.contains(deviceId),
+      );
       for (final peer in candidates) {
         _startConnection(peer, coordinator);
       }
+      _processUuidOnlyFallback(report, coordinator, now);
       if (!_looping) return;
       final beacons = report.beacons;
       if (beacons.isNotEmpty) {
@@ -313,8 +421,148 @@ class MeshEventController {
         // A transient peer failure must not terminate the long-running scan.
       }
       onMeshStatus?.call('idle');
-      if (!await _waitOrStop(const Duration(seconds: 2))) return;
+      if (!await _waitOrStop(_scanPacer.nextIdleDuration())) return;
     }
+  }
+
+  /// Terminal recovery action for [MeshHealthAction.restartController]
+  /// (Bible audit Task 9): a full stop/start cycle when reasserting
+  /// advertising alone has not recovered discovery. This is the same
+  /// operation the user currently performs manually by toggling Event Mode
+  /// off and back on — automating it is the point of the watchdog.
+  Future<void> _restartAfterHealthCheckFailure(int generation) async {
+    if (!_looping || generation != _runGeneration) return;
+    _reportMetrics(const [RelayMetric('mesh_health_restart_begin')]);
+    await stop();
+    if (generation != _runGeneration) return;
+    try {
+      await start();
+    } catch (error) {
+      _reportMetrics([
+        RelayMetric('mesh_health_restart_failed', detail: '$error'),
+      ]);
+    }
+  }
+
+  Future<void> _reassertAdvertising() async {
+    if (!_looping) return;
+    try {
+      await MeshAdvertiser.reassert();
+    } catch (error) {
+      _reportMetrics([
+        RelayMetric('advertising_reassert_failed', detail: '$error'),
+      ]);
+    }
+  }
+
+  /// Fallback for OEM BLE stacks that fail to deliver the scan-response
+  /// packet carrying [DiscoveryMetadata] (Bible audit Task 4): a device
+  /// seen matching the MeshSetu service UUID for
+  /// [_uuidOnlyFallbackThreshold] consecutive cycles, with no discovery
+  /// record, becomes a connection candidate anyway. No fingerprint is
+  /// available pre-connect here, so the attempt attaches as unverified and
+  /// relies entirely on the post-connection HELLO handshake (Task 5) to
+  /// establish or reject site identity — this must never bypass that check.
+  void _processUuidOnlyFallback(
+    MeshScanReport report,
+    MeshTransportCoordinator coordinator,
+    int now,
+  ) {
+    final seenThisCycle = report.uuidOnlyDeviceIds.toSet();
+    _uuidOnlySightings.removeWhere((id, _) => !seenThisCycle.contains(id));
+    for (final deviceId in seenThisCycle) {
+      _uuidOnlySightings[deviceId] = (_uuidOnlySightings[deviceId] ?? 0) + 1;
+    }
+    if (seenThisCycle.isEmpty) return;
+
+    final capacity =
+        MeshTransportCoordinator.maxPeerConnections -
+        coordinator.peerCount -
+        _connectingPeerIds.length;
+    if (capacity <= 0) return;
+
+    var started = 0;
+    for (final deviceId in seenThisCycle) {
+      if (started >= capacity) break;
+      if ((_uuidOnlySightings[deviceId] ?? 0) < _uuidOnlyFallbackThreshold) {
+        continue;
+      }
+      if (coordinator.hasPeer(deviceId) ||
+          _connectingPeerIds.contains(deviceId) ||
+          (_retryAfterMs[deviceId] ?? 0) > now) {
+        continue;
+      }
+      _reportMetrics([
+        RelayMetric('uuid_only_fallback_connect', peerId: deviceId),
+      ]);
+      _startUuidOnlyConnection(deviceId, coordinator);
+      started++;
+    }
+  }
+
+  Future<void> _connectUuidOnlyPeer(
+    String deviceId,
+    MeshTransportCoordinator coordinator,
+  ) async {
+    GattPeerSession? session;
+    try {
+      session = GattPeerSession.open(
+        deviceId,
+        onLifecycle: (kind, {phase, detail, value}) {
+          _reportMetrics([
+            RelayMetric(kind, peerId: deviceId, detail: detail ?? phase, value: value),
+          ]);
+        },
+      );
+      await session.awaitReady().timeout(const Duration(seconds: 45));
+      if (!_looping) {
+        await session.close();
+        return;
+      }
+      // siteFingerprint is unknown pre-connect for a UUID-only fallback
+      // peer; 0 marks it unverified until HELLO (Task 5) confirms or
+      // rejects the site.
+      coordinator.attach(
+        deviceId,
+        GattPeerSessionLink(session),
+        siteFingerprint: 0,
+      );
+      _retryAfterMs.remove(deviceId);
+      _uuidOnlySightings.remove(deviceId);
+    } catch (error) {
+      _retryAfterMs[deviceId] = DateTime.now().millisecondsSinceEpoch + 10000;
+      _reportMetrics([
+        RelayMetric(
+          'uuid_only_fallback_connect_failed',
+          peerId: deviceId,
+          detail: session == null
+              ? 'open: ${error.toString()}'
+              : '${session.phase}: ${session.failure ?? error}',
+        ),
+      ]);
+      unawaited(session?.close());
+    }
+  }
+
+  void _startUuidOnlyConnection(
+    String deviceId,
+    MeshTransportCoordinator coordinator,
+  ) {
+    if (!_connectingPeerIds.add(deviceId)) return;
+    final future = _connectUuidOnlyPeer(deviceId, coordinator);
+    _connectionAttempts.add(future);
+    unawaited(
+      future.then(
+        (_) {
+          _connectionAttempts.remove(future);
+          _connectingPeerIds.remove(deviceId);
+        },
+        onError: (Object _, StackTrace __) {
+          _connectionAttempts.remove(future);
+          _connectingPeerIds.remove(deviceId);
+        },
+      ),
+    );
   }
 
   Future<bool> _waitOrStop(Duration duration) async {
@@ -499,6 +747,8 @@ class MeshEventController {
   Future<void> stop() async {
     _stopRequested = true;
     _looping = false;
+    _advertisingLivenessTimer?.cancel();
+    _advertisingLivenessTimer = null;
     if (!(_scanCancel?.isCompleted ?? true)) {
       _scanCancel!.complete();
     }
@@ -507,6 +757,8 @@ class MeshEventController {
     _scanFuture = null;
     _retryAfterMs.clear();
     _seenCompactAlerts.clear();
+    _uuidOnlySightings.clear();
+    _waitingForRemoteDialSinceMs.clear();
     _discoveryMetadata = null;
     final coordinator = _coordinator;
     _coordinator = null;

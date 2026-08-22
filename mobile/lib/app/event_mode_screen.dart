@@ -124,6 +124,7 @@ void meshEventTaskCallback() {
 class _MeshEventTaskHandler extends TaskHandler {
   MeshEventController? _controller;
   bool _sosPending = false;
+  bool _identityRequestPending = false;
   bool _debugLossEnabled = false;
   StreamSubscription<ReceivedObject>? _incomingSubscription;
   int _notificationGeneration = 0;
@@ -223,6 +224,13 @@ class _MeshEventTaskHandler extends TaskHandler {
         'status': 'started',
         'localEphemeralId': controller.localEphemeralId,
       });
+      if (_identityRequestPending) {
+        _identityRequestPending = false;
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'started',
+          'localEphemeralId': controller.localEphemeralId,
+        });
+      }
       if (_sosPending) {
         _sosPending = false;
         unawaited(_sendTestSos(controller));
@@ -264,7 +272,9 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     if (data is Map && data['mesh_identity_request'] == true) {
       final controller = _controller;
-      if (controller != null) {
+      if (controller == null) {
+        _identityRequestPending = true;
+      } else {
         FlutterForegroundTask.sendDataToMain({
           'status': 'started',
           'localEphemeralId': controller.localEphemeralId,

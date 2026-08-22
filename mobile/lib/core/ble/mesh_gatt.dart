@@ -152,3 +152,29 @@ class DiscoveryMetadata {
 /// caller applies a randomized backoff on the vanishingly rare tie.
 bool shouldInitiate(int localToken, int remoteToken) =>
     localToken < remoteToken;
+
+/// Whether to dial a peer right now, given the deterministic
+/// [shouldInitiate] tie-break plus a bounded fallback (Bible audit Task 6).
+///
+/// The peer that loses the tie-break is expected to be dialed *by* the
+/// other side. If that never happens — the designated initiator's
+/// scanning or radio is degraded — connection ownership becomes
+/// permanently one-sided: only the losing side can ever notice anything is
+/// wrong, and it has no mechanism to act on that. Once [waitingSinceMs] is
+/// at least [fallbackDelay] in the past, this returns `true` regardless of
+/// the tie-break result so the pair can still link.
+///
+/// Pure function (no BLE/clock access) so the fallback timing is directly
+/// unit-testable without a platform-channel fake, matching [ScanPacer]'s
+/// split of decision logic from I/O.
+bool shouldDialNow({
+  required int localToken,
+  required int remoteToken,
+  required int? waitingSinceMs,
+  required int nowMs,
+  Duration fallbackDelay = const Duration(seconds: 15),
+}) {
+  if (shouldInitiate(localToken, remoteToken)) return true;
+  if (waitingSinceMs == null) return false;
+  return nowMs - waitingSinceMs >= fallbackDelay.inMilliseconds;
+}
