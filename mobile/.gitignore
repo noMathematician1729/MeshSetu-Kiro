@@ -2,3 +2,4 @@
 .packages
 build/
 .flutter-plugins-dependencies
+mobile/pubspec.lock

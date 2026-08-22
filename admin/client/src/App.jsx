@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { authToken, getEvents, getPublicEvent, getVoice, login, openStream, setStatus, setToken } from './api'
+import { authToken, getEvents, getNearbyAuthorities, getPublicEvent, getVoice, login, openStream, setStatus, setToken } from './api'
 import MarketingApp from './marketing/App.jsx'
 import marketingStyles from './marketing/styles.css?inline'
 
@@ -9,6 +9,18 @@ const sortEvents = events => [...events].sort((a, b) => (priorityRank[a.priority
 const statusLabels = { new: 'new', acknowledged: 'acknowledged', dispatched: 'dispatched', resolved: 'resolved' }
 const emergencyLabels = { general: 'General SOS', fire: 'Fire emergency', crime: 'Crime alert', kidnap: 'Kidnap alert', medical: 'Medical emergency', natural_disaster: 'Natural disaster' }
 const emergencyType = event => emergencyLabels[event?.hazards?.[0]] || emergencyLabels[event?.incident_type] || event?.incident_type || 'Emergency SOS'
+const authorityContactsFor = event => {
+  const type = event?.triage?.emergency_type || event?.hazards?.[0] || event?.incident_type || 'general'
+  const authorities = {
+    fire: { name: 'Local Fire & Rescue', role: 'Fire-response dispatch' },
+    crime: { name: 'Local Police / Security', role: 'Police-response dispatch' },
+    kidnap: { name: 'Local Police / Security', role: 'Threat-to-life response' },
+    medical: { name: 'Local Health / Ambulance', role: 'Medical-response dispatch' },
+    natural_disaster: { name: 'Local Disaster Management', role: 'Disaster-response dispatch' },
+    general: { name: 'Local Emergency Response', role: 'Emergency classification and dispatch' },
+  }
+  return { type, authority: authorities[type] || authorities.general }
+}
 const controlRoomPath = '/control-room'
 const formatTimestamp = value => { const date = Number(value) ? new Date(Number(value)) : null; return date && !Number.isNaN(date.valueOf()) ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date) : 'Time unavailable' }
 const mapUrlFor = (latitude, longitude) => {
@@ -78,6 +90,7 @@ function Detail({ event, onStatus, onPlay, voiceUrl }) {
     <div className="transcript"><span className="eyebrow">SIGNAL TRANSCRIPT</span><p>“{event.transcript || 'No transcript attached to this signal.'}”</p></div>
     <div className="facts"><Fact label="Emergency type" value={emergencyType(event)} /><Fact label="Reporter" value={event.reporter_name ? `${event.reporter_name}${event.reporter_phone ? ` · ${event.reporter_phone}` : ''}` : 'Unavailable'} /><Fact label="Emergency contact" value={event.reporter_primary_contact || 'Unavailable'} /><Fact label="Blood group" value={event.reporter_blood_group || 'Unavailable'} /><Fact label="Received" value={formatTimestamp(event.received_at_ms || event.created_at_ms)} /><Fact label="Relay hops" value={event.hops ?? '—'} /><Fact label="Origin latency" value={event.relay_latency_ms ? `${event.relay_latency_ms} ms` : '—'} /><Fact label="Voice evidence" value={event.audio_state || 'n/a'} /><Fact label="Triage confidence" value={event.triage_confidence == null ? 'unavailable' : `${Math.round(event.triage_confidence * 100)}%`} /><Fact label="Triage score" value={event.triage?.score == null ? 'not run' : `${event.triage.score}/100`} /><Fact label="Recommended route" value={event.triage?.route?.primary || 'not run'} /><Fact label="Location" value={mapUrlFor(event.latitude, event.longitude) ? `${Number(event.latitude).toFixed(3)}, ${Number(event.longitude).toFixed(3)}` : 'Unavailable'} /><Fact label="Packet hash" value={event.packet_sha256 ? event.packet_sha256.slice(0, 12) : '—'} /></div>
     <IncidentMap latitude={event.latitude} longitude={event.longitude} />
+    <AuthorityContacts event={event} />
     {event.audio_state === 'complete' && <div className="audio"><button onClick={onPlay}>▶ Play verified voice</button>{voiceUrl && <audio controls src={voiceUrl} />}</div>}
     <div className="actions"><span className="eyebrow">OPERATOR RESPONSE STATE</span><div>{Object.keys(statusLabels).map(status => <button className={event.status === status ? 'current' : ''} key={status} onClick={() => onStatus(status)}>{status}</button>)}</div>{event.triage && <small className="triage-result">Triage {event.triage.score}/100 · {event.triage.route?.instruction}</small>}</div>
     <div className="detail-foot">⌁ authenticated relay object <span>Human authority remains final</span></div>
@@ -87,6 +100,20 @@ function IncidentMap({ latitude, longitude }) {
   const mapUrl = mapUrlFor(latitude, longitude)
   if (!mapUrl) return null
   return <section className="incident-map"><div className="incident-map-head"><span className="eyebrow">REPORTED LOCATION</span><span>{Number(latitude).toFixed(5)}, {Number(longitude).toFixed(5)}</span></div><iframe title="Reported SOS location" src={mapUrl} loading="lazy" referrerPolicy="no-referrer" /></section>
+}
+function AuthorityContacts({ event }) {
+  const { type, authority } = authorityContactsFor(event)
+  const latitude = Number(event.latitude); const longitude = Number(event.longitude)
+  const hasLocation = Number.isFinite(latitude) && Number.isFinite(longitude)
+  const [state, setState] = useState({ loading: hasLocation, authorities: [], error: '' })
+  useEffect(() => {
+    if (!hasLocation) { setState({ loading: false, authorities: [], error: 'No GPS location was attached to this SOS.' }); return }
+    let active = true
+    setState({ loading: true, authorities: [], error: '' })
+    getNearbyAuthorities({ latitude, longitude, type }).then(authorities => { if (active) setState({ loading: false, authorities, error: '' }) }).catch(error => { if (active) setState({ loading: false, authorities: [], error: error.message }) })
+    return () => { active = false }
+  }, [event.event_id, latitude, longitude, type])
+  return <section className="authority-contacts"><div className="authority-contacts-head"><div><span className="eyebrow">NEAREST LOCAL AUTHORITY</span><h4>{authority.name}</h4></div>{hasLocation && <a href={`https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`} target="_blank" rel="noreferrer">Incident map ↗</a>}</div><p>{authority.role} for this {emergencyLabels[type] || 'SOS'}. Results are ordered by distance and only show facilities with a published phone number.</p>{state.loading && <div className="authority-empty">Finding nearby published contacts…</div>}{state.error && <div className="authority-empty">{state.error}</div>}{!state.loading && !state.error && !state.authorities.length && <div className="authority-empty">No nearby authority with a published phone number was found.</div>}<div className="authority-list">{state.authorities.map(item => <div className="authority-contact" key={`${item.name}-${item.phone}`}><div><b>{item.name}</b><small>{item.address || 'Address not published'} · {(item.distance_m / 1000).toFixed(item.distance_m < 10_000 ? 1 : 0)} km away</small></div><a href={`tel:${item.phone.replace(/[^\d+]/g, '')}`}>{item.phone}</a></div>)}</div></section>
 }
 function Fact({ label, value }) { return <div><span>{label}</span><b>{value}</b></div> }
 function SosAlertPopup({ alert, onDismiss, onSelect }) {

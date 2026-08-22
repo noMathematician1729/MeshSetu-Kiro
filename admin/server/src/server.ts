@@ -8,6 +8,7 @@ import { decryptPacket } from './protocol/mesh.js'
 import { createHash } from 'node:crypto'
 import { store } from './store.js'
 import { triageSos } from './triage.js'
+import { findNearbyAuthorities } from './authorities.js'
 import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
 import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
 
@@ -247,6 +248,11 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
 })
 
 app.get('/v1/sos', bearer, async (_req, res) => res.json(await store.all()))
+app.get('/v1/authorities/nearby', bearer, async (req, res) => {
+  const query = z.object({ latitude: z.coerce.number().min(-90).max(90), longitude: z.coerce.number().min(-180).max(180), type: z.enum(['general', 'fire', 'crime', 'kidnap', 'medical', 'natural_disaster']) }).safeParse(req.query)
+  if (!query.success) return res.status(400).json({ error: 'valid latitude, longitude, and SOS type required' })
+  try { res.json(await findNearbyAuthorities(query.data.latitude, query.data.longitude, query.data.type)) } catch (error: any) { res.status(503).json({ error: error?.message || 'local authority directory unavailable' }) }
+})
 app.get('/v1/sos/:eventId', bearer, async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event) return res.status(404).json({ error: 'not found' }); res.json(event) })
 app.patch('/v1/sos/:eventId/status', bearer, async (req, res) => { const body = z.object({ status: z.enum(['new', 'acknowledged', 'dispatched', 'resolved']) }).safeParse(req.body); if (!body.success) return res.status(400).json({ error: 'invalid status' }); const event = await store.status(String(req.params.eventId), body.data.status); if (!event) return res.status(404).json({ error: 'not found' }); await fanOutIncident(event, `status:${body.data.status}`); emit('incident', event); res.json(event) })
 app.get('/v1/sos/:eventId/voice', bearer, async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event?.audio_bytes) return res.status(404).end(); res.type(event.audio_content_type || 'audio/ogg'); res.send(event.audio_bytes) })
