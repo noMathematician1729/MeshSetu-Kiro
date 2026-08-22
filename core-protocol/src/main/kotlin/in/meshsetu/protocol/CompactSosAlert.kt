@@ -20,6 +20,7 @@ data class CompactSosAlert(
 
     fun isActive(): Boolean = flags.toInt() and FLAG_SOS_ACTIVE != 0
     fun isMedical(): Boolean = flags.toInt() and FLAG_MEDICAL_EMERGENCY != 0
+    fun emergencyType(): EmergencyType = EmergencyType.fromFlags(flags.toInt())
     fun deduplicationKey(): String = reporterUid.joinToString("") { "%02x".format(it.toInt() and 0xff) } + ":${sequence.toInt()}"
 
     companion object {
@@ -28,6 +29,22 @@ data class CompactSosAlert(
         const val VERSION: UByte = 2u
         const val FLAG_SOS_ACTIVE = 1 shl 0
         const val FLAG_MEDICAL_EMERGENCY = 1 shl 1
+        const val EMERGENCY_TYPE_MASK = 0x3c
+
+        fun flagsFor(type: EmergencyType): UByte =
+            (FLAG_SOS_ACTIVE or type.flagBits or if (type == EmergencyType.MEDICAL) FLAG_MEDICAL_EMERGENCY else 0).toUByte()
+    }
+}
+
+/** CEAL-compatible emergency category carried in compact SOS flags bits 2-5. */
+enum class EmergencyType(val code: Int) {
+    GENERAL(0), FIRE(1), CRIME(2), KIDNAP(3), MEDICAL(4), NATURAL_DISASTER(5);
+
+    val flagBits: Int get() = (code and 0x0f) shl 2
+
+    companion object {
+        fun fromFlags(flags: Int): EmergencyType =
+            entries.firstOrNull { it.code == ((flags shr 2) and 0x0f) } ?: GENERAL
     }
 }
 

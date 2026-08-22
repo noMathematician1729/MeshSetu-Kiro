@@ -66,7 +66,8 @@ describe('SOS recipient notifications', () => {
     expect(notifications[0].public_url).toContain(`/sos/${encodeURIComponent(eventId)}`)
     const detail: any = await (await fetch(`${base}/v1/public/sos/${encodeURIComponent(eventId)}`)).json()
     expect(detail.reporter_name).toBe('SOS Sender')
-    expect(detail.incident_type).toBe('ceal_compact_sos')
+    expect(detail.incident_type).toBe('general')
+    expect(detail.hazards).toEqual(['general'])
     const smsDeliveries = await store.smsDeliveriesForEvent(eventId)
     expect(smsDeliveries).toMatchObject([{ recipient_phone: '+15550002', state: 'sent', provider_message_sid: 'SM-test-1' }])
     expect(twilioRequests).toHaveLength(1)
@@ -143,5 +144,14 @@ describe('compact SOS resolved from an advertised reporter UID', () => {
     expect(response.status).toBe(200)
     expect(payload.resolved).toBe(false)
     expect(payload.event.transcript).toContain('unregistered')
+  })
+
+  it('maps compact flags to the CEAL emergency category in hazards', async () => {
+    const response = await fetch(`${base}/v1/gateway/ceal-sos`, { method: 'POST', headers: gatewayHeaders, body: JSON.stringify({ reporter_uid: 'sender-uid', sequence: 31, site_id: 'demo-site', flags: 0x05 }) })
+    const payload: any = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(payload.event.incident_type).toBe('fire')
+    expect(payload.event.hazards).toEqual(['fire'])
   })
 })

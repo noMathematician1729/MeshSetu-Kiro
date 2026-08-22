@@ -94,7 +94,7 @@ Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
       title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
       body: alert.isTest
           ? 'Nearby BLE transport test received.'
-          : 'Nearby emergency alert received. Details may follow.',
+          : '${alert.emergencyType.label} received. Details may follow.',
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
           _sosNotificationChannelId,
@@ -287,6 +287,7 @@ class _MeshEventTaskHandler extends TaskHandler {
     if (data is Map && data['broadcast_ceal_sos'] == true) {
       final originId = data['originId'] as int?;
       final reporterUid = data['reporterUid'] as String?;
+      final flags = data['flags'] as int? ?? MeshSosAdvertisement.alertFlag;
       final controller = _controller;
       if (controller != null) {
         unawaited(
@@ -294,6 +295,7 @@ class _MeshEventTaskHandler extends TaskHandler {
             isTest: false,
             originId: originId,
             reporterUidHex: reporterUid,
+            emergencyType: SosEmergencyType.fromFlags(flags),
           ),
         );
         FlutterForegroundTask.sendDataToMain(const {
@@ -364,12 +366,11 @@ class _MeshEventTaskHandler extends TaskHandler {
       );
       if (envelope.payloadType == PayloadType.structuredSos) {
         String reporterUid = '';
+        var emergencyType = SosEmergencyType.general;
         try {
-          reporterUid =
-              StructuredSosPayload.decode(
-                envelope.payload,
-              ).reporter?.reporterUid ??
-              '';
+          final sos = StructuredSosPayload.decode(envelope.payload);
+          reporterUid = sos.reporter?.reporterUid ?? '';
+          emergencyType = SosEmergencyType.fromHazards(sos.hazards);
         } catch (_) {
           // A non-identity structured payload still broadcasts a routing alert.
         }
@@ -378,6 +379,7 @@ class _MeshEventTaskHandler extends TaskHandler {
             originId: envelope.originEphemeralId,
             sequence: envelope.objectId & 0xffff,
             reporterUidHex: reporterUid,
+            emergencyType: emergencyType,
           ),
         );
       }
@@ -414,6 +416,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         'status': 'compact_sos_received',
         'originId': alert.originId,
         'sequence': alert.sequence,
+        'flags': alert.flags,
         'siteFingerprint': alert.siteFingerprint,
         'dedupeKey': alert.dedupeKey,
         'reporterUid': alert.reporterUidHex,
@@ -763,6 +766,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
         siteId: site?.siteId ?? MeshEventController.demoSiteId,
+        flags: data['flags'] as int? ?? MeshSosAdvertisement.alertFlag,
         originId: originId,
         sequence: sequence,
       );
@@ -865,7 +869,16 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     FlutterForegroundTask.sendDataToTask('send_test_sos');
   }
 
-  Future<void> _confirmAndSendSosPacket() async {
+  Future<void> _chooseAndSendSosPacket() async {
+    final emergencyType = await Navigator.of(context).push<SosEmergencyType>(
+      MaterialPageRoute(builder: (_) => const _SosTypeSelectionScreen()),
+    );
+    if (emergencyType != null && mounted) {
+      await _confirmAndSendSosPacket(emergencyType);
+    }
+  }
+
+  Future<void> _confirmAndSendSosPacket(SosEmergencyType emergencyType) async {
     if (_sosPacketSending) return;
     final profile = await ref.read(onboardingRepositoryProvider).load();
     if (!mounted) return;
@@ -880,10 +893,10 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       barrierDismissible: false,
       builder: (_) => const _SosCountdownDialog(),
     );
-    if (confirmed == true) await _sendSosPacket();
+    if (confirmed == true) await _sendSosPacket(emergencyType);
   }
 
-  Future<void> _sendSosPacket() async {
+  Future<void> _sendSosPacket(SosEmergencyType emergencyType) async {
     setState(() {
       _sosPacketSending = true;
       _status = 'MeshSetu\nPreparing emergency SOS packet…';
@@ -899,6 +912,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               : 'public',
           inputMode: InputMode.tap,
           priority: PriorityBand.p0Critical,
+          emergencyType: emergencyType,
         ),
       );
       final permission = await Permission.locationWhenInUse.request();
@@ -912,10 +926,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       }
       await repo.finalizeAndEnqueue(eventId);
       if (mounted) {
+        final adminForwardingConfigured =
+            ref.read(gatewayEnabledProvider) &&
+            ref.read(gatewayUrlProvider).isNotEmpty &&
+            ref.read(gatewayDemoKeyProvider).isNotEmpty;
         setState(() {
           _status =
               'MeshSetu\nSOS packet queued · ${locationResult.status}\n'
-              'A real BLE emergency alert will broadcast on mesh submission';
+              '${emergencyType.label} will broadcast on mesh submission'
+              '${adminForwardingConfigured ? '\nAdmin forwarding pending…' : '\nMesh-only: configure admin forwarding to relay online'}';
         });
       }
     } catch (error) {
@@ -964,6 +983,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         'broadcast_ceal_sos': true,
         'originId': originId,
         'reporterUid': profile.reporterUid,
+        'flags': MeshSosAdvertisement.flagsFor(SosEmergencyType.general),
       });
       // Also forward to the admin backend for UID→profile resolution.
       // Construct the bridge directly from provider state rather than relying
@@ -978,6 +998,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               (await ref.read(joinRepositoryProvider).activeManifest())
                   ?.siteId ??
               MeshEventController.demoSiteId,
+          flags: MeshSosAdvertisement.flagsFor(SosEmergencyType.general),
           originId: originId,
           latitude: location?.latitude,
           longitude: location?.longitude,
@@ -1120,6 +1141,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     _bridgeClient ??=
         ref.read(meshBridgeClientProvider) ??
         MeshBridgeClient(ref.read(databaseProvider));
+    _bridgeClient!.onOriginForward = _onOriginForward;
     ref.read(meshBridgeClientProvider.notifier).state = _bridgeClient;
     if (!_bridgeClientSiteStarted) {
       final localEphemeralId = _foregroundEphemeralId;
@@ -1133,6 +1155,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _bridgeClient!.setSiteId(site.siteId);
     }
     _applyGatewaySettings();
+  }
+
+  void _onOriginForward(MeshEnvelope envelope, Object? error) {
+    if (!mounted || envelope.payloadType != PayloadType.structuredSos) return;
+    setState(() {
+      _status = error == null
+          ? 'MeshSetu\nP0 SOS sent to mesh + admin dashboard ✓'
+          : 'MeshSetu\nP0 SOS sent to mesh · admin forwarding unavailable';
+    });
   }
 
   Future<void> _saveActiveMeshConfiguration() async {
@@ -1329,7 +1360,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               const SizedBox(height: 12),
               FilledButton.icon(
                 onPressed: _eventModeActive && !_sosPacketSending
-                    ? _confirmAndSendSosPacket
+                    ? _chooseAndSendSosPacket
                     : null,
                 icon: const Icon(Icons.sos),
                 style: FilledButton.styleFrom(backgroundColor: Colors.red),
@@ -1482,6 +1513,42 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       ),
     );
   }
+}
+
+class _SosTypeSelectionScreen extends StatelessWidget {
+  const _SosTypeSelectionScreen();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Choose emergency type')),
+    body: ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text(
+          'This will be sent as a P0 SOS and encoded in the compact BLE flags.',
+        ),
+        const SizedBox(height: 16),
+        for (final type in SosEmergencyType.values)
+          Card(
+            child: ListTile(
+              leading: Icon(_iconFor(type), color: Colors.red),
+              title: Text(type.label),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).pop(type),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  IconData _iconFor(SosEmergencyType type) => switch (type) {
+    SosEmergencyType.general => Icons.sos,
+    SosEmergencyType.fire => Icons.local_fire_department,
+    SosEmergencyType.crime => Icons.gavel,
+    SosEmergencyType.kidnap => Icons.person_search,
+    SosEmergencyType.medical => Icons.medical_services,
+    SosEmergencyType.naturalDisaster => Icons.tsunami,
+  };
 }
 
 class _SosCountdownDialog extends StatefulWidget {

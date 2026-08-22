@@ -34,4 +34,22 @@ void main() {
     expect(MeshSosAdvertisement.decode(corrupt), isNull);
     expect(MeshSosAdvertisement.decode(exhausted), isNull);
   });
+
+  test('encodes CEAL emergency types in compact flags', () {
+    final flags = MeshSosAdvertisement.flagsFor(SosEmergencyType.fire);
+    final alert = MeshSosAdvertisement(
+      siteFingerprint: 1,
+      originId: 2,
+      sequence: 3,
+      flags: flags,
+      ttl: 4,
+    );
+
+    expect(flags, 0x05);
+    expect(
+      MeshSosAdvertisement.decode(alert.encode())!.emergencyType,
+      SosEmergencyType.fire,
+    );
+    expect(MeshSosAdvertisement.flagsFor(SosEmergencyType.medical), 0x13);
+  });
 }

@@ -36,6 +36,14 @@ class CompactSosAlertTest {
         assertEquals("0123456789ab:42", decoded.deduplicationKey())
     }
 
+    @Test fun `encodes CEAL emergency types in flags bits two through five`() {
+        val flags = CompactSosAlert.flagsFor(EmergencyType.FIRE)
+
+        assertEquals(0b00000101u.toUByte(), flags)
+        assertEquals(EmergencyType.FIRE, CompactSosAlert(flags, alert.reporterUid, 1u).emergencyType())
+        assertEquals(EmergencyType.NATURAL_DISASTER, CompactSosAlert(0b00010101u.toUByte(), alert.reporterUid, 1u).emergencyType())
+    }
+
     @Test fun `rejects corrupted packets and unsupported versions`() {
         val corrupted = CompactSosAlertCodec.encode(alert).also { it[4] = (it[4].toInt() xor 1).toByte() }
         val unsupported = CompactSosAlertCodec.encode(alert).also { it[0] = 1 }
