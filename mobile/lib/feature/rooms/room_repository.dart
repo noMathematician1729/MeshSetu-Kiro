@@ -109,10 +109,20 @@ class RoomMessage {
 /// a message is allowed onto the durable outbox (Bible §10.2/§10.3 — SOS
 /// itself never routes through here, it transcends Room ACL).
 class RoomRepository {
-  RoomRepository(this._db, {required this.siteId});
+  RoomRepository(
+    this._db, {
+    required this.siteId,
+    /// Optional async resolver for the local user's display name. When
+    /// provided it is called once per [sendMessage] and the result is encoded
+    /// into the v2 packet so recipients can show a real sender name.
+    /// A missing or null result is silently accepted — the packet is still
+    /// sent, just with an empty name field that falls back to the peer id.
+    Future<String?> Function()? localDisplayName,
+  }) : _localDisplayName = localDisplayName;
 
   final MeshDatabase _db;
   final String siteId;
+  final Future<String?> Function()? _localDisplayName;
 
   /// A message that [RoomMessageDispatcher] is about to attempt over the
   /// live internet socket. Not yet eligible for the mesh outbox drain
@@ -145,11 +155,22 @@ class RoomRepository {
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     final eventId = _uuid.v4();
+    // Resolve sender name; never let a failure here block the send.
+    String? senderName;
+    try {
+      final rawName = await _localDisplayName?.call();
+      if (rawName != null && rawName.trim().isNotEmpty) {
+        senderName = rawName.trim();
+      }
+    } catch (_) {
+      // Profile load failure — send without a name rather than blocking.
+    }
     final packet = RoomMessagePacketCodec.encode(
       siteId: siteId,
       roomId: policy.roomId,
       eventId: eventId,
       text: message,
+      senderName: senderName,
     );
     await _db
         .into(_db.outboxEvents)
@@ -426,18 +447,29 @@ class RoomRepository {
 
   RoomMessage? _decodeMessage(InboxEvent row) {
     try {
-      final text = RoomMessagePacketCodec.isEncoded(row.payload)
-          ? RoomMessagePacketCodec.decode(
-              siteId: row.siteId,
-              roomId: row.roomId,
-              eventId: row.eventId,
-              packet: row.payload,
-            )
-          : utf8.decode(row.payload, allowMalformed: false);
+      final String text;
+      String? senderName;
+      if (RoomMessagePacketCodec.isEncoded(row.payload)) {
+        final content = RoomMessagePacketCodec.decode(
+          siteId: row.siteId,
+          roomId: row.roomId,
+          eventId: row.eventId,
+          packet: row.payload,
+        );
+        text = content.text;
+        // Prefer the authenticated sender name from the packet; fall back to
+        // the BLE hop peer id (v1 packets and old builds will hit this path).
+        senderName = (content.senderName?.isNotEmpty ?? false)
+            ? content.senderName
+            : row.peerId;
+      } else {
+        text = utf8.decode(row.payload, allowMalformed: false);
+        senderName = row.peerId;
+      }
       return RoomMessage(
         eventId: row.eventId,
         text: text,
-        fromPeerId: row.peerId,
+        fromPeerId: senderName,
         atMs: row.receivedAtMs,
         mine: false,
       );

@@ -4,13 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
 import 'app/event_mode_screen.dart';
 import 'app/notification_router.dart';
 import 'app/sos_incident_navigator.dart';
 import 'core/ble/mesh_gatt.dart';
 import 'core/ble/permission_gate.dart';
 import 'feature/onboarding/onboarding_screen.dart';
+import 'feature/rooms/rooms_screen.dart';
 import 'feature/sos/incident_detail_screen.dart';
 
 /// Port of `in.meshsetu.app.MainActivity` (Kotlin `app/` module) — the
@@ -54,21 +54,34 @@ class MeshSetuApp extends StatelessWidget {
       navigatorKey: navigatorKey,
       home: enforceOnboarding ? OnboardingGate(child: eventMode) : eventMode,
       onGenerateRoute: (settings) {
-        if (settings.name != '/incident' || settings.arguments is! Map) {
-          return null;
-        }
+        if (settings.arguments is! Map) return null;
         final args = (settings.arguments as Map).cast<String, Object?>();
-        final siteId = args['siteId'] as String?;
-        final eventId = args['eventId'] as String?;
-        final objectId = args['objectId'] as int?;
-        if (siteId == null || eventId == null || objectId == null) return null;
-        return MaterialPageRoute(
-          builder: (_) => IncidentDetailScreen(
-            siteId: siteId,
-            eventId: eventId,
-            objectId: objectId,
-          ),
-        );
+
+        if (settings.name == '/rooms') {
+          final roomId = args['roomId'] as String?;
+          if (roomId == null || roomId.isEmpty) return null;
+          return MaterialPageRoute(
+            builder: (_) => RoomsScreen(initialRoomId: roomId),
+          );
+        }
+
+        if (settings.name == '/incident') {
+          final siteId = args['siteId'] as String?;
+          final eventId = args['eventId'] as String?;
+          final objectId = args['objectId'] as int?;
+          if (siteId == null || eventId == null || objectId == null) {
+            return null;
+          }
+          return MaterialPageRoute(
+            builder: (_) => IncidentDetailScreen(
+              siteId: siteId,
+              eventId: eventId,
+              objectId: objectId,
+            ),
+          );
+        }
+
+        return null;
       },
     );
   }

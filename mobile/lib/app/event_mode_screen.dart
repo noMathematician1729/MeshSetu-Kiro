@@ -33,6 +33,7 @@ import 'event_mode_launcher.dart';
 import 'incident_summary.dart';
 import 'notification_router.dart';
 import 'providers.dart';
+import 'room_message_notifications.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
 
@@ -112,6 +113,11 @@ class _MeshEventTaskHandler extends TaskHandler {
   StreamSubscription<ReceivedObject>? _incomingSubscription;
   int _notificationGeneration = 0;
   final Set<String> _compactAlertKeys = {};
+
+  /// RoomId of the room chat screen currently visible to the user, or null.
+  /// Set via the 'active_room' message from [RoomChatScreen]. When non-null,
+  /// notifications for that room are suppressed (Task 5).
+  String? _activeRoomId;
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -200,6 +206,8 @@ class _MeshEventTaskHandler extends TaskHandler {
         });
         if (received.envelope.payloadType == PayloadType.structuredSos) {
           unawaited(_announceReceivedSos(received));
+        } else if (received.envelope.payloadType == PayloadType.roomMessage) {
+          unawaited(_announceReceivedRoomMessage(received));
         }
       });
       controller.setDebugLossInjection(_debugLossEnabled);
@@ -263,6 +271,13 @@ class _MeshEventTaskHandler extends TaskHandler {
           'localEphemeralId': controller.localEphemeralId,
         });
       }
+      return;
+    }
+    if (data is Map && data.containsKey('active_room')) {
+      // null means the user left the room screen; a non-null string means they
+      // are viewing that room. Notifications for the active room are suppressed.
+      final value = data['active_room'];
+      _activeRoomId = value is String && value.isNotEmpty ? value : null;
       return;
     }
     if (data is Map && data['debugLoss'] is bool) {
@@ -398,6 +413,22 @@ class _MeshEventTaskHandler extends TaskHandler {
         'reason': '$error',
       });
     }
+  }
+
+  Future<void> _announceReceivedRoomMessage(ReceivedObject received) async {
+    final alert = roomMessageAlertFor(
+      received: received,
+      localEphemeralId: _controller?.localEphemeralId,
+      activeRoomId: _activeRoomId,
+    );
+    if (alert == null) return;
+    await RoomMessageNotifications.show(
+      alert: alert,
+      payload: RoomMessageNotifications.roomPayload(
+        siteId: alert.siteId,
+        roomId: alert.roomId,
+      ),
+    );
   }
 
   void _announceCompactSos(MeshSosAdvertisement alert) {
@@ -1464,12 +1495,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       continue;
                     }
                     try {
-                      decodedText = RoomMessagePacketCodec.decode(
+                      final content = RoomMessagePacketCodec.decode(
                         siteId: row.siteId,
                         roomId: row.roomId,
                         eventId: row.eventId,
                         packet: row.payload,
                       );
+                      decodedText = content.text;
                       roomMessage = row;
                     } catch (_) {
                       // Tampered or incomplete room packets stay hidden.

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/active_room_reporter.dart';
 import '../../app/event_mode_screen.dart' show meshEventTaskCallback;
 import '../../app/mesh_bridge_client.dart' show MeshStatus;
 import '../../app/providers.dart';
@@ -27,18 +28,40 @@ class RoomChatScreen extends ConsumerStatefulWidget {
   ConsumerState<RoomChatScreen> createState() => _RoomChatScreenState();
 }
 
-class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
+class _RoomChatScreenState extends ConsumerState<RoomChatScreen>
+    with WidgetsBindingObserver {
   final _textController = TextEditingController();
   RoomPresenceSocket? _liveTransport;
   String _liveStatus = 'Connecting…';
   String? _error;
   var _startingEventMode = false;
+  late final ActiveRoomReporter _activeRoomReporter;
 
   @override
   void initState() {
     super.initState();
+    _activeRoomReporter = ActiveRoomReporter(roomId: widget.roomId);
+    WidgetsBinding.instance.addObserver(this);
+    // Report this room as active immediately — any notifications for it
+    // that arrive while the screen is mounted and foregrounded are suppressed.
+    _activeRoomReporter.reportActive();
     unawaited(_connectLiveTransport());
     unawaited(_announcePresence());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        // App returned to foreground with this screen still on top.
+        _activeRoomReporter.reportActive();
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        // App moved to background — notifications should fire.
+        _activeRoomReporter.reportInactive();
+    }
   }
 
   /// Closes the same presence gap as [RoomLobbyScreen]: entering chat
@@ -107,6 +130,9 @@ class _RoomChatScreenState extends ConsumerState<RoomChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // Room is no longer visible — re-enable notifications for it.
+    _activeRoomReporter.reportInactive();
     _textController.dispose();
     unawaited(_liveTransport?.dispose());
     super.dispose();

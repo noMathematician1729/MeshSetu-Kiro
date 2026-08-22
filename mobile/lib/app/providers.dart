@@ -44,7 +44,14 @@ void refreshActiveSite(WidgetRef ref) =>
 final userRolesProvider = StateProvider<Set<String>>((ref) => const {'public'});
 
 final roomRepositoryProvider = Provider.family<RoomRepository, String>(
-  (ref, siteId) => RoomRepository(ref.watch(databaseProvider), siteId: siteId),
+  (ref, siteId) => RoomRepository(
+    ref.watch(databaseProvider),
+    siteId: siteId,
+    localDisplayName: () async {
+      final profile = await ref.read(onboardingRepositoryProvider).load();
+      return profile?.name;
+    },
+  ),
 );
 
 final onboardingRepositoryProvider = Provider<OnboardingRepository>((ref) {
