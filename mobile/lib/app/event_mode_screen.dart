@@ -634,7 +634,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _lastReceived = 'none';
           _lastConnection = 'none';
           _advertisingStatus = 'unknown';
-          _status = 'MeshSetu\nEvent mode is off';
+          // Preserve an error message already set by the 'error' case so
+          // the user can read why event mode stopped instead of seeing a
+          // generic "Event mode is off".
+          if (_status == 'MeshSetu\nEvent mode active\nBLE relay service running' ||
+              _status == 'MeshSetu\nStarting BLE relay service' ||
+              _status == 'MeshSetu\nEvent mode is off' ||
+              !_status.contains('\n')) {
+            _status = 'MeshSetu\nEvent mode is off';
+          }
         });
         unawaited(_bridgeClient?.dispose());
         _bridgeClient = null;
@@ -701,6 +709,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
               } else if (kind == 'advertising_verified' ||
                   kind == 'advertising_reasserted') {
                 _advertisingStatus = 'verified';
+              } else if (kind == 'advertising_degraded') {
+                _advertisingStatus = 'scan-only (advertising unavailable)';
               } else if (kind == 'advertising_failed' ||
                   kind == 'advertising_reassert_failed') {
                 _advertisingStatus =

@@ -12,7 +12,6 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -61,10 +60,13 @@
                 android:resource="@xml/emergency_gesture_accessibility_service" />
         </service>
 
-        <!-- flutter_foreground_task's service; do not change the name. -->
+        <!-- flutter_foreground_task's service; do not change the name.
+             connectedDevice only: on Android 15+ the dataSync type carries a
+             6-hour daily timeout that connectedDevice does not, so adding it
+             would shorten the maximum relay session. -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="connectedDevice|dataSync"
+            android:foregroundServiceType="connectedDevice"
             android:exported="false" />
     </application>
     <!-- Required to query activities that can process text, see:

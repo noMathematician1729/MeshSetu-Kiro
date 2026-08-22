@@ -24,13 +24,21 @@ abstract final class MeshAdvertiser {
   static int _advertisingGeneration = 0;
   static DiscoveryMetadata? _activeMetadata;
 
-  /// Whether [start] has completed successfully for the current advertising
-  /// generation. This is stronger than an intent flag: [start] verifies that
-  /// the platform reports [PeripheralAdvertisingState.advertising] before
-  /// exposing the metadata as active.
-  static bool get isIntendedToAdvertise => _activeMetadata != null;
+  /// The metadata this advertiser has been asked to broadcast, set on every
+  /// [start] call regardless of whether the platform confirms advertising.
+  /// [reassert] uses this so it can retry after an initial failed [start],
+  /// not just after a previously verified session.
+  static DiscoveryMetadata? _desiredMetadata;
+
+  /// True once [start] has been called with metadata (intent), even if the
+  /// platform has not yet confirmed [PeripheralAdvertisingState.advertising].
+  /// [reassert] can attempt a first-time start when this is true and
+  /// [_activeMetadata] is still null.
+  static bool get isIntendedToAdvertise =>
+      _activeMetadata != null || _desiredMetadata != null;
 
   static Future<void> start(DiscoveryMetadata metadata) async {
+    _desiredMetadata = metadata;
     final previousMetadata = _activeMetadata;
     _advertisingGeneration++;
     try {
@@ -67,7 +75,10 @@ abstract final class MeshAdvertiser {
   }
 
   static Future<PeripheralAdvertisingState> _waitForAdvertising() async {
-    for (var attempt = 0; attempt < 20; attempt++) {
+    // 60 attempts × 50 ms = 3 seconds. OEM BLE stacks (especially on first
+    // use after boot) can take 1–2 s to initialise the peripheral role; the
+    // original 1-second window was too tight and caused spurious failures.
+    for (var attempt = 0; attempt < 60; attempt++) {
       final state = await UniversalBlePeripheral.getAdvertisingState();
       if (state == PeripheralAdvertisingState.advertising ||
           state == PeripheralAdvertisingState.error) {
@@ -78,12 +89,16 @@ abstract final class MeshAdvertiser {
     return UniversalBlePeripheral.getAdvertisingState();
   }
 
-  /// Re-issues [start] with the last-known discovery metadata. Native Android
-  /// rejects a second start while the previous advertiser is active, so the
-  /// reassert path explicitly reaches idle before starting again.
-  /// A no-op if advertising has never been verified or has since been stopped.
+  /// Re-issues [start] with the last-known or desired discovery metadata.
+  /// Uses [_activeMetadata] (previously verified) when available, otherwise
+  /// falls back to [_desiredMetadata] so the first-ever start can be retried
+  /// after an initial failure. Native Android rejects a second start while
+  /// the previous advertiser is active, so the reassert path explicitly
+  /// reaches idle before starting again.
+  /// A no-op if neither [_activeMetadata] nor [_desiredMetadata] is set
+  /// (i.e. [start] has never been called, or [stop] has been called).
   static Future<void> reassert() async {
-    final metadata = _activeMetadata;
+    final metadata = _activeMetadata ?? _desiredMetadata;
     if (metadata == null) return;
     await UniversalBlePeripheral.stopAdvertising();
     await _waitForIdle();
@@ -108,6 +123,7 @@ abstract final class MeshAdvertiser {
   static Future<void> stop() async {
     _advertisingGeneration++;
     _activeMetadata = null;
+    _desiredMetadata = null;
     await UniversalBlePeripheral.stopAdvertising();
   }
 

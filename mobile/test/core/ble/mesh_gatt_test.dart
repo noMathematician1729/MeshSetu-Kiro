@@ -134,6 +134,12 @@ void main() {
       ),
       throwsStateError,
     );
+    // The intent (desired metadata) is recorded even though the platform
+    // rejected the start, so reassert() can retry when the radio recovers.
+    // isIntendedToAdvertise is therefore true after a failed start.
+    expect(MeshAdvertiser.isIntendedToAdvertise, isTrue);
+    // Only stop() clears the intent.
+    await MeshAdvertiser.stop();
     expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
   });
 
@@ -226,4 +232,57 @@ void main() {
       expect(result, isFalse);
     });
   });
+
+  test(
+    '_desiredMetadata allows reassert to retry after a failed initial start',
+    () async {
+      // A peripheral that never reports advertising — simulates a slow or
+      // broken OEM BLE stack on first use.
+      final peripheral = _AdvertisingPeripheral()..reportAdvertising = false;
+      UniversalBlePeripheral.setInstance(peripheral);
+      addTearDown(
+        () => UniversalBlePeripheral.setInstance(
+          UniversalBlePeripheralUnsupported(),
+        ),
+      );
+      // Reset shared static state from earlier tests.
+      await MeshAdvertiser.stop();
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+
+      const metadata = DiscoveryMetadata(
+        fingerprint: 42,
+        connectionToken: 7,
+        capabilities: 1,
+      );
+
+      // Initial start fails — the platform never confirms advertising.
+      await expectLater(
+        () => MeshAdvertiser.start(metadata),
+        throwsStateError,
+      );
+      // _activeMetadata is null (unverified) but _desiredMetadata is set, so
+      // isIntendedToAdvertise must still report true.
+      expect(MeshAdvertiser.isIntendedToAdvertise, isTrue);
+
+      // Simulate the radio recovering (e.g. adapter reinit by the OS).
+      peripheral.reportAdvertising = true;
+
+      // reassert must use _desiredMetadata as a fallback and attempt a new
+      // startAdvertising call, not silently no-op.
+      final startCountBefore = peripheral.startCount;
+      await MeshAdvertiser.reassert();
+      expect(peripheral.startCount, greaterThan(startCountBefore));
+      expect(MeshAdvertiser.isIntendedToAdvertise, isTrue);
+
+      // stop must clear both _activeMetadata and _desiredMetadata.
+      await MeshAdvertiser.stop();
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+
+      // reassert after stop must be a strict no-op — no new startAdvertising.
+      final startCountAfterStop = peripheral.startCount;
+      await MeshAdvertiser.reassert();
+      expect(peripheral.startCount, startCountAfterStop);
+      expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+    },
+  );
 }

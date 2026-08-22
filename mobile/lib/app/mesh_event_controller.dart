@@ -210,17 +210,24 @@ class MeshEventController {
         connectionToken: _localToken,
         capabilities: capabilityRelay | capabilityVoice,
       );
+      var advertisingActive = false;
       try {
         await MeshAdvertiser.start(_discoveryMetadata!);
         _reportMetrics(const [
           RelayMetric('advertising_started'),
           RelayMetric('advertising_verified'),
         ]);
+        advertisingActive = true;
       } catch (error) {
+        // Advertising failure is non-fatal. The phone can still scan, connect
+        // as a GATT client, receive, and relay traffic. The liveness timer and
+        // health watchdog will retry advertising every 30 s via
+        // _reassertAdvertising, which now falls back to _desiredMetadata so
+        // the first-ever start can be retried after a slow/failing BLE stack.
         _reportMetrics([
           RelayMetric('advertising_failed', detail: error.toString()),
+          const RelayMetric('advertising_degraded'),
         ]);
-        rethrow;
       }
       if (_stopRequested) throw StateError('mesh start cancelled');
       _advertisingLivenessTimer = Timer.periodic(
@@ -232,7 +239,7 @@ class MeshEventController {
       _scanCancel = Completer<void>();
       _scanFuture = _scanLoop(siteFingerprint, coordinator, generation);
       unawaited(_scanFuture!);
-      onMeshStatus?.call('advertising');
+      onMeshStatus?.call(advertisingActive ? 'advertising' : 'scan_only');
     } catch (_) {
       _looping = false;
       _advertisingLivenessTimer?.cancel();
