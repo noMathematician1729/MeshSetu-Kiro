@@ -68,6 +68,7 @@ describe('SOS recipient notifications', () => {
     expect(detail.reporter_name).toBe('SOS Sender')
     expect(detail.incident_type).toBe('general')
     expect(detail.hazards).toEqual(['general'])
+    expect(payload.event).toMatchObject({ priority: 'p0Critical', triage: { version: 1, emergency_type: 'general', route: { primary: 'Control room' } } })
     const smsDeliveries = await store.smsDeliveriesForEvent(eventId)
     expect(smsDeliveries).toMatchObject([{ recipient_phone: '+15550002', state: 'sent', provider_message_sid: 'twilio:SM-test-1' }])
     expect(twilioRequests).toHaveLength(1)
@@ -87,6 +88,7 @@ describe('SOS recipient notifications', () => {
     const notifications: any[] = await (await fetch(`${base}/v1/notifications/contact-uid`)).json()
     expect(notifications.map(item => item.update_type)).toContain('status:dispatched')
   })
+
 })
 
 describe('compact SOS resolved from an advertised reporter UID', () => {

@@ -7,7 +7,8 @@ import { z } from 'zod'
 import { decryptPacket } from './protocol/mesh.js'
 import { createHash } from 'node:crypto'
 import { store } from './store.js'
-import { buildEmergencySms, normalizeE164 } from './twilio_sms.js'
+import { triageSos } from './triage.js'
+import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
 import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
 
 const app = express()
@@ -156,6 +157,13 @@ async function fanOutIncident(record: any, updateType: string, relayDeviceId?: s
   return notifications
 }
 
+async function triageP0(record: any) {
+  if (record.priority !== 'p0Critical') return record
+  const receivedAtMs = Number(record.received_at_ms ?? Date.now())
+  const recent = await store.recentForTriage(record, receivedAtMs - 60_000)
+  return await store.applyTriage(record.event_id, triageSos(record, recent)) ?? record
+}
+
 async function healthPayload() {
   let database = 'memory'
   if (store.pool) {
@@ -198,7 +206,7 @@ app.post('/v1/gateway/relay-sos', gateway, async (req, res) => {
   const parsed = relaySosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid relay SOS', details: parsed.error.issues })
   const source = parsed.data.event
   const profile = source.reporter_uid ? await store.getProfile(source.reporter_uid) ?? await store.getProfileByPrefix(source.reporter_uid) : undefined
-  const record = await store.upsert({ ...source, received_at_ms: Date.now(), packet_sha256: `relay:${source.object_id}`, decrypt_status: 'relay-decrypted', status: 'new', reporter_uid: source.reporter_uid ?? null, reporter_name: profile?.name ?? null, reporter_phone: profile?.phone ?? null, reporter_language: profile?.language ?? null, reporter_blood_group: profile?.blood_group ?? null, reporter_primary_contact: profile ? `${profile.primary_contact_name} (${profile.primary_contact_phone})` : null })
+  const record = await triageP0(await store.upsert({ ...source, received_at_ms: Date.now(), packet_sha256: `relay:${source.object_id}`, decrypt_status: 'relay-decrypted', status: 'new', reporter_uid: source.reporter_uid ?? null, reporter_name: profile?.name ?? null, reporter_phone: profile?.phone ?? null, reporter_language: profile?.language ?? null, reporter_blood_group: profile?.blood_group ?? null, reporter_primary_contact: profile ? `${profile.primary_contact_name} (${profile.primary_contact_phone})` : null }))
   await fanOutIncident(record, 'new', parsed.data.relay_device_id)
   emit('incident', record)
   res.json({ ok: true, event: record, public_url: publicIncidentUrl(source.event_id) })
@@ -223,7 +231,7 @@ app.post('/v1/gateway/objects', gateway, async (req, res) => {
             decoded.envelope.siteId,
           )
         : undefined
-      const record = await store.upsert({ event_id: compact?.event_id ?? decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null, compact_sequence: compact?.compact_sequence ?? compactSequence })
+      const record = await triageP0(await store.upsert({ event_id: compact?.event_id ?? decoded.envelope.eventId, object_id: decoded.envelope.objectId, site_id: decoded.envelope.siteId, room_id: decoded.envelope.roomId, priority: s.triagePriority, incident_type: s.incidentType, transcript: s.transcript || null, stt_confidence: s.sttConfidence, triage_confidence: s.triageConfidence, hazards: s.hazards, rationale: s.rationale, input_mode: s.inputMode, zone: s.logicalZone || null, latitude: s.lat ?? null, longitude: s.lon ?? null, accuracy_m: s.accuracyM ?? null, location_captured_at_ms: s.locationCapturedAtMs ?? null, hops: decoded.envelope.hopCount, relay_latency_ms: Math.max(0, now - decoded.envelope.createdAtMs), created_at_ms: decoded.envelope.createdAtMs, expires_at_ms: decoded.envelope.expiresAtMs, received_at_ms: now, packet_sha256: decoded.packetSha256, decrypt_status: 'verified', voice_clip_id: s.voiceClipId || null, audio_state: s.voiceClipId ? 'queued' : 'n/a', status: 'new', reporter_uid: s.reporter?.uid ?? null, reporter_name: s.reporter?.name ?? null, reporter_phone: s.reporter?.phone ?? null, reporter_language: s.reporter?.language ?? null, reporter_blood_group: s.reporter?.bloodGroup ?? null, reporter_primary_contact: s.reporter ? `${s.reporter.primaryContactName} (${s.reporter.primaryContactPhone})` : null, compact_sequence: compact?.compact_sequence ?? compactSequence }))
       await fanOutIncident(record, 'new')
       emit('incident', record); return res.json({ ok: true, verified: true, event: record })
     }
@@ -244,7 +252,7 @@ app.patch('/v1/sos/:eventId/status', bearer, async (req, res) => { const body = 
 app.get('/v1/sos/:eventId/voice', bearer, async (req, res) => { const event = await store.get(String(req.params.eventId)); if (!event?.audio_bytes) return res.status(404).end(); res.type(event.audio_content_type || 'audio/ogg'); res.send(event.audio_bytes) })
 
 // Compatibility surface for the existing Flutter gateway and dashboard.
-app.post('/api/events', gateway, async (req, res) => { const event = req.body; if (!event?.event_id) return res.status(400).json({ error: 'event_id required' }); const saved = await store.upsert({ ...event, decrypt_status: event.decrypt_status || 'legacy-unverified', received_at_ms: Date.now(), packet_sha256: event.packet_sha256 || 'legacy' }); emit('event', saved); res.json({ ok: true, event: saved }) })
+app.post('/api/events', gateway, async (req, res) => { const event = req.body; if (!event?.event_id) return res.status(400).json({ error: 'event_id required' }); const saved = await triageP0(await store.upsert({ ...event, decrypt_status: event.decrypt_status || 'legacy-unverified', received_at_ms: Date.now(), packet_sha256: event.packet_sha256 || 'legacy' })); emit('event', saved); res.json({ ok: true, event: saved }) })
 app.get('/api/events', async (_req, res) => res.json(await store.all()))
 app.patch('/api/events/:eventId/status', gateway, async (req, res) => { const event = await store.status(String(req.params.eventId), req.body.status); if (!event) return res.status(404).json({ error: 'not found' }); emit('event', event); res.json(event) })
 
@@ -278,7 +286,7 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     return res.json({ ok: true, resolved: true, event: existing, profile: profile ?? null })
   }
   const eventId = existing?.event_id ?? `ceal-${parsed.data.reporter_uid}-${Date.now()}`
-  const record = await store.upsert({
+  const record = await triageP0(await store.upsert({
     event_id: eventId,
     object_id: existing?.object_id ?? `ceal-${parsed.data.origin_id ?? 0}-${parsed.data.sequence ?? 0}-${now}`,
     compact_sequence: parsed.data.sequence ?? null,
@@ -306,7 +314,7 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     reporter_language: profile?.language ?? null,
     reporter_blood_group: profile?.blood_group ?? null,
     reporter_primary_contact: profile ? `${profile.primary_contact_name} (${profile.primary_contact_phone})` : null,
-  })
+  }))
   await fanOutIncident(record, 'new')
   emit('incident', record)
   res.json({ ok: true, resolved: !!profile, event: record, profile: profile ?? null })
