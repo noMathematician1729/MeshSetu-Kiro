@@ -153,6 +153,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             'Your phone number',
             required: true,
             keyboardType: TextInputType.phone,
+            helperText: 'Include country code, e.g. +919876543210',
           ),
           const SizedBox(height: 12),
           _field(_language, 'Preferred language', required: true),
@@ -206,12 +207,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     bool required = false,
     int maxLines = 1,
     TextInputType? keyboardType,
+    String? helperText,
   }) => TextField(
     controller: controller,
     maxLines: maxLines,
     keyboardType: keyboardType,
     decoration: InputDecoration(
       labelText: required ? '$label *' : label,
+      helperText: helperText,
       border: const OutlineInputBorder(),
     ),
   );
@@ -244,6 +247,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               'Phone number',
               required: true,
               keyboardType: TextInputType.phone,
+              helperText: 'Include country code, e.g. +919876543210',
             ),
           ],
         ),
