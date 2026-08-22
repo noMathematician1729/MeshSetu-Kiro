@@ -865,7 +865,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     if (alert == null || dedupeKey == null) return;
     await SosAlertNotifications.show(
       id: SosAlertNotifications.idForKey(dedupeKey),
-      title: 'SOS RECEIVED · OFFLINE',
+      title: 'SOS RECEIVED · COMPACT',
       body: SosAlertNotifications.compactPacketBody(
         alert,
         availability: availability,
@@ -900,21 +900,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           : '';
       if (reporterUid.isEmpty) return;
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
-      if (!await bridge.canReachControlRoom()) {
-        await _showCompactSosFallback(
-          data,
-          availability:
-              'Offline: verified details cannot be fetched. Keep Bluetooth on and relay this packet.',
-        );
-        if (mounted) {
-          setState(
-            () => _status =
-                'MeshSetu\nOffline compact SOS received · relaying over Bluetooth',
-          );
-        }
-        return;
-      }
-
+      // The detail request itself is the reachability check. A separate health
+      // probe incorrectly marked phones with working cellular data as offline
+      // when that probe timed out or the control room was waking up.
       final site = await ref.read(joinRepositoryProvider).activeManifest();
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
@@ -931,7 +919,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           data,
           availability: success
               ? 'Control room reached, but expanded details are not available yet. Keep relaying this packet.'
-              : 'Verified detail lookup failed; this compact packet remains available offline.',
+              : 'Verified details could not be retrieved. This compact packet remains usable without internet.',
         );
       }
       if (mounted) {
