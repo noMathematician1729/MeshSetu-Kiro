@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:uuid/uuid.dart';
 
 import '../../core/data/database.dart';
+import '../../core/ble/sos_advertisement.dart';
 import '../../core/model/model.dart';
 import '../stt/stt_engine.dart';
 import '../triage/triage_engine.dart';
@@ -25,6 +26,7 @@ final class SosInput {
     required this.inputMode,
     this.rawText = '',
     this.priority = PriorityBand.p1High,
+    this.emergencyType,
     this.ttlMs = 15 * 60 * 1000,
   });
 
@@ -32,6 +34,7 @@ final class SosInput {
   final InputMode inputMode;
   final String rawText;
   final PriorityBand priority;
+  final SosEmergencyType? emergencyType;
   final int ttlMs;
 }
 
@@ -75,6 +78,14 @@ class DriftSosRepository implements SosRepository {
             payloadType: PayloadType.structuredSos.name,
             inputMode: Value(input.inputMode.name),
             rawText: Value(input.rawText),
+            triageJson: input.emergencyType == null
+                ? const Value.absent()
+                : Value(
+                    jsonEncode({
+                      'incidentType': input.emergencyType!.hazard,
+                      'hazards': [input.emergencyType!.hazard],
+                    }),
+                  ),
             priority: input.priority.name,
             state: const Value('created'),
             createdAtMs: now,
@@ -177,7 +188,7 @@ class DriftSosRepository implements SosRepository {
           ? PriorityBand.p0Critical
           : priority,
       triageConfidence: _confidenceFrom(row.triageJson),
-      hazards: const [],
+      hazards: _hazardsFrom(row.triageJson),
       rationale: _rationaleFrom(row.triageJson),
       inputMode: InputMode.values.byName(row.inputMode ?? InputMode.tap.name),
       voiceClipId: _voiceClipIdFrom(row.voicePath),
@@ -242,6 +253,10 @@ class DriftSosRepository implements SosRepository {
 
   List<String> _rationaleFrom(String? triageJson) =>
       ((_triageRecord(triageJson)?['rationale'] as List?)?.cast<String>()) ??
+      const [];
+
+  List<String> _hazardsFrom(String? triageJson) =>
+      ((_triageRecord(triageJson)?['hazards'] as List?)?.cast<String>()) ??
       const [];
 
   Map<String, Object?>? _locationFrom(String? triageJson) {

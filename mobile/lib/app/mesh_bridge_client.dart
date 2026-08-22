@@ -87,12 +87,14 @@ class MeshBridgeClient {
   MeshBridgeClient(
     this._db, {
     Future<void> Function(MeshEnvelope envelope)? sendToMesh,
+    this.onOriginForward,
     this.registerTaskDataCallback = true,
     this.syncRelayInbox = true,
   }) : _sendToMeshOverride = sendToMesh;
 
   final MeshDatabase _db;
   final Future<void> Function(MeshEnvelope envelope)? _sendToMeshOverride;
+  void Function(MeshEnvelope envelope, Object? error)? onOriginForward;
   final bool registerTaskDataCallback;
   final bool syncRelayInbox;
   OutboxSender? _outbox;
@@ -379,7 +381,9 @@ class MeshBridgeClient {
         receivedAtMs: DateTime.now().millisecondsSinceEpoch,
         peerId: 'origin',
       );
-    } catch (_) {
+      onOriginForward?.call(envelope, null);
+    } catch (error) {
+      onOriginForward?.call(envelope, error);
       // Relay delivery can still carry this object to another gateway.
     }
   }

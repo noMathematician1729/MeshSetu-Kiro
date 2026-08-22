@@ -678,6 +678,7 @@ class MeshEventController {
   /// Rich SOS data remains in the normal durable GATT envelope.
   Future<void> broadcastCompactSos({
     bool isTest = false,
+    SosEmergencyType emergencyType = SosEmergencyType.general,
     int? originId,
     int? sequence,
     String? reporterUidHex,
@@ -690,9 +691,7 @@ class MeshEventController {
       siteFingerprint: metadata.fingerprint,
       originId: originId ?? _localToken,
       sequence: sequence ?? ++_sosSequence,
-      flags:
-          MeshSosAdvertisement.alertFlag |
-          (isTest ? MeshSosAdvertisement.testFlag : 0),
+      flags: MeshSosAdvertisement.flagsFor(emergencyType, isTest: isTest),
       ttl: 4,
       reporterUidHex: isTest
           ? ''

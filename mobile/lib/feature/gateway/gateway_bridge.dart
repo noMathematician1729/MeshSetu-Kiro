@@ -143,6 +143,7 @@ class GatewayBridge {
   Future<(bool, String, Map<String, Object?>?)> forwardCealSos({
     required String reporterUid,
     required String siteId,
+    required int flags,
     int? originId,
     int? sequence,
     double? latitude,
@@ -161,6 +162,7 @@ class GatewayBridge {
             body: jsonEncode({
               'reporter_uid': reporterUid,
               'site_id': siteId,
+              'flags': flags,
               'origin_id': originId,
               'sequence': sequence,
               'latitude': latitude,
@@ -191,7 +193,9 @@ class GatewayBridge {
   Future<Map<String, Object?>?> fetchPublicIncident(String eventId) async {
     try {
       final response = await http
-          .get(baseUrl.resolve('/v1/public/sos/${Uri.encodeComponent(eventId)}'))
+          .get(
+            baseUrl.resolve('/v1/public/sos/${Uri.encodeComponent(eventId)}'),
+          )
           .timeout(const Duration(seconds: 12));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return null;

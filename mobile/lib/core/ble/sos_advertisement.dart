@@ -1,5 +1,41 @@
 import 'dart:typed_data';
 
+/// CEAL-compatible SOS category stored in bits 2-5 of the compact flags byte.
+enum SosEmergencyType {
+  general(0, 'General SOS', 'general'),
+  fire(1, 'Fire emergency', 'fire'),
+  crime(2, 'Crime alert', 'crime'),
+  kidnap(3, 'Kidnap alert', 'kidnap'),
+  medical(4, 'Medical emergency', 'medical'),
+  naturalDisaster(5, 'Natural disaster', 'natural_disaster');
+
+  const SosEmergencyType(this.code, this.label, this.hazard);
+
+  final int code;
+  final String label;
+  final String hazard;
+
+  int get flagBits => (code & 0x0f) << 2;
+
+  static SosEmergencyType fromFlags(int flags) {
+    final code = (flags >> 2) & 0x0f;
+    return SosEmergencyType.values.firstWhere(
+      (type) => type.code == code,
+      orElse: () => SosEmergencyType.general,
+    );
+  }
+
+  static SosEmergencyType fromHazards(List<String> hazards) {
+    for (final hazard in hazards) {
+      final match = SosEmergencyType.values.where(
+        (type) => type.hazard == hazard,
+      );
+      if (match.isNotEmpty) return match.first;
+    }
+    return SosEmergencyType.general;
+  }
+}
+
 /// Compact, unauthenticated emergency alert carried in BLE manufacturer data.
 /// It is deliberately limited to routing/alert information; the encrypted
 /// MeshEnvelope remains the source of rich SOS details.
@@ -30,6 +66,8 @@ class MeshSosAdvertisement {
   static const int byteLengthWithReporter = 20;
   static const int reporterUidBytes = 6;
   static const int alertFlag = 1;
+  static const int medicalEmergencyFlag = 1 << 1;
+  static const int emergencyTypeMask = 0x3c;
   static const int testFlag = 1 << 7;
 
   final int siteFingerprint;
@@ -43,6 +81,7 @@ class MeshSosAdvertisement {
   final String reporterUidHex;
 
   bool get isTest => flags & testFlag != 0;
+  SosEmergencyType get emergencyType => SosEmergencyType.fromFlags(flags);
   bool get hasReporterUid => reporterUidHex.length == reporterUidBytes * 2;
   String get dedupeKey => '$siteFingerprint:$originId:$sequence';
 
@@ -54,6 +93,12 @@ class MeshSosAdvertisement {
     ttl: value,
     reporterUidHex: reporterUidHex,
   );
+
+  static int flagsFor(SosEmergencyType type, {bool isTest = false}) =>
+      alertFlag |
+      type.flagBits |
+      (type == SosEmergencyType.medical ? medicalEmergencyFlag : 0) |
+      (isTest ? testFlag : 0);
 
   Uint8List encode() {
     final uid = hasReporterUid ? _decodeHex(reporterUidHex) : null;
@@ -71,15 +116,13 @@ class MeshSosAdvertisement {
       }
     }
     final crcOffset = length - 1;
-    bytes.setUint8(
-      crcOffset,
-      _crc8(bytes.buffer.asUint8List(0, crcOffset)),
-    );
+    bytes.setUint8(crcOffset, _crc8(bytes.buffer.asUint8List(0, crcOffset)));
     return bytes.buffer.asUint8List();
   }
 
   static MeshSosAdvertisement? decode(Uint8List bytes) {
-    final carriesReporter = bytes.length == byteLengthWithReporter &&
+    final carriesReporter =
+        bytes.length == byteLengthWithReporter &&
         bytes.isNotEmpty &&
         bytes[0] == versionWithReporter;
     final legacy =

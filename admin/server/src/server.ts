@@ -255,11 +255,21 @@ app.get('/v1/profiles/:uid', bearer, async (req, res) => { const profile = await
 app.get('/v1/profiles', bearer, async (_req, res) => res.json(await store.allProfiles()))
 
 // CEAL-style compact SOS alert with UID→profile resolution.
-const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional() })
+const cealSosSchema = z.object({ reporter_uid: z.string().min(1), site_id: z.string().min(1).default('demo-site'), flags: z.number().int().min(0).max(255).default(1), received_at_ms: z.number().nullable().optional(), origin_id: z.number().nullable().optional(), sequence: z.number().nullable().optional(), latitude: z.number().nullable().optional(), longitude: z.number().nullable().optional(), accuracy_m: z.number().nullable().optional(), location_captured_at_ms: z.number().nullable().optional() })
+const compactEmergencyTypes = [
+  { incidentType: 'general', hazard: 'general' },
+  { incidentType: 'fire', hazard: 'fire' },
+  { incidentType: 'crime', hazard: 'crime' },
+  { incidentType: 'kidnap', hazard: 'kidnap' },
+  { incidentType: 'medical', hazard: 'medical' },
+  { incidentType: 'natural_disaster', hazard: 'natural_disaster' },
+]
+const compactEmergencyType = (flags: number) => compactEmergencyTypes[(flags >> 2) & 0x0f] ?? compactEmergencyTypes[0]
 app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
   const parsed = cealSosSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: 'invalid CEAL SOS', details: parsed.error.issues })
   const profile = await store.getProfile(parsed.data.reporter_uid) ?? await store.getProfileByPrefix(parsed.data.reporter_uid)
   const now = parsed.data.received_at_ms ?? Date.now()
+  const emergencyType = compactEmergencyType(parsed.data.flags)
   // Every nearby peer with internet forwards the same alert. Converge them on
   // one incident so the dashboard and the contacts see a single emergency.
   const existing = await store.findRecentCompactEvent(parsed.data.reporter_uid, parsed.data.sequence ?? null, now - 600000, parsed.data.site_id)
@@ -275,8 +285,9 @@ app.post('/v1/gateway/ceal-sos', gateway, async (req, res) => {
     site_id: parsed.data.site_id,
     room_id: 'public',
     priority: 'p0Critical',
-    incident_type: 'ceal_compact_sos',
-    transcript: profile ? `CEAL SOS from ${profile.name} (${profile.phone})` : `CEAL SOS from UID ${parsed.data.reporter_uid} (unregistered)`,
+    incident_type: emergencyType.incidentType,
+    hazards: [emergencyType.hazard],
+    transcript: profile ? `${emergencyType.incidentType} SOS from ${profile.name} (${profile.phone})` : `${emergencyType.incidentType} SOS from UID ${parsed.data.reporter_uid} (unregistered)`,
     latitude: parsed.data.latitude ?? null,
     longitude: parsed.data.longitude ?? null,
     accuracy_m: parsed.data.accuracy_m ?? null,
