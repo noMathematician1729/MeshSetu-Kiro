@@ -28,6 +28,8 @@ class MeshStatus {
     required this.eventModeRunning,
     required this.peerCount,
     required this.statusText,
+    this.blockedReason,
+    this.siteMismatchDetected = false,
   });
 
   static const stopped = MeshStatus(
@@ -40,14 +42,36 @@ class MeshStatus {
   final int peerCount;
   final String statusText;
 
+  /// Human-readable reason the radio could not start at all (Bible audit
+  /// Task 7) — e.g. Bluetooth off, a missing permission, or Android's
+  /// Location toggle. Non-null only while [eventModeRunning] is false and
+  /// the most recent [EventModeLauncher.start] attempt was blocked by
+  /// [MeshRadioPreflight]. Distinguishes "the radio itself cannot run"
+  /// from "it is running but has found nobody yet".
+  final String? blockedReason;
+
+  /// True once this scan cycle's `scan_fingerprint_mismatches` metric was
+  /// nonzero — a nearby device is advertising the MeshSetu service but for
+  /// a different site/event (Bible audit Task 7/A4). This is reset to
+  /// false whenever a cycle reports zero mismatches, so it reflects
+  /// current, not historical, conditions.
+  final bool siteMismatchDetected;
+
   MeshStatus copyWith({
     bool? eventModeRunning,
     int? peerCount,
     String? statusText,
+    String? blockedReason,
+    bool clearBlockedReason = false,
+    bool? siteMismatchDetected,
   }) => MeshStatus(
     eventModeRunning: eventModeRunning ?? this.eventModeRunning,
     peerCount: peerCount ?? this.peerCount,
     statusText: statusText ?? this.statusText,
+    blockedReason: clearBlockedReason
+        ? null
+        : (blockedReason ?? this.blockedReason),
+    siteMismatchDetected: siteMismatchDetected ?? this.siteMismatchDetected,
   );
 }
 
@@ -98,6 +122,15 @@ class MeshBridgeClient {
   /// change. Safe to read before [start] — defaults to [MeshStatus.stopped].
   MeshStatus get meshStatus => _meshStatus;
   Stream<MeshStatus> get meshStatusStream => _meshStatusController.stream;
+
+  /// Records why the radio failed to start at all (Bible audit Task 7).
+  /// Called by [EventModeLauncher]/[RoomMeshBootstrap] when
+  /// [MeshRadioPreflight] blocks startup before the foreground task ever
+  /// runs, since no `mesh_metric`/`mesh_status` callback will otherwise
+  /// arrive to explain why `eventModeRunning` stayed false.
+  void reportBlockedReason(String reason) {
+    _updateMeshStatus((current) => current.copyWith(blockedReason: reason));
+  }
 
   void _updateMeshStatus(MeshStatus Function(MeshStatus current) update) {
     final next = update(_meshStatus);
@@ -246,7 +279,10 @@ class MeshBridgeClient {
           _acceptForegroundIdentity(localEphemeralId);
         }
         _updateMeshStatus(
-          (current) => current.copyWith(eventModeRunning: true),
+          (current) => current.copyWith(
+            eventModeRunning: true,
+            clearBlockedReason: true,
+          ),
         );
       case 'mesh_submit_result':
         final objectId = data['objectId'];
@@ -284,14 +320,20 @@ class MeshBridgeClient {
       case 'mesh_metric':
         final metrics = data['metrics'];
         if (metrics is! List) return;
-        unawaited(
-          _outbox?.onMetrics([
-                for (final m in metrics)
-                  if (m is Map)
-                    MeshBridge.metricFromJson(m.cast<Object?, Object?>()),
-              ]) ??
-              Future.value(),
-        );
+        final decoded = [
+          for (final m in metrics)
+            if (m is Map) MeshBridge.metricFromJson(m.cast<Object?, Object?>()),
+        ];
+        for (final metric in decoded) {
+          if (metric.kind == 'scan_fingerprint_mismatches') {
+            _updateMeshStatus(
+              (current) => current.copyWith(
+                siteMismatchDetected: (metric.value ?? 0) > 0,
+              ),
+            );
+          }
+        }
+        unawaited(_outbox?.onMetrics(decoded) ?? Future.value());
       case 'mesh_received':
         final receivedJson = data['received'];
         if (receivedJson is! Map) return;

@@ -17,6 +17,13 @@ class NotificationRouter {
   }) =>
       jsonEncode({'siteId': siteId, 'eventId': eventId, 'objectId': objectId});
 
+  /// Payload that routes a tap to [RoomsScreen] opened on [roomId].
+  static String roomPayload({
+    required String siteId,
+    required String roomId,
+  }) =>
+      jsonEncode({'type': 'room', 'siteId': siteId, 'roomId': roomId});
+
   static Future<void> configure(FlutterLocalNotificationsPlugin plugin) async {
     await plugin.initialize(
       settings: const InitializationSettings(
@@ -47,6 +54,12 @@ class NotificationRouter {
         _pendingPayload = payload;
         return;
       }
+      // Room-message tap: open the rooms screen with the matching room.
+      if (data['type'] == 'room') {
+        navigator.pushNamed('/rooms', arguments: data);
+        return;
+      }
+      // SOS incident tap (legacy path — no 'type' key).
       navigator.pushNamed('/incident', arguments: data);
     } catch (_) {
       // Invalid/stale notification payloads should not prevent app launch.

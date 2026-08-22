@@ -171,7 +171,7 @@ void main() {
         roomId: envelope.roomId,
         eventId: envelope.eventId,
         packet: envelope.payload,
-      ),
+      ).text,
       'through gatt',
     );
   });

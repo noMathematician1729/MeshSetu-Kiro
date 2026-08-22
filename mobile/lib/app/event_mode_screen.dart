@@ -25,6 +25,7 @@ import '../feature/sos/sos_repository.dart';
 import '../feature/sos/sos_screen.dart';
 import '../feature/sos/incident_detail_screen.dart';
 import '../feature/voice/voice_recorder.dart';
+import 'emergency_gestures.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
@@ -32,6 +33,7 @@ import 'event_mode_launcher.dart';
 import 'incident_summary.dart';
 import 'notification_router.dart';
 import 'providers.dart';
+import 'room_message_notifications.dart';
 import 'sos_alert_notifications.dart';
 import 'sos_incident_navigator.dart';
 
@@ -83,35 +85,17 @@ Future<void> _showSosNotification({
 }
 
 Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
-  try {
-    if (!_sosNotificationsInitialized) {
-      await NotificationRouter.configure(_sosNotifications);
-      _sosNotificationsInitialized = true;
-    }
-    final id = Object.hash(alert.originId, alert.sequence) & 0x7fffffff;
-    await _sosNotifications.show(
-      id: id == 0 ? 1 : id,
-      title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED',
-      body: alert.isTest
-          ? 'Nearby BLE transport test received.'
-          : '${alert.emergencyType.label} received. Details may follow.',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _sosNotificationChannelId,
-          'SOS alerts',
-          channelDescription: 'Nearby MeshSetu emergency signals',
-          importance: Importance.max,
-          priority: Priority.max,
-          playSound: true,
-          enableVibration: true,
-          category: AndroidNotificationCategory.alarm,
-          visibility: NotificationVisibility.public,
-        ),
-      ),
-    );
-  } catch (_) {
-    // BLE relaying must remain live if Android rejects an alert.
-  }
+  await SosAlertNotifications.show(
+    id: SosAlertNotifications.idForKey(alert.dedupeKey),
+    title: alert.isTest ? 'TEST SOS RECEIVED' : 'SOS RECEIVED · MESH',
+    body: alert.isTest
+        ? 'Nearby BLE transport test received.'
+        : SosAlertNotifications.compactPacketBody(
+            alert,
+            availability:
+                'Offline-ready: attempting verified detail lookup when available.',
+          ),
+  );
 }
 
 /// Port of `in.meshsetu.app.MeshEventService`'s foreground service. The mesh
@@ -124,10 +108,16 @@ void meshEventTaskCallback() {
 class _MeshEventTaskHandler extends TaskHandler {
   MeshEventController? _controller;
   bool _sosPending = false;
+  bool _identityRequestPending = false;
   bool _debugLossEnabled = false;
   StreamSubscription<ReceivedObject>? _incomingSubscription;
   int _notificationGeneration = 0;
   final Set<String> _compactAlertKeys = {};
+
+  /// RoomId of the room chat screen currently visible to the user, or null.
+  /// Set via the 'active_room' message from [RoomChatScreen]. When non-null,
+  /// notifications for that room are suppressed (Task 5).
+  String? _activeRoomId;
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -216,6 +206,8 @@ class _MeshEventTaskHandler extends TaskHandler {
         });
         if (received.envelope.payloadType == PayloadType.structuredSos) {
           unawaited(_announceReceivedSos(received));
+        } else if (received.envelope.payloadType == PayloadType.roomMessage) {
+          unawaited(_announceReceivedRoomMessage(received));
         }
       });
       controller.setDebugLossInjection(_debugLossEnabled);
@@ -223,6 +215,13 @@ class _MeshEventTaskHandler extends TaskHandler {
         'status': 'started',
         'localEphemeralId': controller.localEphemeralId,
       });
+      if (_identityRequestPending) {
+        _identityRequestPending = false;
+        FlutterForegroundTask.sendDataToMain({
+          'status': 'started',
+          'localEphemeralId': controller.localEphemeralId,
+        });
+      }
       if (_sosPending) {
         _sosPending = false;
         unawaited(_sendTestSos(controller));
@@ -264,12 +263,21 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     if (data is Map && data['mesh_identity_request'] == true) {
       final controller = _controller;
-      if (controller != null) {
+      if (controller == null) {
+        _identityRequestPending = true;
+      } else {
         FlutterForegroundTask.sendDataToMain({
           'status': 'started',
           'localEphemeralId': controller.localEphemeralId,
         });
       }
+      return;
+    }
+    if (data is Map && data.containsKey('active_room')) {
+      // null means the user left the room screen; a non-null string means they
+      // are viewing that room. Notifications for the active room are suppressed.
+      final value = data['active_room'];
+      _activeRoomId = value is String && value.isNotEmpty ? value : null;
       return;
     }
     if (data is Map && data['debugLoss'] is bool) {
@@ -407,6 +415,22 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
   }
 
+  Future<void> _announceReceivedRoomMessage(ReceivedObject received) async {
+    final alert = roomMessageAlertFor(
+      received: received,
+      localEphemeralId: _controller?.localEphemeralId,
+      activeRoomId: _activeRoomId,
+    );
+    if (alert == null) return;
+    await RoomMessageNotifications.show(
+      alert: alert,
+      payload: RoomMessageNotifications.roomPayload(
+        siteId: alert.siteId,
+        roomId: alert.roomId,
+      ),
+    );
+  }
+
   void _announceCompactSos(MeshSosAdvertisement alert) {
     _compactAlertKeys.add(alert.dedupeKey);
     unawaited(_showCompactSosNotification(alert));
@@ -417,6 +441,7 @@ class _MeshEventTaskHandler extends TaskHandler {
         'originId': alert.originId,
         'sequence': alert.sequence,
         'flags': alert.flags,
+        'ttl': alert.ttl,
         'siteFingerprint': alert.siteFingerprint,
         'dedupeKey': alert.dedupeKey,
         'reporterUid': alert.reporterUidHex,
@@ -486,11 +511,15 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _meshStatus = 'stopped';
   String _lastMetric = 'none';
   String _lastConnection = 'none';
+  String _advertisingStatus = 'unknown';
   String _nearestBeacon = 'none';
   String _zone = 'unknown';
   String _sttStatus = 'not run';
   bool _sttTesting = false;
   bool _sosPacketSending = false;
+  bool _gestureConfirmationShowing = false;
+  bool _gestureServiceEnabled = false;
+  StreamSubscription<SosEmergencyType>? _typedSosGestureSubscription;
   List<Map<String, dynamic>> _peerDebug = const [];
   final Map<String, int> _scanStats = {};
   String _lastReceived = 'none';
@@ -521,8 +550,57 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       text: ref.read(gatewayDemoKeyProvider),
     );
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+    EmergencyGestureSettings.startListeningForTypedSosGestures();
+    _typedSosGestureSubscription = EmergencyGestureSettings.typedSosGestures
+        .listen((emergencyType) {
+          unawaited(_confirmGestureSosPacket(emergencyType));
+        });
+    unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
+    unawaited(_refreshGestureServiceState());
     unawaited(_restoreServiceState());
+  }
+
+  Future<void> _consumePendingTypedSosGesture() async {
+    try {
+      final emergencyType =
+          await EmergencyGestureSettings.takePendingTypedSosGesture();
+      if (emergencyType != null) await _confirmGestureSosPacket(emergencyType);
+    } catch (_) {
+      // Native gesture support is Android-only; direct red SOS remains usable.
+    }
+  }
+
+  Future<void> _confirmGestureSosPacket(SosEmergencyType emergencyType) async {
+    if (!mounted || _gestureConfirmationShowing || _sosPacketSending) return;
+    _gestureConfirmationShowing = true;
+    try {
+      setState(() {
+        _status =
+            'MeshSetu\n${emergencyType.label} gesture detected\nConfirm or cancel the SOS countdown';
+      });
+      // This is intentionally the typed red-SOS confirmation path. It never
+      // invokes the separate CEAL identity-SOS route.
+      await _confirmAndSendSosPacket(emergencyType);
+    } finally {
+      _gestureConfirmationShowing = false;
+    }
+  }
+
+  Future<void> _refreshGestureServiceState() async {
+    try {
+      final enabled = await EmergencyGestureSettings.isEnabled();
+      if (mounted) setState(() => _gestureServiceEnabled = enabled);
+    } catch (_) {
+      // Gesture enrollment is Android-only; the typed SOS UI remains usable.
+    }
+  }
+
+  Future<void> _openGestureSettings() async {
+    await EmergencyGestureSettings.openSettings();
+    // Settings returns asynchronously; refresh immediately and again when the
+    // user returns to this screen in a later build/session.
+    await _refreshGestureServiceState();
   }
 
   Future<void> _restoreServiceState() async {
@@ -555,6 +633,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _scanStats.clear();
           _lastReceived = 'none';
           _lastConnection = 'none';
+          _advertisingStatus = 'unknown';
           _status = 'MeshSetu\nEvent mode is off';
         });
         unawaited(_bridgeClient?.dispose());
@@ -617,11 +696,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   '$kind'
                   '${peer == null ? '' : ' ($peer)'}'
                   '${detail == null ? '' : ': $detail'}';
+              if (kind == 'advertising_started') {
+                _advertisingStatus = 'starting';
+              } else if (kind == 'advertising_verified' ||
+                  kind == 'advertising_reasserted') {
+                _advertisingStatus = 'verified';
+              } else if (kind == 'advertising_failed' ||
+                  kind == 'advertising_reassert_failed') {
+                _advertisingStatus =
+                    'failed${detail == null ? '' : ': $detail'}';
+              }
               if (kind == 'peer_connect_failed' ||
                   kind == 'peer_connected' ||
                   kind == 'peer_session_ready' ||
                   kind.startsWith('gatt_') ||
                   kind.startsWith('server_') ||
+                  kind.startsWith('advertising_') ||
                   kind == 'send_failed' ||
                   kind == 'control_send_failed' ||
                   kind == 'custody_ack_sent' ||
@@ -674,6 +764,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         'Peer connected to this phone as a GATT server',
       'gatt_server_disconnected' =>
         'Peer disconnected from this phone as a GATT server',
+      'advertising_started' => 'BLE advertising start requested',
+      'advertising_verified' => 'BLE advertising verified by platform',
+      'advertising_reasserted' => 'BLE advertising reasserted and verified',
+      'advertising_failed' => 'BLE advertising verification failed',
+      'advertising_reassert_failed' => 'BLE advertising reassert failed',
       'peer_connected' => 'Mesh peer connected',
       'peer_connect_failed' => 'Could not connect to mesh peer',
       'peer_session_ready' => 'Mesh peer session ready',
@@ -742,10 +837,53 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     }
   }
 
+  MeshSosAdvertisement? _compactAlertFromData(Map data) {
+    final siteFingerprint = data['siteFingerprint'] as int?;
+    final originId = data['originId'] as int?;
+    final sequence = data['sequence'] as int?;
+    if (siteFingerprint == null || originId == null || sequence == null) {
+      return null;
+    }
+    return MeshSosAdvertisement(
+      siteFingerprint: siteFingerprint,
+      originId: originId,
+      sequence: sequence,
+      flags: data['flags'] as int? ?? MeshSosAdvertisement.alertFlag,
+      ttl: data['ttl'] as int? ?? 0,
+      reporterUidHex: MeshSosAdvertisement.normalizeReporterUid(
+        data['reporterUid'] as String?,
+      ),
+    );
+  }
+
+  Future<void> _showCompactSosFallback(
+    Map data, {
+    required String availability,
+  }) async {
+    final alert = _compactAlertFromData(data);
+    final dedupeKey = data['dedupeKey'] as String?;
+    if (alert == null || dedupeKey == null) return;
+    await SosAlertNotifications.show(
+      id: SosAlertNotifications.idForKey(dedupeKey),
+      title: 'SOS RECEIVED · COMPACT',
+      body: SosAlertNotifications.compactPacketBody(
+        alert,
+        availability: availability,
+      ),
+    );
+  }
+
   Future<void> _forwardReceivedCealSos(Map data) async {
     final url = ref.read(gatewayUrlProvider);
     final key = ref.read(gatewayDemoKeyProvider);
-    if (url.isEmpty || key.isEmpty) return;
+    if (url.isEmpty || key.isEmpty) {
+      await _showCompactSosFallback(
+        data,
+        availability:
+            'No control-room connection is configured; relay this packet over Bluetooth.',
+      );
+      return;
+    }
     try {
       final originId = data['originId'] as int?;
       final sequence = data['sequence'] as int?;
@@ -762,6 +900,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           : '';
       if (reporterUid.isEmpty) return;
       final bridge = GatewayBridge(baseUrl: Uri.parse(url), demoKey: key);
+      // The detail request itself is the reachability check. A separate health
+      // probe incorrectly marked phones with working cellular data as offline
+      // when that probe timed out or the control room was waking up.
       final site = await ref.read(joinRepositoryProvider).activeManifest();
       final (success, detail, body) = await bridge.forwardCealSos(
         reporterUid: reporterUid,
@@ -770,19 +911,32 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         originId: originId,
         sequence: sequence,
       );
-      if (success && dedupeKey != null) {
+      final resolved = success && body?['event'] is Map;
+      if (resolved && dedupeKey != null) {
         await _showResolvedSosDetails(dedupeKey: dedupeKey, body: body);
+      } else {
+        await _showCompactSosFallback(
+          data,
+          availability: success
+              ? 'Control room reached, but expanded details are not available yet. Keep relaying this packet.'
+              : 'Verified details could not be retrieved. This compact packet remains usable without internet.',
+        );
       }
       if (mounted) {
         setState(
-          () => _status = success
-              ? 'MeshSetu\nCEAL SOS relayed to admin ✓ (nearby device SOS)'
-              : 'MeshSetu\nCEAL relay to admin failed: $detail',
+          () => _status = resolved
+              ? 'MeshSetu\nSOS details resolved from control room ✓'
+              : 'MeshSetu\nCompact SOS received · $detail',
         );
       }
     } catch (error) {
+      await _showCompactSosFallback(
+        data,
+        availability:
+            'Verified detail lookup is unavailable; relay this compact packet over Bluetooth.',
+      );
       if (mounted) {
-        setState(() => _status = 'MeshSetu\nCEAL relay error: $error');
+        setState(() => _status = 'MeshSetu\nCompact SOS relay error: $error');
       }
     }
   }
@@ -853,6 +1007,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _zone = 'unknown';
       _scanStats.clear();
       _lastConnection = 'none';
+      _advertisingStatus = 'unknown';
       _lastReceived = 'none';
       _receivedSosReporter = null;
       _receivedSosLocation = null;
@@ -1219,6 +1374,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   @override
   void dispose() {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    unawaited(_typedSosGestureSubscription?.cancel());
     unawaited(_bridgeClient?.dispose());
     unawaited(_sttRecorder.dispose());
     _adminServerController.dispose();
@@ -1267,6 +1423,17 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final activeSiteId =
         ref.watch(activeSiteProvider).valueOrNull?.siteId ??
         MeshEventController.demoSiteId;
+    final meshConfiguration = MeshSiteConfiguration.forSite(activeSiteId);
+    final localFingerprint = MeshGatt.siteFingerprint(
+      meshConfiguration.siteId,
+      namespace: meshConfiguration.namespace,
+    );
+    final fingerprintLabel = localFingerprint
+        .toUnsigned(64)
+        .toRadixString(16)
+        .padLeft(16, '0');
+    final fingerprintMismatchCount =
+        _scanStats['scan_fingerprint_mismatches'] ?? 0;
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -1316,12 +1483,13 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                       continue;
                     }
                     try {
-                      decodedText = RoomMessagePacketCodec.decode(
+                      final content = RoomMessagePacketCodec.decode(
                         siteId: row.siteId,
                         roomId: row.roomId,
                         eventId: row.eventId,
                         packet: row.payload,
                       );
+                      decodedText = content.text;
                       roomMessage = row;
                     } catch (_) {
                       // Tampered or incomplete room packets stay hidden.
@@ -1366,6 +1534,48 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 style: FilledButton.styleFrom(backgroundColor: Colors.red),
                 label: Text(
                   _sosPacketSending ? 'Queuing SOS packet…' : 'Send SOS packet',
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                color: _gestureServiceEnabled ? Colors.green.shade50 : null,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Background typed SOS gestures',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence. '
+                        'These use the red typed SOS pipeline only—not the CEAL identity SOS.',
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _gestureServiceEnabled
+                            ? 'Enabled. Works after the app UI closes while Event Mode is active.'
+                            : 'Disabled. Enable the MeshSetu accessibility service to use gestures.',
+                        style: TextStyle(
+                          color: _gestureServiceEnabled
+                              ? Colors.green.shade800
+                              : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _openGestureSettings,
+                        icon: const Icon(Icons.settings_accessibility),
+                        label: Text(
+                          _gestureServiceEnabled
+                              ? 'Review gesture permission'
+                              : 'Enable emergency gestures',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -1481,21 +1691,57 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                     : null,
               ),
               const SizedBox(height: 12),
-              Text('Mesh: $_meshStatus · peers: ${_peerDebug.length}'),
+              Text('Mesh: $_meshStatus · ready peers: ${_peerDebug.length}'),
+              Text('Advertising: $_advertisingStatus'),
+              Card(
+                color: fingerprintMismatchCount > 0
+                    ? Colors.amber.shade50
+                    : null,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Mesh identity',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text('Site ID: ${meshConfiguration.siteId}'),
+                      Text('Namespace: ${meshConfiguration.namespace}'),
+                      Text('Fingerprint: $fingerprintLabel'),
+                      if (fingerprintMismatchCount > 0)
+                        Text(
+                          'WARNING: $fingerprintMismatchCount nearby device(s) '
+                          'have a different site fingerprint.',
+                          style: TextStyle(color: Colors.amber.shade900),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const Text(
+                'Discovery funnel',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               Text(
-                'Scan: devices ${_scanStats['scan_devices_seen'] ?? 0} · '
+                'Seen ${_scanStats['scan_devices_seen'] ?? 0} · '
                 'service ${_scanStats['scan_service_matches'] ?? 0} · '
                 'metadata ${_scanStats['scan_manufacturer_matches'] ?? 0} · '
-                'accepted ${_scanStats['scan_peers_accepted'] ?? 0} · '
-                'malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
-                'fingerprint rejected '
-                '${_scanStats['scan_fingerprint_mismatches'] ?? 0}',
+                'UUID-only ${_scanStats['scan_uuid_only_candidates'] ?? 0} · '
+                'accepted ${_scanStats['scan_peers_accepted'] ?? 0}',
+              ),
+              Text(
+                'Malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
+                'fingerprint rejected $fingerprintMismatchCount · '
+                'duty ${_scanStats['scan_duty_cycle'] ?? 0}%',
               ),
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
               Text('Latest link event: $_lastConnection'),
               Text('Last object: $_lastReceived'),
+              if (_peerDebug.isEmpty && _eventModeActive)
+                const Text('No ready GATT peers yet.'),
               if (_peerDebug.isNotEmpty) ...[
                 const SizedBox(height: 4),
                 for (final peer in _peerDebug)

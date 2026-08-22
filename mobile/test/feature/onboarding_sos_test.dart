@@ -61,6 +61,47 @@ void main() {
     expect(() => repository.save(invalid), throwsArgumentError);
   });
 
+  test('onboarding stores canonical E.164 phone numbers', () async {
+    final profile = OnboardingProfile.create(
+      profileId: 'e164-profile',
+      name: 'Asha Patel',
+      phone: '+91 (98765) 43210',
+      language: 'English',
+      emergencyContacts: const [
+        EmergencyContact(name: 'Ravi Patel', phone: '+91 98765-43211'),
+      ],
+      medicalProfile: const MedicalProfile(),
+    );
+
+    expect(profile.phone, '+919876543210');
+    expect(profile.emergencyContacts.single.phone, '+919876543211');
+    expect(profile.validationError, isNull);
+
+    final repository = OnboardingRepository(MemoryOnboardingStorage());
+    await repository.save(profile);
+    final persisted = await repository.load();
+    expect(persisted!.phone, '+919876543210');
+    expect(persisted.emergencyContacts.single.phone, '+919876543211');
+  });
+
+  test(
+    'onboarding rejects emergency contacts without an E.164 country code',
+    () {
+      final profile = OnboardingProfile.create(
+        profileId: 'local-contact-profile',
+        name: 'Asha Patel',
+        phone: '+919876543210',
+        language: 'English',
+        emergencyContacts: const [
+          EmergencyContact(name: 'Ravi Patel', phone: '9876543211'),
+        ],
+        medicalProfile: const MedicalProfile(),
+      );
+
+      expect(profile.validationError, contains('E.164'));
+    },
+  );
+
   test(
     'structured SOS reporter round-trips and legacy payloads remain valid',
     () {
@@ -84,9 +125,9 @@ void main() {
         ),
       );
       expect(
-        StructuredSosPayload.decode(withReporter.encode())
-            .reporter
-            ?.reporterUid,
+        StructuredSosPayload.decode(
+          withReporter.encode(),
+        ).reporter?.reporterUid,
         'aabbccddeeff',
       );
 
@@ -135,33 +176,39 @@ void main() {
     },
   );
 
-  test('voice evidence is linked before the structured SOS is queued', () async {
-    final db = MeshDatabase.forTesting(NativeDatabase.memory());
-    addTearDown(db.close);
-    final sosRepository = DriftSosRepository(db, await savedRepository());
-    final eventId = await sosRepository.createDraft(
-      const SosInput(
+  test(
+    'voice evidence is linked before the structured SOS is queued',
+    () async {
+      final db = MeshDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final sosRepository = DriftSosRepository(db, await savedRepository());
+      final eventId = await sosRepository.createDraft(
+        const SosInput(
+          siteId: 'site',
+          roomId: 'public',
+          inputMode: InputMode.voice,
+          priority: PriorityBand.p0Critical,
+        ),
+      );
+      await VoiceRepository(db, sosRepository).attachToSos(
+        sosEventId: eventId,
         siteId: 'site',
         roomId: 'public',
-        inputMode: InputMode.voice,
-        priority: PriorityBand.p0Critical,
-      ),
-    );
-    await VoiceRepository(db, sosRepository).attachToSos(
-      sosEventId: eventId,
-      siteId: 'site',
-      roomId: 'public',
-      encoded: Uint8List.fromList([1, 2, 3]),
-    );
-    await sosRepository.finalizeAndEnqueue(eventId);
+        encoded: Uint8List.fromList([1, 2, 3]),
+      );
+      await sosRepository.finalizeAndEnqueue(eventId);
 
-    final rows = await db.select(db.outboxEvents).get();
-    final sos = rows.singleWhere((row) => row.eventId == eventId);
-    final voice = rows.singleWhere(
-      (row) => row.payloadType == PayloadType.voiceObject.name,
-    );
-    expect(StructuredSosPayload.decode(sos.payload!).voiceClipId, voice.eventId);
-    expect(sos.state, 'ready');
-    expect(voice.state, 'ready');
-  });
+      final rows = await db.select(db.outboxEvents).get();
+      final sos = rows.singleWhere((row) => row.eventId == eventId);
+      final voice = rows.singleWhere(
+        (row) => row.payloadType == PayloadType.voiceObject.name,
+      );
+      expect(
+        StructuredSosPayload.decode(sos.payload!).voiceClipId,
+        voice.eventId,
+      );
+      expect(sos.state, 'ready');
+      expect(voice.state, 'ready');
+    },
+  );
 }

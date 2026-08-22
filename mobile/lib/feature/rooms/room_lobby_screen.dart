@@ -266,13 +266,15 @@ class _MeshStatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!status.eventModeRunning) {
+      final blockedReason = status.blockedReason;
       return Card(
         color: Theme.of(context).colorScheme.secondaryContainer,
         child: ListTile(
           leading: const Icon(Icons.bluetooth_disabled),
-          title: const Text('Event mode is off'),
-          subtitle: const Text(
-            'Messages will queue until you start the BLE relay service.',
+          title: Text(blockedReason != null ? 'Event mode is blocked' : 'Event mode is off'),
+          subtitle: Text(
+            blockedReason ??
+                'Messages will queue until you start the BLE relay service.',
           ),
           trailing: FilledButton(
             onPressed: starting ? null : onStartEventMode,
@@ -289,20 +291,40 @@ class _MeshStatusBanner extends StatelessWidget {
     }
     final peerCount = status.peerCount;
     return Card(
-      child: ListTile(
-        leading: Icon(
-          peerCount > 0 ? Icons.bluetooth_connected : Icons.bluetooth_searching,
-        ),
-        title: Text(
-          peerCount > 0
-              ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'} connected'
-              : 'Mesh: no peers yet',
-        ),
-        subtitle: Text(
-          peerCount > 0
-              ? 'Messages relay over Bluetooth.'
-              : 'Move closer to another device with event mode on.',
-        ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: Icon(
+              peerCount > 0
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_searching,
+            ),
+            title: Text(
+              peerCount > 0
+                  ? 'Mesh: $peerCount peer${peerCount == 1 ? '' : 's'} connected'
+                  : 'Mesh: no peers yet',
+            ),
+            subtitle: Text(
+              peerCount > 0
+                  ? 'Messages relay over Bluetooth.'
+                  : 'Move closer to another device with event mode on.',
+            ),
+          ),
+          if (status.siteMismatchDetected)
+            const ListTile(
+              dense: true,
+              leading: Icon(Icons.warning_amber, size: 20),
+              title: Text(
+                'A nearby device is using a different event/site code',
+                style: TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                'It will not appear here or connect until it joins this event.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+        ],
       ),
     );
   }

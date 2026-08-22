@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'event_mode_launcher.dart';
@@ -19,6 +21,7 @@ abstract final class RoomMeshBootstrap {
 
     final result = await EventModeLauncher.start(
       taskCallback: taskCallback,
+      onStatus: bridge.reportBlockedReason,
       onMeshSiteConfigurationNeeded: () =>
           EventModeLauncher.configureMeshSite(siteId),
     );
@@ -28,9 +31,27 @@ abstract final class RoomMeshBootstrap {
       // callback on this fast path. Configure the already-running task and
       // ask it to return its identity to this newly attached bridge.
       await EventModeLauncher.configureMeshSite(siteId);
-      bridge.requestForegroundIdentity();
+      _requestIdentityWithRetry(bridge);
+    } else if (result == EventModeLaunchResult.started) {
+      // The service request can complete before its task isolate has created
+      // the controller. Replay the identity request after startup as a
+      // safeguard for the first-start callback race.
+      _requestIdentityWithRetry(bridge);
     }
     return result;
+  }
+
+  static void _requestIdentityWithRetry(MeshBridgeClient bridge) {
+    unawaited(() async {
+      for (final delay in const [
+        Duration.zero,
+        Duration(milliseconds: 500),
+        Duration(seconds: 2),
+      ]) {
+        if (delay > Duration.zero) await Future<void>.delayed(delay);
+        bridge.requestForegroundIdentity();
+      }
+    }());
   }
 
   static MeshBridgeClient _ensureBridge(WidgetRef ref) {

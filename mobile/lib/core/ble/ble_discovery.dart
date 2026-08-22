@@ -22,32 +22,92 @@ import '../model/model.dart';
 abstract final class MeshAdvertiser {
   static final AsyncLock _advertisingLock = AsyncLock();
   static int _advertisingGeneration = 0;
+  static DiscoveryMetadata? _activeMetadata;
+
+  /// Whether [start] has completed successfully for the current advertising
+  /// generation. This is stronger than an intent flag: [start] verifies that
+  /// the platform reports [PeripheralAdvertisingState.advertising] before
+  /// exposing the metadata as active.
+  static bool get isIntendedToAdvertise => _activeMetadata != null;
 
   static Future<void> start(DiscoveryMetadata metadata) async {
+    final previousMetadata = _activeMetadata;
     _advertisingGeneration++;
-    await UniversalBlePeripheral.startAdvertising(
-      services: const [MeshGatt.service],
-      localName: 'MeshSetu',
-      manufacturerData: ManufacturerData(
-        MeshGatt.manufacturerId,
-        MeshGatt.manufacturerPayload(
-          MeshGatt.discoveryPayloadType,
-          metadata.encode(),
+    try {
+      await UniversalBlePeripheral.startAdvertising(
+        services: const [MeshGatt.service],
+        localName: 'MeshSetu',
+        manufacturerData: ManufacturerData(
+          MeshGatt.manufacturerId,
+          MeshGatt.manufacturerPayload(
+            MeshGatt.discoveryPayloadType,
+            metadata.encode(),
+          ),
         ),
-      ),
-      // Keep the 128-bit service UUID in the primary advertisement for the
-      // scan filter and move the 14-byte discovery record to the scan
-      // response so both packets stay within Android's 31-byte limit.
-      platformConfig: PeripheralPlatformConfig(
-        android: PeripheralAndroidOptions(
-          addManufacturerDataInScanResponse: true,
+        // Keep the 128-bit service UUID in the primary advertisement for the
+        // scan filter and move the 14-byte discovery record to the scan
+        // response so both packets stay within Android's 31-byte limit.
+        platformConfig: PeripheralPlatformConfig(
+          android: PeripheralAndroidOptions(
+            addManufacturerDataInScanResponse: true,
+          ),
         ),
-      ),
-    );
+      );
+      final state = await _waitForAdvertising();
+      if (state != PeripheralAdvertisingState.advertising) {
+        throw StateError('platform advertising state is ${state.name}');
+      }
+      _activeMetadata = metadata;
+    } catch (error) {
+      // A failed reassert should leave the last-known metadata available for
+      // a later watchdog retry; an initial failed start remains inactive.
+      _activeMetadata = previousMetadata;
+      throw StateError('BLE advertising verification failed: $error');
+    }
+  }
+
+  static Future<PeripheralAdvertisingState> _waitForAdvertising() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final state = await UniversalBlePeripheral.getAdvertisingState();
+      if (state == PeripheralAdvertisingState.advertising ||
+          state == PeripheralAdvertisingState.error) {
+        return state;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    return UniversalBlePeripheral.getAdvertisingState();
+  }
+
+  /// Re-issues [start] with the last-known discovery metadata. Native Android
+  /// rejects a second start while the previous advertiser is active, so the
+  /// reassert path explicitly reaches idle before starting again.
+  /// A no-op if advertising has never been verified or has since been stopped.
+  static Future<void> reassert() async {
+    final metadata = _activeMetadata;
+    if (metadata == null) return;
+    await UniversalBlePeripheral.stopAdvertising();
+    await _waitForIdle();
+    await start(metadata);
+  }
+
+  static Future<void> _waitForIdle() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final state = await UniversalBlePeripheral.getAdvertisingState();
+      if (state == PeripheralAdvertisingState.idle) return;
+      if (state == PeripheralAdvertisingState.error) {
+        throw StateError('platform advertising state is error while stopping');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    final state = await UniversalBlePeripheral.getAdvertisingState();
+    if (state != PeripheralAdvertisingState.idle) {
+      throw StateError('platform advertising did not stop before reassert');
+    }
   }
 
   static Future<void> stop() async {
     _advertisingGeneration++;
+    _activeMetadata = null;
     await UniversalBlePeripheral.stopAdvertising();
   }
 
@@ -102,6 +162,7 @@ class MeshScanReport {
     required this.manufacturerMatches,
     required this.malformedMetadata,
     required this.fingerprintMismatches,
+    this.uuidOnlyDeviceIds = const [],
   });
 
   final List<DiscoveredPeer> peers;
@@ -111,6 +172,17 @@ class MeshScanReport {
   final int manufacturerMatches;
   final int malformedMetadata;
   final int fingerprintMismatches;
+
+  /// Device IDs that matched the MeshSetu service UUID but never produced a
+  /// decodable discovery record during this scan window (Bible audit
+  /// Task 4). Some OEM BLE stacks fail to deliver or merge the scan-response
+  /// packet that carries [DiscoveryMetadata], so `serviceMatches > 0` while
+  /// `manufacturerMatches == 0` for that device — normal discovery then
+  /// finds zero peers with no fallback. [MeshEventController] uses this list
+  /// as a last-resort connection candidate set after repeated blind cycles,
+  /// relying on the post-connection HELLO handshake (not this scan) to
+  /// establish site identity, since no fingerprint is available here.
+  final List<String> uuidOnlyDeviceIds;
 }
 
 abstract final class MeshScanner {
@@ -136,6 +208,7 @@ abstract final class MeshScanner {
     final manufacturerMatches = <String>{};
     final malformedMetadata = <String>{};
     final fingerprintMismatches = <String>{};
+    final discoveryRecordSeen = <String>{};
     final beacons = <String, BeaconObservation>{};
     StreamSubscription<BleDevice>? subscription;
     var started = false;
@@ -188,6 +261,7 @@ abstract final class MeshScanner {
           );
           if (discoveryPayload == null) continue;
           manufacturerMatches.add(device.deviceId);
+          discoveryRecordSeen.add(device.deviceId);
           final metadata = DiscoveryMetadata.decode(discoveryPayload);
           if (metadata == null) {
             malformedMetadata.add(device.deviceId);
@@ -240,6 +314,9 @@ abstract final class MeshScanner {
       manufacturerMatches: manufacturerMatches.length,
       malformedMetadata: malformedMetadata.length,
       fingerprintMismatches: fingerprintMismatches.length,
+      uuidOnlyDeviceIds: serviceMatches
+          .difference(discoveryRecordSeen)
+          .toList(growable: false),
     );
   }
 }

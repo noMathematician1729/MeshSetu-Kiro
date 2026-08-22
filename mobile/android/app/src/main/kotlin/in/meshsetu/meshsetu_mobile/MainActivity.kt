@@ -1,6 +1,8 @@
 package `in`.meshsetu.meshsetu_mobile
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
@@ -8,13 +10,36 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        const val ACTION_TYPED_SOS_GESTURE = "in.meshsetu.meshsetu_mobile.TYPED_SOS_GESTURE"
+        const val EXTRA_EMERGENCY_GESTURE = "emergency_gesture"
+        private const val GESTURE_PREFERENCES = "meshsetu_emergency_gestures"
+        private const val PENDING_TYPED_SOS_GESTURE = "pending_typed_sos_gesture"
+    }
+
     private val locationChannel = "meshsetu/location"
+    private val emergencyGestureChannel = "meshsetu/emergency-gestures"
+    private var emergencyGestureMethodChannel: MethodChannel? = null
+    private var pendingTypedSosGesture: String? = null
+    private var dartGestureListenerReady = false
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        captureTypedSosGesture(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureTypedSosGesture(intent)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -25,6 +50,74 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        val gestureMethodChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            emergencyGestureChannel,
+        )
+        emergencyGestureMethodChannel = gestureMethodChannel
+        gestureMethodChannel
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "isEnabled" -> result.success(isEmergencyGestureServiceEnabled())
+                    "openSettings" -> {
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        result.success(null)
+                    }
+                    "takePendingTypedSosGesture" -> {
+                        result.success(takePendingTypedSosGesture())
+                    }
+                    "gestureListenerReady" -> {
+                        dartGestureListenerReady = true
+                        result.success(null)
+                        deliverPendingTypedSosGesture()
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun captureTypedSosGesture(intent: Intent?) {
+        if (intent?.action != ACTION_TYPED_SOS_GESTURE) return
+        val gesture = intent.getStringExtra(EXTRA_EMERGENCY_GESTURE)
+        if (gesture !in setOf("normal", "fire", "crime", "kidnap", "medical", "natural_disaster")) {
+            return
+        }
+        pendingTypedSosGesture = gesture
+        getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putString(PENDING_TYPED_SOS_GESTURE, gesture)
+            .apply()
+        deliverPendingTypedSosGesture()
+    }
+
+    private fun takePendingTypedSosGesture(): String? {
+        val gesture = pendingTypedSosGesture ?: getSharedPreferences(
+            GESTURE_PREFERENCES,
+            MODE_PRIVATE,
+        ).getString(PENDING_TYPED_SOS_GESTURE, null)
+        pendingTypedSosGesture = null
+        getSharedPreferences(GESTURE_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .remove(PENDING_TYPED_SOS_GESTURE)
+            .apply()
+        return gesture
+    }
+
+    private fun deliverPendingTypedSosGesture() {
+        if (!dartGestureListenerReady) return
+        val gesture = takePendingTypedSosGesture() ?: return
+        emergencyGestureMethodChannel?.invokeMethod("typedSosGesture", gesture)
+    }
+
+    private fun isEmergencyGestureServiceEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        val component = ComponentName(this, EmergencyGestureAccessibilityService::class.java)
+        return enabled.split(':').any { entry ->
+            ComponentName.unflattenFromString(entry) == component
+        }
     }
 
     private fun getCurrentLocation(result: MethodChannel.Result) {

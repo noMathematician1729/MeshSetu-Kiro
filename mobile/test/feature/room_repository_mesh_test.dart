@@ -142,4 +142,95 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  group('queuedReasonFor', () {
+    RoomMessage queuedMessage({int? queuedSinceMs}) => RoomMessage(
+      eventId: 'e1',
+      text: 'hi',
+      fromPeerId: null,
+      atMs: 0,
+      mine: true,
+      state: RoomMessageState.queued,
+      queuedSinceMs: queuedSinceMs,
+    );
+
+    test('returns null before the stall threshold has elapsed', () {
+      final reason = queuedReasonFor(
+        queuedMessage(queuedSinceMs: 1000),
+        eventModeRunning: true,
+        peerCount: 0,
+        blockedReason: null,
+        siteMismatchDetected: false,
+        nowMs: 1000 + const Duration(seconds: 5).inMilliseconds,
+      );
+      expect(reason, isNull);
+    });
+
+    test('returns null for a delivered message regardless of elapsed time', () {
+      final reason = queuedReasonFor(
+        RoomMessage(
+          eventId: 'e1',
+          text: 'hi',
+          fromPeerId: null,
+          atMs: 0,
+          mine: true,
+          state: RoomMessageState.delivered,
+        ),
+        eventModeRunning: true,
+        peerCount: 0,
+        blockedReason: null,
+        siteMismatchDetected: false,
+        nowMs: 1000000,
+      );
+      expect(reason, isNull);
+    });
+
+    test('surfaces the blocked-radio reason once stalled and event mode is off', () {
+      final reason = queuedReasonFor(
+        queuedMessage(queuedSinceMs: 0),
+        eventModeRunning: false,
+        peerCount: 0,
+        blockedReason: 'Turn on Location in Settings.',
+        siteMismatchDetected: false,
+        nowMs: const Duration(seconds: 25).inMilliseconds,
+      );
+      expect(reason, 'Turn on Location in Settings.');
+    });
+
+    test('reports waiting for a nearby device when running with no peers', () {
+      final reason = queuedReasonFor(
+        queuedMessage(queuedSinceMs: 0),
+        eventModeRunning: true,
+        peerCount: 0,
+        blockedReason: null,
+        siteMismatchDetected: false,
+        nowMs: const Duration(seconds: 25).inMilliseconds,
+      );
+      expect(reason, contains('nearby device'));
+    });
+
+    test('reports a site mismatch when peers are seen but on a different site', () {
+      final reason = queuedReasonFor(
+        queuedMessage(queuedSinceMs: 0),
+        eventModeRunning: true,
+        peerCount: 0,
+        blockedReason: null,
+        siteMismatchDetected: true,
+        nowMs: const Duration(seconds: 25).inMilliseconds,
+      );
+      expect(reason, contains('different event/site'));
+    });
+
+    test('reports relaying once a peer is connected', () {
+      final reason = queuedReasonFor(
+        queuedMessage(queuedSinceMs: 0),
+        eventModeRunning: true,
+        peerCount: 1,
+        blockedReason: null,
+        siteMismatchDetected: false,
+        nowMs: const Duration(seconds: 25).inMilliseconds,
+      );
+      expect(reason, contains('relay'));
+    });
+  });
 }

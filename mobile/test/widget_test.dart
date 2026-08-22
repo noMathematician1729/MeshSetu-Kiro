@@ -25,6 +25,9 @@ void main() {
 
     expect(find.textContaining('Event mode is off'), findsOneWidget);
     expect(find.text('Start event mode'), findsOneWidget);
+    expect(find.text('Discovery funnel'), findsOneWidget);
+    expect(find.text('Site ID: demo-site'), findsOneWidget);
+    expect(find.textContaining('Fingerprint:'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 1));

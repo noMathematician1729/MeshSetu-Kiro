@@ -1,5 +1,7 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../core/ble/sos_advertisement.dart';
+
 /// Shared presentation for emergency alerts.
 ///
 /// Both isolates use this: the foreground BLE task raises the immediate
@@ -56,6 +58,29 @@ abstract final class SosAlertNotifications {
     if (launch?.didNotificationLaunchApp ?? false) {
       _onTapPayload?.call(launch?.notificationResponse?.payload);
     }
+  }
+
+  /// CEAL-style fallback for a compact BLE alert. This can be read and relayed
+  /// without internet, while identity, contacts, and precise location remain
+  /// encrypted until a control-room lookup succeeds.
+  static String compactPacketBody(
+    MeshSosAdvertisement alert, {
+    required String availability,
+  }) {
+    final sender = alert.hasReporterUid
+        ? 'CEAL ID ${alert.reporterUidHex.toUpperCase()}'
+        : 'Anonymous mesh sender';
+    final packet =
+        '${alert.originId.toRadixString(16).padLeft(8, '0').toUpperCase()}-${alert.sequence.toString().padLeft(5, '0')}';
+    final hops = alert.ttl == 1
+        ? '1 hop remaining'
+        : '${alert.ttl} hops remaining';
+    return '⚠️ COMPACT SOS PACKET\n'
+        '${alert.emergencyType.label.toUpperCase()}\n'
+        '$sender · packet $packet\n'
+        'Bluetooth mesh relay · $hops\n'
+        '$availability\n'
+        'Name, contacts, and precise location are encrypted.';
   }
 
   /// Shows or replaces an emergency alert. [payload] carries the incident

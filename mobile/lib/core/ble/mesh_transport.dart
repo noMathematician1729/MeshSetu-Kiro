@@ -151,6 +151,14 @@ class MeshTransportCoordinator implements MeshTransport {
   StreamSubscription<String>? _serverUnsubscribedPeerSubscription;
   final Set<String> _serverPeersStarting = {};
   final Map<int, String> _lastInboundPeerByObject = {};
+
+  /// Peers that have sent at least one decodable, same-site HELLO frame
+  /// (Bible audit Task 5). A peer connected via the UUID-only fallback
+  /// (Task 4) or one that skips HELLO entirely is not in this set; today
+  /// that only emits `peer_unverified_site` on every non-HELLO frame it
+  /// sends (log-only, per plan) rather than dropping the connection, so
+  /// this can be watched on real devices before flipping to strict.
+  final Set<String> _helloVerifiedPeers = {};
   // Lock order is relay -> pump. No pump-held path may await the relay lock.
   final AsyncLock _pumpLock = AsyncLock();
   final AsyncLock _relayLock = AsyncLock();
@@ -196,7 +204,7 @@ class MeshTransportCoordinator implements MeshTransport {
             await _ensureServerPeer(frame.deviceId);
             if (_stopped) return;
             if (!_sessions.containsKey(frame.deviceId)) return;
-            if (!_acceptsHello(frame.bytes)) {
+            if (!_acceptsHello(frame.deviceId, frame.bytes)) {
               final link = _sessions[frame.deviceId];
               server.rejectPeer(frame.deviceId);
               _detach(frame.deviceId, expected: link, promoteRejected: false);
@@ -354,7 +362,7 @@ class MeshTransportCoordinator implements MeshTransport {
           _relayLock.synchronized(() async {
             try {
               if (_stopped || _sessions[peerId] != link) return;
-              if (!_acceptsHello(bytes)) {
+              if (!_acceptsHello(peerId, bytes)) {
                 _detach(peerId, expected: link);
                 await link.close();
                 return;
@@ -618,6 +626,7 @@ class MeshTransportCoordinator implements MeshTransport {
     _sessions.clear();
     _serverPeersStarting.clear();
     _lastInboundPeerByObject.clear();
+    _helloVerifiedPeers.clear();
     await server.stop();
     _peers = [];
     _emitPeers();
@@ -632,6 +641,7 @@ class MeshTransportCoordinator implements MeshTransport {
   }) {
     final current = _sessions[peerId];
     if (current == null || (expected != null && current != expected)) return;
+    _helloVerifiedPeers.remove(peerId);
     final peerCountBefore = _sessions.length;
     _sessions.remove(peerId);
     final subs = _sessionSubscriptions.remove(peerId);
@@ -815,17 +825,35 @@ class MeshTransportCoordinator implements MeshTransport {
     ]);
   }
 
-  bool _acceptsHello(Uint8List bytes) {
+  bool _acceptsHello(String peerId, Uint8List bytes) {
     final MeshFrame frame;
     try {
       frame = FrameCodec.decode(bytes);
     } catch (_) {
+      _reportUnverifiedTraffic(peerId);
       return true;
     }
-    if (frame.type != FrameType.hello) return true;
+    if (frame.type != FrameType.hello) {
+      _reportUnverifiedTraffic(peerId);
+      return true;
+    }
     final remote = HelloCodec.decode(frame.payload);
     if (remote == null) return false;
     final hello = localHello;
-    return hello == null || remote.siteFingerprint == hello.siteFingerprint;
+    final sameSite =
+        hello == null || remote.siteFingerprint == hello.siteFingerprint;
+    if (sameSite) _helloVerifiedPeers.add(peerId);
+    return sameSite;
+  }
+
+  /// Log-only enforcement (Bible audit Task 5): a peer that has never sent a
+  /// decodable, same-site HELLO is still allowed to relay today — flipping
+  /// this to strict (dropping the connection instead) is the next step once
+  /// `peer_unverified_site` has been observed on real devices to confirm it
+  /// does not fire for legitimate peers using the UUID-only fallback path
+  /// before their HELLO round-trip completes.
+  void _reportUnverifiedTraffic(String peerId) {
+    if (_helloVerifiedPeers.contains(peerId)) return;
+    _onMetrics([RelayMetric('peer_unverified_site', peerId: peerId)]);
   }
 }

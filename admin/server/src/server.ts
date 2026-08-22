@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { store } from './store.js'
 import { triageSos } from './triage.js'
 import { buildEmergencySms, normalizeE164, sendEmergencySms, twilioSmsConfigured } from './twilio_sms.js'
+import { anySmsProviderConfigured, dispatchSms } from './sms_delivery.js'
 
 const app = express()
 const normalizeOrigin = (value?: string) => value?.trim().replace(/\/$/, '')
@@ -65,19 +66,42 @@ const publicIncidentUrl = (eventId: string) => `${publicAppOrigin()}/sos/${encod
  * packets and gateway retries cannot produce duplicate texts.
  */
 async function dispatchEmergencySms(record: any, updateType: string) {
-  if (updateType !== 'new' || !twilioSmsConfigured()) return
+  const log = (level: 'info' | 'warn' | 'error', message: string, details: Record<string, unknown> = {}) => console[level]('[sos-sms]', message, { eventId: record.event_id, ...details })
+  const redactedPhone = (phone: string) => `***${phone.slice(-4)}`
+  if (updateType !== 'new') {
+    log('info', 'not sending SMS for a non-initial incident update', { updateType })
+    return
+  }
+  if (!anySmsProviderConfigured()) {
+    log('warn', 'SMS skipped: no SMS provider is enabled or configured')
+    return
+  }
+
   const profileResolved = record.decrypt_status === 'verified'
     || record.decrypt_status === 'relay-decrypted'
     || (record.decrypt_status === 'ceal-uid-only' && Boolean(record.reporter_name))
-  if (!profileResolved || !record.reporter_uid) return
+  if (!profileResolved || !record.reporter_uid) {
+    log('warn', 'SMS skipped: SOS is not verified or profile-resolved', { decryptStatus: record.decrypt_status ?? 'missing', hasReporterUid: Boolean(record.reporter_uid) })
+    return
+  }
 
   const profile = await store.getProfile(record.reporter_uid) ?? await store.getProfileByPrefix(record.reporter_uid)
-  if (!profile) return
+  if (!profile) {
+    log('warn', 'SMS skipped: no registered reporter profile was found')
+    return
+  }
   const contacts = new Map<string, string | undefined>()
   for (const contact of profile.emergency_contacts ?? []) {
     const phone = normalizeE164(contact?.phone)
     if (phone) contacts.set(phone, contact?.name)
+    else if (contact?.phone) log('warn', 'SMS skipped for invalid emergency-contact phone', { contactIndex: contacts.size })
   }
+  if (contacts.size === 0) {
+    log('warn', 'SMS skipped: reporter has no E.164 emergency contacts')
+    return
+  }
+
+  log('info', 'preparing emergency-contact SMS deliveries', { contactCount: contacts.size, source: record.decrypt_status })
   for (const [phone, name] of contacts) {
     const deliveryId = createHash('sha256').update(`${record.event_id}\u0000${phone}`).digest('hex')
     const reserved = await store.reserveSmsDelivery({
@@ -85,10 +109,19 @@ async function dispatchEmergencySms(record: any, updateType: string) {
       recipient_name: name ?? null, state: 'reserved', provider_message_sid: null,
       failure_reason: null, created_at_ms: Date.now(), completed_at_ms: null,
     })
-    if (!reserved) continue
-    const result = await sendEmergencySms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
-    if (result.state === 'sent') await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: result.providerMessageSid })
-    else await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
+    if (!reserved) {
+      log('info', 'SMS not re-sent: a delivery record already exists', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone) })
+      continue
+    }
+    log('info', 'submitting SMS to provider chain', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone) })
+    const result = await dispatchSms(phone, buildEmergencySms(record, name, publicIncidentUrl(record.event_id)))
+    if (result.state === 'sent') {
+      await store.completeSmsDelivery(deliveryId, { state: 'sent', providerMessageSid: `${result.provider}:${result.providerMessageSid}` })
+      log('info', 'SMS accepted by provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), provider: result.provider, messageSid: result.providerMessageSid })
+    } else {
+      await store.completeSmsDelivery(deliveryId, { state: 'failed', failureReason: result.reason })
+      log('error', 'SMS delivery failed on every configured provider', { deliveryId: deliveryId.slice(0, 12), recipient: redactedPhone(phone), reason: result.reason })
+    }
   }
 }
 

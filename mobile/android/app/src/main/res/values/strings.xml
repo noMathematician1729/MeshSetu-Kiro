@@ -1,0 +1,3 @@
+<resources>
+    <string name="emergency_gesture_accessibility_description">Enables typed SOS gestures while MeshSetu Event Mode is active: Up Up General; Down Down Down Fire; Up Down Up Crime; Down Up Down Kidnap; Up Up Up Medical; Down Down Down Down Natural Disaster. Pause after each sequence. Volume buttons continue changing device volume.</string>
+</resources>

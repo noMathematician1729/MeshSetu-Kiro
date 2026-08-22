@@ -1,6 +1,10 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/emergency_gestures.dart';
 import '../../app/providers.dart';
 import 'onboarding_profile.dart';
 
@@ -44,7 +48,8 @@ class OnboardingScreen extends ConsumerStatefulWidget {
   ConsumerState<OnboardingScreen> createState() => _OnboardingScreenState();
 }
 
-class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
+class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
+    with WidgetsBindingObserver {
   late final TextEditingController _name;
   late final TextEditingController _phone;
   late final TextEditingController _language;
@@ -53,11 +58,18 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   late final TextEditingController _conditions;
   late final List<_ContactEditors> _contacts;
   bool _saving = false;
+  bool _checkingGestures = false;
+  bool _gestureServiceEnabled = false;
   String? _error;
+
+  bool get _requiresGestureEnrollment =>
+      widget.initialProfile == null &&
+      defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final profile = widget.initialProfile;
     _name = TextEditingController(text: profile?.name ?? '');
     _phone = TextEditingController(text: profile?.phone ?? '');
@@ -76,10 +88,39 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         _ContactEditors(contact),
       if ((profile?.emergencyContacts ?? const []).isEmpty) _ContactEditors(),
     ];
+    if (_requiresGestureEnrollment) unawaited(_refreshGestureEnrollment());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _requiresGestureEnrollment) {
+      unawaited(_refreshGestureEnrollment());
+    }
+  }
+
+  Future<void> _refreshGestureEnrollment() async {
+    if (_checkingGestures) return;
+    setState(() => _checkingGestures = true);
+    try {
+      final enabled = await EmergencyGestureSettings.isEnabled();
+      if (mounted) setState(() => _gestureServiceEnabled = enabled);
+    } catch (_) {
+      if (mounted) setState(() => _gestureServiceEnabled = false);
+    } finally {
+      if (mounted) setState(() => _checkingGestures = false);
+    }
+  }
+
+  Future<void> _openGestureSettings() async {
+    await EmergencyGestureSettings.openSettings();
+    // Android will call `resumed` after Settings closes; this immediate check
+    // also handles devices that return directly without a lifecycle change.
+    await _refreshGestureEnrollment();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _name.dispose();
     _phone.dispose();
     _language.dispose();
@@ -94,6 +135,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
   Future<void> _save() async {
     if (_saving) return;
+    if (_requiresGestureEnrollment && !_gestureServiceEnabled) {
+      setState(() {
+        _error =
+            'Enable Emergency gestures in Android Accessibility settings before saving your emergency profile.';
+      });
+      return;
+    }
     final profile = OnboardingProfile.create(
       profileId: widget.initialProfile?.profileId,
       name: _name.text,
@@ -153,6 +201,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             'Your phone number',
             required: true,
             keyboardType: TextInputType.phone,
+            helperText: 'Include country code, e.g. +919876543210',
           ),
           const SizedBox(height: 12),
           _field(_language, 'Preferred language', required: true),
@@ -172,6 +221,64 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               icon: const Icon(Icons.add),
               label: const Text('Add emergency contact'),
             ),
+          if (_requiresGestureEnrollment) ...[
+            const SizedBox(height: 20),
+            Card(
+              color: _gestureServiceEnabled
+                  ? Colors.green.shade50
+                  : Colors.red.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Required: emergency gestures',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Enable MeshSetu emergency gestures in Android Accessibility settings. '
+                      '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence while Event Mode is active—even after the app UI is closed.',
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      _checkingGestures
+                          ? 'Checking Android Accessibility permission…'
+                          : _gestureServiceEnabled
+                          ? 'Emergency gestures are enabled.'
+                          : 'Emergency gestures are not enabled yet.',
+                      style: TextStyle(
+                        color: _gestureServiceEnabled
+                            ? Colors.green.shade800
+                            : Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _checkingGestures
+                              ? null
+                              : _openGestureSettings,
+                          icon: const Icon(Icons.settings_accessibility),
+                          label: const Text('Open Accessibility settings'),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          tooltip: 'Check again',
+                          onPressed: _checkingGestures
+                              ? null
+                              : _refreshGestureEnrollment,
+                          icon: const Icon(Icons.refresh),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 20),
           Text(
             'Medical information (optional)',
@@ -206,12 +313,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     bool required = false,
     int maxLines = 1,
     TextInputType? keyboardType,
+    String? helperText,
   }) => TextField(
     controller: controller,
     maxLines: maxLines,
     keyboardType: keyboardType,
     decoration: InputDecoration(
       labelText: required ? '$label *' : label,
+      helperText: helperText,
       border: const OutlineInputBorder(),
     ),
   );
@@ -244,6 +353,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               'Phone number',
               required: true,
               keyboardType: TextInputType.phone,
+              helperText: 'Include country code, e.g. +919876543210',
             ),
           ],
         ),
