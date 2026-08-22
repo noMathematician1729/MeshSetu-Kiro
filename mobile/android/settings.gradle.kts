@@ -19,7 +19,8 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "9.0.1" apply false
+    id("com.android.application") version "9.1.1" apply false
+    // Version declaration only; the app uses AGP 9 built-in Kotlin.
     id("org.jetbrains.kotlin.android") version "2.3.20" apply false
 }
 

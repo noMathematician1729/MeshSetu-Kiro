@@ -8,8 +8,8 @@ plugins {
 
 android {
     namespace = "in.meshsetu.meshsetu_mobile"
-    // API 36 is sufficient for the runtime BLE APIs used by the app.
-    compileSdk = 36
+    // API 37 is required by the current secure-storage Android artifact.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
