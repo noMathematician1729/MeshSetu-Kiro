@@ -20,6 +20,22 @@ void main() {
     expect(pacer.isThrottled, isTrue);
   });
 
+  test('default cadence stays below the throttle cap', () {
+    final clock = _FakeClock();
+    final pacer = ScanPacer(nowMs: clock.call);
+    final scan = pacer.nextScanWindow();
+    final idle = pacer.nextIdleDuration();
+
+    for (var i = 0; i < 4; i++) {
+      expect(pacer.isThrottled, isFalse);
+      pacer.recordScanStart();
+      clock.nowMs += scan.inMilliseconds + idle.inMilliseconds;
+    }
+
+    expect(pacer.isThrottled, isFalse);
+    expect(pacer.dutyCyclePercent(idleWindow: idle), greaterThanOrEqualTo(90));
+  });
+
   test('throttle state ages out once the rolling window passes', () {
     final clock = _FakeClock();
     final pacer = ScanPacer(
@@ -33,11 +49,11 @@ void main() {
     pacer.recordScanStart();
     expect(pacer.isThrottled, isTrue);
 
-    clock.nowMs += 31000;
+    clock.nowMs += 30000;
     expect(pacer.isThrottled, isFalse);
   });
 
-  test('deferred idle duration is the max idle window while throttled', () {
+  test('idle duration is the max idle window while throttled', () {
     final clock = _FakeClock();
     final pacer = ScanPacer(
       maxStartsPerWindow: 1,
@@ -57,6 +73,17 @@ void main() {
     );
 
     pacer.recordCycleResult(devicesSeen: 0);
+    expect(pacer.nextIdleDuration(), const Duration(seconds: 2));
+  });
+
+  test('peer expectation prevents blind backoff', () {
+    final pacer = ScanPacer(
+      blindCyclesBeforeBackoff: 1,
+      baseIdleWindow: const Duration(seconds: 2),
+    );
+
+    pacer.recordCycleResult(devicesSeen: 0, peerExpected: true);
+    pacer.recordCycleResult(devicesSeen: 0, peerExpected: true);
     expect(pacer.nextIdleDuration(), const Duration(seconds: 2));
   });
 

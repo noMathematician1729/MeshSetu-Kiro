@@ -210,9 +210,19 @@ class MeshEventController {
         connectionToken: _localToken,
         capabilities: capabilityRelay | capabilityVoice,
       );
-      await MeshAdvertiser.start(_discoveryMetadata!);
+      try {
+        await MeshAdvertiser.start(_discoveryMetadata!);
+        _reportMetrics(const [
+          RelayMetric('advertising_started'),
+          RelayMetric('advertising_verified'),
+        ]);
+      } catch (error) {
+        _reportMetrics([
+          RelayMetric('advertising_failed', detail: error.toString()),
+        ]);
+        rethrow;
+      }
       if (_stopRequested) throw StateError('mesh start cancelled');
-      _reportMetrics([RelayMetric('advertising_started')]);
       _advertisingLivenessTimer = Timer.periodic(
         const Duration(seconds: 30),
         (_) => unawaited(_reassertAdvertising()),
@@ -258,17 +268,29 @@ class MeshEventController {
   ) async {
     while (_looping) {
       if (_scanPacer.isThrottled) {
-        _reportMetrics(const [RelayMetric('scan_throttle_deferred')]);
+        final deferredIdle = _scanPacer.nextIdleDuration();
+        _reportMetrics([
+          RelayMetric(
+            'scan_throttle_deferred',
+            value: deferredIdle.inMilliseconds,
+          ),
+          RelayMetric(
+            'scan_duty_cycle',
+            value: 0,
+            detail: 'throttled; idle=${deferredIdle.inMilliseconds}ms',
+          ),
+        ]);
         onMeshStatus?.call('idle');
-        if (!await _waitOrStop(_scanPacer.nextIdleDuration())) return;
+        if (!await _waitOrStop(deferredIdle)) return;
         continue;
       }
       MeshScanReport report;
+      final scanWindow = _scanPacer.nextScanWindow();
       try {
         onMeshStatus?.call('scanning');
         _scanPacer.recordScanStart();
         report = await MeshScanner.scanReport(
-          window: _scanPacer.nextScanWindow(),
+          window: scanWindow,
           expectedFingerprint: siteFingerprint,
           cancel: _scanCancel?.future,
           onSosAlert: _onCompactSosAlert,
@@ -280,7 +302,13 @@ class MeshEventController {
         continue;
       }
       if (!_looping) return;
-      _scanPacer.recordCycleResult(devicesSeen: report.devicesSeen);
+      _scanPacer.recordCycleResult(
+        devicesSeen: report.devicesSeen,
+        peerExpected:
+            report.serviceMatches > 0 ||
+            coordinator.peerCount > 0 ||
+            _connectingPeerIds.isNotEmpty,
+      );
       final peers = report.peers;
       _reportMetrics([
         RelayMetric('scan_devices_seen', value: report.devicesSeen),
@@ -295,6 +323,10 @@ class MeshEventController {
           value: report.fingerprintMismatches,
         ),
         RelayMetric('scan_peers_accepted', value: peers.length),
+        RelayMetric(
+          'scan_uuid_only_candidates',
+          value: report.uuidOnlyDeviceIds.length,
+        ),
         for (final peer in peers)
           RelayMetric(
             'peer_discovered',
@@ -420,8 +452,18 @@ class MeshEventController {
       } catch (_) {
         // A transient peer failure must not terminate the long-running scan.
       }
+      final idleWindow = _scanPacer.nextIdleDuration();
+      _reportMetrics([
+        RelayMetric(
+          'scan_duty_cycle',
+          value: _scanPacer.dutyCyclePercent(idleWindow: idleWindow),
+          detail:
+              'scan=${scanWindow.inMilliseconds}ms '
+              'idle=${idleWindow.inMilliseconds}ms',
+        ),
+      ]);
       onMeshStatus?.call('idle');
-      if (!await _waitOrStop(_scanPacer.nextIdleDuration())) return;
+      if (!await _waitOrStop(idleWindow)) return;
     }
   }
 
@@ -448,9 +490,14 @@ class MeshEventController {
     if (!_looping) return;
     try {
       await MeshAdvertiser.reassert();
+      _reportMetrics(const [
+        RelayMetric('advertising_reasserted'),
+        RelayMetric('advertising_verified'),
+      ]);
     } catch (error) {
       _reportMetrics([
-        RelayMetric('advertising_reassert_failed', detail: '$error'),
+        RelayMetric('advertising_reassert_failed', detail: error.toString()),
+        RelayMetric('advertising_failed', detail: error.toString()),
       ]);
     }
   }
@@ -510,7 +557,12 @@ class MeshEventController {
         deviceId,
         onLifecycle: (kind, {phase, detail, value}) {
           _reportMetrics([
-            RelayMetric(kind, peerId: deviceId, detail: detail ?? phase, value: value),
+            RelayMetric(
+              kind,
+              peerId: deviceId,
+              detail: detail ?? phase,
+              value: value,
+            ),
           ]);
         },
       );

@@ -24,49 +24,85 @@ abstract final class MeshAdvertiser {
   static int _advertisingGeneration = 0;
   static DiscoveryMetadata? _activeMetadata;
 
-  /// Whether [start] has been called more recently than [stop] for the
-  /// current advertising generation. This tracks *intent*, not a confirmed
-  /// platform state — `universal_ble` exposes no query for whether Android
-  /// is still actually broadcasting, which is exactly the failure mode this
-  /// is meant to catch (Bible audit Task 3): Android can silently stop
-  /// advertising (radio toggled, too many concurrent advertisers) while
-  /// this flag still reads true. [reassert] is the mitigation.
+  /// Whether [start] has completed successfully for the current advertising
+  /// generation. This is stronger than an intent flag: [start] verifies that
+  /// the platform reports [PeripheralAdvertisingState.advertising] before
+  /// exposing the metadata as active.
   static bool get isIntendedToAdvertise => _activeMetadata != null;
 
   static Future<void> start(DiscoveryMetadata metadata) async {
+    final previousMetadata = _activeMetadata;
     _advertisingGeneration++;
-    _activeMetadata = metadata;
-    await UniversalBlePeripheral.startAdvertising(
-      services: const [MeshGatt.service],
-      localName: 'MeshSetu',
-      manufacturerData: ManufacturerData(
-        MeshGatt.manufacturerId,
-        MeshGatt.manufacturerPayload(
-          MeshGatt.discoveryPayloadType,
-          metadata.encode(),
+    try {
+      await UniversalBlePeripheral.startAdvertising(
+        services: const [MeshGatt.service],
+        localName: 'MeshSetu',
+        manufacturerData: ManufacturerData(
+          MeshGatt.manufacturerId,
+          MeshGatt.manufacturerPayload(
+            MeshGatt.discoveryPayloadType,
+            metadata.encode(),
+          ),
         ),
-      ),
-      // Keep the 128-bit service UUID in the primary advertisement for the
-      // scan filter and move the 14-byte discovery record to the scan
-      // response so both packets stay within Android's 31-byte limit.
-      platformConfig: PeripheralPlatformConfig(
-        android: PeripheralAndroidOptions(
-          addManufacturerDataInScanResponse: true,
+        // Keep the 128-bit service UUID in the primary advertisement for the
+        // scan filter and move the 14-byte discovery record to the scan
+        // response so both packets stay within Android's 31-byte limit.
+        platformConfig: PeripheralPlatformConfig(
+          android: PeripheralAndroidOptions(
+            addManufacturerDataInScanResponse: true,
+          ),
         ),
-      ),
-    );
+      );
+      final state = await _waitForAdvertising();
+      if (state != PeripheralAdvertisingState.advertising) {
+        throw StateError('platform advertising state is ${state.name}');
+      }
+      _activeMetadata = metadata;
+    } catch (error) {
+      // A failed reassert should leave the last-known metadata available for
+      // a later watchdog retry; an initial failed start remains inactive.
+      _activeMetadata = previousMetadata;
+      throw StateError('BLE advertising verification failed: $error');
+    }
   }
 
-  /// Re-issues [start] with the last-known discovery metadata. Safe to call
-  /// periodically as a liveness re-assertion: `startAdvertising` is
-  /// idempotent from this app's perspective, and this is the only available
-  /// mitigation for Android silently dropping an active advertisement since
-  /// there is no platform callback for "advertising stopped unexpectedly".
-  /// A no-op if advertising was never started or has since been [stop]ped.
+  static Future<PeripheralAdvertisingState> _waitForAdvertising() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final state = await UniversalBlePeripheral.getAdvertisingState();
+      if (state == PeripheralAdvertisingState.advertising ||
+          state == PeripheralAdvertisingState.error) {
+        return state;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    return UniversalBlePeripheral.getAdvertisingState();
+  }
+
+  /// Re-issues [start] with the last-known discovery metadata. Native Android
+  /// rejects a second start while the previous advertiser is active, so the
+  /// reassert path explicitly reaches idle before starting again.
+  /// A no-op if advertising has never been verified or has since been stopped.
   static Future<void> reassert() async {
     final metadata = _activeMetadata;
     if (metadata == null) return;
+    await UniversalBlePeripheral.stopAdvertising();
+    await _waitForIdle();
     await start(metadata);
+  }
+
+  static Future<void> _waitForIdle() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final state = await UniversalBlePeripheral.getAdvertisingState();
+      if (state == PeripheralAdvertisingState.idle) return;
+      if (state == PeripheralAdvertisingState.error) {
+        throw StateError('platform advertising state is error while stopping');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    final state = await UniversalBlePeripheral.getAdvertisingState();
+    if (state != PeripheralAdvertisingState.idle) {
+      throw StateError('platform advertising did not stop before reassert');
+    }
   }
 
   static Future<void> stop() async {

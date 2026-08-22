@@ -10,6 +10,11 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
   ManufacturerData? manufacturerData;
   int startCount = 0;
   int stopCount = 0;
+  bool reportAdvertising = true;
+  PeripheralAdvertisingState state = PeripheralAdvertisingState.idle;
+
+  @override
+  Future<PeripheralAdvertisingState> getAdvertisingState() async => state;
 
   @override
   Future<void> startAdvertising({
@@ -20,6 +25,7 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
     PeripheralPlatformConfig? platformConfig,
   }) async {
     startCount++;
+    if (reportAdvertising) state = PeripheralAdvertisingState.advertising;
     config = platformConfig;
     this.manufacturerData = manufacturerData;
   }
@@ -27,6 +33,7 @@ class _AdvertisingPeripheral extends UniversalBlePeripheralUnsupported {
   @override
   Future<void> stopAdvertising() async {
     stopCount++;
+    state = PeripheralAdvertisingState.idle;
   }
 }
 
@@ -107,6 +114,29 @@ void main() {
     },
   );
 
+  test('no-op advertising is rejected by state verification', () async {
+    final peripheral = _AdvertisingPeripheral()..reportAdvertising = false;
+    UniversalBlePeripheral.setInstance(peripheral);
+    addTearDown(
+      () => UniversalBlePeripheral.setInstance(
+        UniversalBlePeripheralUnsupported(),
+      ),
+    );
+    await MeshAdvertiser.stop();
+
+    expect(
+      () => MeshAdvertiser.start(
+        const DiscoveryMetadata(
+          fingerprint: 1,
+          connectionToken: 2,
+          capabilities: 1,
+        ),
+      ),
+      throwsStateError,
+    );
+    expect(MeshAdvertiser.isIntendedToAdvertise, isFalse);
+  });
+
   test(
     'isIntendedToAdvertise reflects start/stop and reassert re-issues advertising',
     () async {
@@ -161,16 +191,19 @@ void main() {
       expect(result, isTrue);
     });
 
-    test('does not dial when losing the tie-break before the fallback delay', () {
-      final result = shouldDialNow(
-        localToken: 2,
-        remoteToken: 1,
-        waitingSinceMs: 1000,
-        nowMs: 1000 + const Duration(seconds: 5).inMilliseconds,
-        fallbackDelay: const Duration(seconds: 15),
-      );
-      expect(result, isFalse);
-    });
+    test(
+      'does not dial when losing the tie-break before the fallback delay',
+      () {
+        final result = shouldDialNow(
+          localToken: 2,
+          remoteToken: 1,
+          waitingSinceMs: 1000,
+          nowMs: 1000 + const Duration(seconds: 5).inMilliseconds,
+          fallbackDelay: const Duration(seconds: 15),
+        );
+        expect(result, isFalse);
+      },
+    );
 
     test('falls back to dialing once the wait meets the fallback delay', () {
       final result = shouldDialNow(

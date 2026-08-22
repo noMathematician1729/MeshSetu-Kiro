@@ -496,6 +496,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _meshStatus = 'stopped';
   String _lastMetric = 'none';
   String _lastConnection = 'none';
+  String _advertisingStatus = 'unknown';
   String _nearestBeacon = 'none';
   String _zone = 'unknown';
   String _sttStatus = 'not run';
@@ -565,6 +566,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           _scanStats.clear();
           _lastReceived = 'none';
           _lastConnection = 'none';
+          _advertisingStatus = 'unknown';
           _status = 'MeshSetu\nEvent mode is off';
         });
         unawaited(_bridgeClient?.dispose());
@@ -627,11 +629,22 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                   '$kind'
                   '${peer == null ? '' : ' ($peer)'}'
                   '${detail == null ? '' : ': $detail'}';
+              if (kind == 'advertising_started') {
+                _advertisingStatus = 'starting';
+              } else if (kind == 'advertising_verified' ||
+                  kind == 'advertising_reasserted') {
+                _advertisingStatus = 'verified';
+              } else if (kind == 'advertising_failed' ||
+                  kind == 'advertising_reassert_failed') {
+                _advertisingStatus =
+                    'failed${detail == null ? '' : ': $detail'}';
+              }
               if (kind == 'peer_connect_failed' ||
                   kind == 'peer_connected' ||
                   kind == 'peer_session_ready' ||
                   kind.startsWith('gatt_') ||
                   kind.startsWith('server_') ||
+                  kind.startsWith('advertising_') ||
                   kind == 'send_failed' ||
                   kind == 'control_send_failed' ||
                   kind == 'custody_ack_sent' ||
@@ -684,6 +697,11 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         'Peer connected to this phone as a GATT server',
       'gatt_server_disconnected' =>
         'Peer disconnected from this phone as a GATT server',
+      'advertising_started' => 'BLE advertising start requested',
+      'advertising_verified' => 'BLE advertising verified by platform',
+      'advertising_reasserted' => 'BLE advertising reasserted and verified',
+      'advertising_failed' => 'BLE advertising verification failed',
+      'advertising_reassert_failed' => 'BLE advertising reassert failed',
       'peer_connected' => 'Mesh peer connected',
       'peer_connect_failed' => 'Could not connect to mesh peer',
       'peer_session_ready' => 'Mesh peer session ready',
@@ -863,6 +881,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       _zone = 'unknown';
       _scanStats.clear();
       _lastConnection = 'none';
+      _advertisingStatus = 'unknown';
       _lastReceived = 'none';
       _receivedSosReporter = null;
       _receivedSosLocation = null;
@@ -1277,6 +1296,17 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
     final activeSiteId =
         ref.watch(activeSiteProvider).valueOrNull?.siteId ??
         MeshEventController.demoSiteId;
+    final meshConfiguration = MeshSiteConfiguration.forSite(activeSiteId);
+    final localFingerprint = MeshGatt.siteFingerprint(
+      meshConfiguration.siteId,
+      namespace: meshConfiguration.namespace,
+    );
+    final fingerprintLabel = localFingerprint
+        .toUnsigned(64)
+        .toRadixString(16)
+        .padLeft(16, '0');
+    final fingerprintMismatchCount =
+        _scanStats['scan_fingerprint_mismatches'] ?? 0;
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -1491,21 +1521,57 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                     : null,
               ),
               const SizedBox(height: 12),
-              Text('Mesh: $_meshStatus · peers: ${_peerDebug.length}'),
+              Text('Mesh: $_meshStatus · ready peers: ${_peerDebug.length}'),
+              Text('Advertising: $_advertisingStatus'),
+              Card(
+                color: fingerprintMismatchCount > 0
+                    ? Colors.amber.shade50
+                    : null,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Mesh identity',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text('Site ID: ${meshConfiguration.siteId}'),
+                      Text('Namespace: ${meshConfiguration.namespace}'),
+                      Text('Fingerprint: $fingerprintLabel'),
+                      if (fingerprintMismatchCount > 0)
+                        Text(
+                          'WARNING: $fingerprintMismatchCount nearby device(s) '
+                          'have a different site fingerprint.',
+                          style: TextStyle(color: Colors.amber.shade900),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const Text(
+                'Discovery funnel',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               Text(
-                'Scan: devices ${_scanStats['scan_devices_seen'] ?? 0} · '
+                'Seen ${_scanStats['scan_devices_seen'] ?? 0} · '
                 'service ${_scanStats['scan_service_matches'] ?? 0} · '
                 'metadata ${_scanStats['scan_manufacturer_matches'] ?? 0} · '
-                'accepted ${_scanStats['scan_peers_accepted'] ?? 0} · '
-                'malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
-                'fingerprint rejected '
-                '${_scanStats['scan_fingerprint_mismatches'] ?? 0}',
+                'UUID-only ${_scanStats['scan_uuid_only_candidates'] ?? 0} · '
+                'accepted ${_scanStats['scan_peers_accepted'] ?? 0}',
+              ),
+              Text(
+                'Malformed ${_scanStats['scan_malformed_metadata'] ?? 0} · '
+                'fingerprint rejected $fingerprintMismatchCount · '
+                'duty ${_scanStats['scan_duty_cycle'] ?? 0}%',
               ),
               Text('Nearest beacon: $_nearestBeacon'),
               Text('Zone: $_zone'),
               Text('Last metric: $_lastMetric'),
               Text('Latest link event: $_lastConnection'),
               Text('Last object: $_lastReceived'),
+              if (_peerDebug.isEmpty && _eventModeActive)
+                const Text('No ready GATT peers yet.'),
               if (_peerDebug.isNotEmpty) ...[
                 const SizedBox(height: 4),
                 for (final peer in _peerDebug)
