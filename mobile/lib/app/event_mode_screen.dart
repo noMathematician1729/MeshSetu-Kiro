@@ -25,6 +25,7 @@ import '../feature/sos/sos_repository.dart';
 import '../feature/sos/sos_screen.dart';
 import '../feature/sos/incident_detail_screen.dart';
 import '../feature/voice/voice_recorder.dart';
+import 'emergency_gestures.dart';
 import 'mesh_bridge.dart';
 import 'mesh_bridge_client.dart';
 import 'mesh_event_controller.dart';
@@ -502,6 +503,9 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   String _sttStatus = 'not run';
   bool _sttTesting = false;
   bool _sosPacketSending = false;
+  bool _gestureConfirmationShowing = false;
+  bool _gestureServiceEnabled = false;
+  StreamSubscription<SosEmergencyType>? _typedSosGestureSubscription;
   List<Map<String, dynamic>> _peerDebug = const [];
   final Map<String, int> _scanStats = {};
   String _lastReceived = 'none';
@@ -532,8 +536,57 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
       text: ref.read(gatewayDemoKeyProvider),
     );
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
+    EmergencyGestureSettings.startListeningForTypedSosGestures();
+    _typedSosGestureSubscription = EmergencyGestureSettings.typedSosGestures
+        .listen((emergencyType) {
+          unawaited(_confirmGestureSosPacket(emergencyType));
+        });
+    unawaited(_consumePendingTypedSosGesture());
     unawaited(EventModeLauncher.initialize());
+    unawaited(_refreshGestureServiceState());
     unawaited(_restoreServiceState());
+  }
+
+  Future<void> _consumePendingTypedSosGesture() async {
+    try {
+      final emergencyType =
+          await EmergencyGestureSettings.takePendingTypedSosGesture();
+      if (emergencyType != null) await _confirmGestureSosPacket(emergencyType);
+    } catch (_) {
+      // Native gesture support is Android-only; direct red SOS remains usable.
+    }
+  }
+
+  Future<void> _confirmGestureSosPacket(SosEmergencyType emergencyType) async {
+    if (!mounted || _gestureConfirmationShowing || _sosPacketSending) return;
+    _gestureConfirmationShowing = true;
+    try {
+      setState(() {
+        _status =
+            'MeshSetu\n${emergencyType.label} gesture detected\nConfirm or cancel the SOS countdown';
+      });
+      // This is intentionally the typed red-SOS confirmation path. It never
+      // invokes the separate CEAL identity-SOS route.
+      await _confirmAndSendSosPacket(emergencyType);
+    } finally {
+      _gestureConfirmationShowing = false;
+    }
+  }
+
+  Future<void> _refreshGestureServiceState() async {
+    try {
+      final enabled = await EmergencyGestureSettings.isEnabled();
+      if (mounted) setState(() => _gestureServiceEnabled = enabled);
+    } catch (_) {
+      // Gesture enrollment is Android-only; the typed SOS UI remains usable.
+    }
+  }
+
+  Future<void> _openGestureSettings() async {
+    await EmergencyGestureSettings.openSettings();
+    // Settings returns asynchronously; refresh immediately and again when the
+    // user returns to this screen in a later build/session.
+    await _refreshGestureServiceState();
   }
 
   Future<void> _restoreServiceState() async {
@@ -1248,6 +1301,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
   @override
   void dispose() {
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    unawaited(_typedSosGestureSubscription?.cancel());
     unawaited(_bridgeClient?.dispose());
     unawaited(_sttRecorder.dispose());
     _adminServerController.dispose();
@@ -1406,6 +1460,48 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
                 style: FilledButton.styleFrom(backgroundColor: Colors.red),
                 label: Text(
                   _sosPacketSending ? 'Queuing SOS packet…' : 'Send SOS packet',
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                color: _gestureServiceEnabled ? Colors.green.shade50 : null,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Background typed SOS gestures',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        '↑ ↑ General · ↓ ↓ ↓ Fire · ↑ ↓ ↑ Crime · ↓ ↑ ↓ Kidnap · ↑ ↑ ↑ Medical · ↓ ↓ ↓ ↓ Natural Disaster. Pause briefly after each sequence. '
+                        'These use the red typed SOS pipeline only—not the CEAL identity SOS.',
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _gestureServiceEnabled
+                            ? 'Enabled. Works after the app UI closes while Event Mode is active.'
+                            : 'Disabled. Enable the MeshSetu accessibility service to use gestures.',
+                        style: TextStyle(
+                          color: _gestureServiceEnabled
+                              ? Colors.green.shade800
+                              : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _openGestureSettings,
+                        icon: const Icon(Icons.settings_accessibility),
+                        label: Text(
+                          _gestureServiceEnabled
+                              ? 'Review gesture permission'
+                              : 'Enable emergency gestures',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
