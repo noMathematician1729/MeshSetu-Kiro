@@ -70,7 +70,7 @@ Future<void> _showSosNotification({
           ticker: 'SOS received',
           category: AndroidNotificationCategory.alarm,
           visibility: NotificationVisibility.public,
-          onlyAlertOnce: false,
+          onlyAlertOnce: true,
         ),
       ),
       payload: NotificationRouter.incidentPayload(
@@ -95,6 +95,9 @@ Future<void> _showCompactSosNotification(MeshSosAdvertisement alert) async {
             availability:
                 'Offline-ready: attempting verified detail lookup when available.',
           ),
+    payload: alert.isTest
+        ? null
+        : SosIncidentNavigator.payloadForCompactAlert(alert),
   );
 }
 
@@ -432,7 +435,9 @@ class _MeshEventTaskHandler extends TaskHandler {
   }
 
   void _announceCompactSos(MeshSosAdvertisement alert) {
-    _compactAlertKeys.add(alert.dedupeKey);
+    // BLE advertisements repeat. A single compact packet must produce one
+    // notification and one control-room lookup for this Event Mode session.
+    if (!_compactAlertKeys.add(alert.dedupeKey)) return;
     unawaited(_showCompactSosNotification(alert));
     // Forward to the UI isolate so MeshBridgeClient can relay to admin backend.
     if (!alert.isTest) {
@@ -468,7 +473,7 @@ class _MeshEventTaskHandler extends TaskHandler {
     }
     final compactKey =
         '${MeshGatt.siteFingerprint(received.envelope.siteId, namespace: MeshSiteConfiguration.forSite(received.envelope.siteId).namespace) & 0xffffffff}:${received.envelope.originEphemeralId & 0xffffffff}:${received.envelope.objectId & 0xffff}';
-    final updatesCompactAlert = _compactAlertKeys.remove(compactKey);
+    final updatesCompactAlert = _compactAlertKeys.contains(compactKey);
     await _showSosNotification(
       received: received,
       detail: detail,
@@ -637,7 +642,8 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
           // Preserve an error message already set by the 'error' case so
           // the user can read why event mode stopped instead of seeing a
           // generic "Event mode is off".
-          if (_status == 'MeshSetu\nEvent mode active\nBLE relay service running' ||
+          if (_status ==
+                  'MeshSetu\nEvent mode active\nBLE relay service running' ||
               _status == 'MeshSetu\nStarting BLE relay service' ||
               _status == 'MeshSetu\nEvent mode is off' ||
               !_status.contains('\n')) {
@@ -880,6 +886,7 @@ class _EventModeScreenState extends ConsumerState<EventModeScreen> {
         alert,
         availability: availability,
       ),
+      payload: SosIncidentNavigator.payloadForCompactAlert(alert),
     );
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../core/ble/sos_advertisement.dart';
+import 'sos_incident_navigator.dart';
 
 /// Shared presentation for emergency alerts.
 ///
@@ -36,6 +37,7 @@ abstract final class SosAlertNotifications {
     void Function(String? payload)? onTapPayload,
   }) async {
     if (onTapPayload != null) _onTapPayload = onTapPayload;
+    _onTapPayload ??= SosIncidentNavigator.openPayload;
     if (_initialized) {
       if (onTapPayload != null) await _replayLaunchPayload();
       return;
@@ -110,7 +112,7 @@ abstract final class SosAlertNotifications {
             ticker: 'SOS received',
             category: AndroidNotificationCategory.alarm,
             visibility: NotificationVisibility.public,
-            onlyAlertOnce: false,
+            onlyAlertOnce: true,
             styleInformation: BigTextStyleInformation(body),
           ),
         ),

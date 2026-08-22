@@ -6,6 +6,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app/event_mode_screen.dart';
 import 'app/notification_router.dart';
+import 'app/sos_alert_notifications.dart';
 import 'app/sos_incident_navigator.dart';
 import 'core/ble/mesh_gatt.dart';
 import 'core/ble/permission_gate.dart';
@@ -24,6 +25,11 @@ void main() {
   MeshGatt.validateCompanyId();
   FlutterForegroundTask.initCommunicationPort();
   unawaited(NotificationRouter.configure(FlutterLocalNotificationsPlugin()));
+  unawaited(
+    SosAlertNotifications.ensureInitialized(
+      onTapPayload: SosIncidentNavigator.openPayload,
+    ),
+  );
   runApp(const ProviderScope(child: MeshSetuApp()));
 }
 
